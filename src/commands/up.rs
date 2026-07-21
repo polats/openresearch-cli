@@ -3473,10 +3473,18 @@ fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
 
 /// Every non-/api non-/opencode path: exact asset if it exists, index.html
 /// otherwise (SPA client routing), friendly page when the UI isn't built.
-async fn spa(uri: Uri) -> Response {
+async fn spa(uri: Uri, headers: axum::http::HeaderMap) -> Response {
     let path = uri.path().trim_start_matches('/');
     if path.starts_with("api/") || path == "api" {
         return not_found("route").into_response();
+    }
+    // Runtime asset loads from an embedded playable use root-absolute paths
+    // (`/assets/...` string literals in game code, which no build-time `base`
+    // can rewrite). The requesting document's URL rides in Referer — resolve
+    // such misses against the referring experiment's play build before the
+    // dashboard SPA swallows them.
+    if let Some(resp) = play_referer_asset(&headers, uri.path()).await {
+        return resp;
     }
     let candidate = if path.is_empty() { "index.html" } else { path };
     if let Some(file) = UiDist::get(candidate) {
@@ -3486,4 +3494,49 @@ async fn spa(uri: Uri) -> Response {
         Some(file) => asset_response("index.html", file),
         None => Html(NOT_BUILT_PAGE).into_response(),
     }
+}
+
+/// Serve `path` from the play build of the experiment named in the request's
+/// `/play/<id>/…` Referer, if that file exists there. None = not a play-page
+/// request or no such file — fall through to the normal SPA handling.
+async fn play_referer_asset(
+    headers: &axum::http::HeaderMap,
+    path: &str,
+) -> Option<Response> {
+    let referer = headers.get(header::REFERER)?.to_str().ok()?;
+    let exp_id = referer
+        .split("/play/")
+        .nth(1)?
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let rel = path.trim_start_matches('/').to_string();
+    if rel.is_empty() {
+        return None;
+    }
+    tokio::task::spawn_blocking(move || -> Option<Response> {
+        let store = Store::open().ok()?;
+        let exp = store.get_local_experiment(&exp_id).ok()??;
+        let project = store.get_local_project(&exp.project_id).ok()??;
+        let root = std::fs::canonicalize(play_serve_dir(&project, &exp.id)).ok()?;
+        let full = std::fs::canonicalize(root.join(&rel)).ok()?;
+        if !full.starts_with(&root) || full.is_dir() {
+            return None;
+        }
+        let bytes = std::fs::read(&full).ok()?;
+        let content_type = local::files::content_type_for_path(&full.to_string_lossy());
+        Some(
+            (
+                [
+                    (header::CONTENT_TYPE, content_type.to_string()),
+                    (header::CACHE_CONTROL, "public, max-age=3600".to_string()),
+                ],
+                bytes,
+            )
+                .into_response(),
+        )
+    })
+    .await
+    .ok()?
 }
