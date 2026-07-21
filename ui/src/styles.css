@@ -4386,3 +4386,40 @@ a.files-pill:hover {
 .artifact-file:hover {
   color: var(--text);
 }
+
+/* --- play view (embedded playable) ---------------------------------------- */
+.play-view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--base);
+  z-index: 20;
+}
+.play-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.play-entry-input {
+  width: 280px;
+}
+.play-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+.node-eyebrow-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.node-eyebrow-left .node-gh {
+  padding: 1px;
+}

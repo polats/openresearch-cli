@@ -71,6 +71,9 @@ pub struct LocalExperiment {
     pub verdict: Option<String>,
     pub verdict_notes: Option<String>,
     pub verdict_at: Option<i64>,
+    /// The playable's entry page under /play/<id>/ (path + optional query,
+    /// e.g. `gambit-slots.html?x=1`). None = the build's index.html.
+    pub play_entry: Option<String>,
 }
 
 impl LocalExperiment {
@@ -91,6 +94,7 @@ impl LocalExperiment {
             verdict: row.get(11)?,
             verdict_notes: row.get(12)?,
             verdict_at: row.get(13)?,
+            play_entry: row.get(14)?,
         })
     }
 

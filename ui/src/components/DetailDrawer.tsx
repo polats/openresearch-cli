@@ -1,4 +1,4 @@
-import { ChevronDown, CircleStop, NotebookPen, RotateCw } from "lucide-react";
+import { ChevronDown, CircleStop, ExternalLink, NotebookPen, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   cancelRun,
@@ -6,9 +6,12 @@ import {
   getWorkingTree,
   listExperimentCommits,
   listRunArtifacts,
+  playUrl,
   runArtifactUrl,
+  setExperimentPlayEntry,
   setExperimentVerdict,
   setRunVerdict,
+  startPlayBuild,
   timeAgo,
   type CommitInfo,
   type DiffPayload,
@@ -47,7 +50,66 @@ function DiffView({ state }: { state: DiffState | undefined }) {
   return <GitDiff diff={state.payload.diff} />;
 }
 
-export type ExperimentView = "terminal" | "changes";
+export type ExperimentView = "terminal" | "changes" | "play";
+
+/** The playable, embedded like any other experiment tab. Opening it kicks
+ *  the (idempotent) build; the iframe's holding page self-refreshes until
+ *  the build lands, so no client-side polling is needed. */
+function PlayView({ experiment }: { experiment: Experiment }) {
+  const [entry, setEntry] = useState(experiment.playEntry ?? "");
+  const [reloadKey, setReloadKey] = useState(0);
+  useEffect(() => setEntry(experiment.playEntry ?? ""), [experiment.playEntry]);
+  // Kick the build on open and on manual rebuild; reload the frame either way.
+  useEffect(() => {
+    startPlayBuild(experiment.id).catch((err) => console.error("play-build:", err));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [experiment.id, reloadKey]);
+
+  const src = playUrl({ id: experiment.id, playEntry: experiment.playEntry });
+  const saveEntry = () => {
+    const next = entry.trim() || null;
+    if ((experiment.playEntry ?? null) === next) return;
+    setExperimentPlayEntry(experiment.id, next)
+      .then(() => setReloadKey((k) => k + 1))
+      .catch((err) => console.error("play-entry:", err));
+  };
+  return (
+    <div className="play-view">
+      <div className="play-bar">
+        <span className="ctl-label">Entry</span>
+        <input
+          className="input sm play-entry-input"
+          placeholder="index.html (e.g. gambit-slots.html?x=1)"
+          value={entry}
+          onChange={(e) => setEntry(e.target.value)}
+          onBlur={saveEntry}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          }}
+        />
+        <span style={{ flex: 1 }} />
+        <button
+          className="btn sm"
+          title="Rebuild from the branch head and reload"
+          onClick={() => setReloadKey((k) => k + 1)}
+        >
+          <RotateCw size={12} /> Rebuild
+        </button>
+        <a
+          className="icon-btn"
+          href={src}
+          target="_blank"
+          rel="noreferrer"
+          title="Open in a browser tab"
+          aria-label="Open in a browser tab"
+        >
+          <ExternalLink size={14} />
+        </a>
+      </div>
+      <iframe key={reloadKey} className="play-frame" src={src} title="Playable build" />
+    </div>
+  );
+}
 
 const VERDICTS: Verdict[] = ["keep", "kill", "iterate"];
 
@@ -253,6 +315,8 @@ export function DetailDrawer({
         selectedRunId={selectedRunId}
         onSelectRun={onSelectRun}
       />
+    ) : view === "play" ? (
+      <PlayView experiment={experiment} />
     ) : (
       <ChangesView experiment={experiment} project={project} />
     );

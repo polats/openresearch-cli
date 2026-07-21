@@ -31,6 +31,8 @@ export interface Experiment {
   verdict?: Verdict | null;
   verdictNotes?: string | null;
   verdictAt?: number | null;
+  /** Entry page under /play/<id>/ (path + optional query); null = index.html. */
+  playEntry?: string | null;
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
@@ -255,6 +257,15 @@ export interface PlayBuild {
 /** Build (or reuse) the experiment's playable; idempotent. */
 export const startPlayBuild = (expId: string) =>
   post<PlayBuild>(`/api/experiments/${expId}/play-build`);
+
+/** The playable URL for an experiment (its entry page when one is set). */
+export const playUrl = (exp: Pick<Experiment, "id" | "playEntry">) =>
+  `/play/${exp.id}/${exp.playEntry ?? ""}`;
+
+export const setExperimentPlayEntry = (expId: string, playEntry: string | null) =>
+  patch<{ experiment: Experiment }>(`/api/experiments/${expId}`, { playEntry }).then(
+    (r) => r.experiment,
+  );
 
 export interface LogChunk {
   dataBase64: string;

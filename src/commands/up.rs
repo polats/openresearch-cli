@@ -215,6 +215,10 @@ fn router(state: AppState) -> Router {
         .route("/api/runs/{id}/artifacts", get(list_run_artifacts))
         .route("/api/runs/{id}/artifacts/file", get(serve_run_artifact))
         .route("/api/experiments/{id}/play-build", post(play_build))
+        .route(
+            "/api/experiments/{id}",
+            axum::routing::patch(update_experiment),
+        )
         .route("/play/{id}", get(play_root))
         .route("/play/{id}/", get(play_index))
         .route("/play/{id}/{*path}", get(play_file))
@@ -1087,6 +1091,58 @@ async fn play_build(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     Ok(Json(json!({ "state": "building", "runId": run_id, "url": url })))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateExperimentReq {
+    /// Present-vs-absent: absent = leave, null/empty = clear.
+    #[serde(default, deserialize_with = "double_option")]
+    play_entry: Option<Option<String>>,
+}
+
+/// A play entry is a build-relative path plus optional query
+/// (`gambit-slots.html?x=1`) — never absolute, never traversing.
+fn validate_play_entry(entry: &str) -> std::result::Result<(), ApiError> {
+    let path = entry.split(['?', '#']).next().unwrap_or("");
+    let p = std::path::Path::new(path);
+    if entry.len() > 512
+        || path.is_empty()
+        || p.is_absolute()
+        || p.components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(bad_request(
+            "playEntry must be a relative path like game.html or game.html?screen=waves",
+        ));
+    }
+    Ok(())
+}
+
+async fn update_experiment(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateExperimentReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    let mut exp = store
+        .get_local_experiment(&id)?
+        .ok_or_else(|| not_found("experiment"))?;
+    if let Some(entry) = req.play_entry {
+        let entry = entry
+            .map(|e| e.trim().trim_start_matches('/').to_string())
+            .filter(|e| !e.is_empty());
+        if let Some(e) = &entry {
+            validate_play_entry(e)?;
+        }
+        exp.play_entry = entry;
+        store.update_local_experiment(&exp)?;
+    }
+    let exp = store
+        .get_local_experiment(&id)?
+        .ok_or_else(|| not_found("experiment"))?;
+    Ok(Json(json!({ "experiment": exp })))
+}
+
 async fn play_root(Path(id): Path<String>) -> Response {
     axum::response::Redirect::permanent(&format!("/play/{id}/")).into_response()
 }
@@ -1168,6 +1224,20 @@ async fn serve_play_path(_state: AppState, exp_id: String, rel: String) -> Respo
                 "none"
             };
             return Ok(play_holding_page(exp.display_name(), state));
+        }
+
+        // The stable root URL lands on the experiment's chosen entry page
+        // (repos like gambit-arena have no index.html — game.html and harness
+        // pages are the real entries).
+        if rel.is_empty() {
+            if let Some(entry) = exp.play_entry.as_deref().map(str::trim).filter(|e| !e.is_empty())
+            {
+                return Ok(axum::response::Redirect::temporary(&format!(
+                    "/play/{}/{}",
+                    exp.id, entry
+                ))
+                .into_response());
+            }
         }
 
         let root = std::fs::canonicalize(&dir)

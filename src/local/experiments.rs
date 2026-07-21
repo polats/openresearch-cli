@@ -128,6 +128,7 @@ pub fn create_experiment(
         verdict: None,
         verdict_notes: None,
         verdict_at: None,
+        play_entry: None,
         created_at: now,
         updated_at: now,
     };
@@ -171,6 +172,7 @@ mod tests {
             verdict: None,
             verdict_notes: None,
             verdict_at: None,
+            play_entry: None,
             created_at: 0,
             updated_at: 0,
         }

@@ -10,15 +10,8 @@ import {
 } from "@xyflow/react";
 import { FolderTree, GitBranch, Play, Terminal } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
-import { memo, useMemo, useState } from "react";
-import {
-  githubBranchUrl,
-  startPlayBuild,
-  timeAgo,
-  type Experiment,
-  type Project,
-  type Run,
-} from "../api";
+import { memo, useMemo } from "react";
+import { githubBranchUrl, timeAgo, type Experiment, type Project, type Run } from "../api";
 import type { ExperimentView } from "./DetailDrawer";
 import { StatusBadge } from "./StatusBadge";
 
@@ -78,33 +71,6 @@ function runSquareClass(status: string): string {
   return "other";
 }
 
-/// Play button: kicks the build (idempotent server-side) and opens the
-/// playable URL — the holding page auto-refreshes while the build runs.
-function PlayButton({ expId }: { expId: string }) {
-  const [busy, setBusy] = useState(false);
-  return (
-    <button
-      className="node-action"
-      title="Build & play this experiment"
-      disabled={busy}
-      onClick={() => {
-        setBusy(true);
-        // On failure, still open the play URL — its holding page explains
-        // the state (no build / failed) better than a blocking alert would.
-        startPlayBuild(expId)
-          .catch((err) => console.error("play-build:", err))
-          .finally(() => {
-            window.open(`/play/${expId}/`, "_blank");
-            setBusy(false);
-          });
-      }}
-    >
-      <Play size={13} />
-      Play
-    </button>
-  );
-}
-
 const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   const { exp, latestRun, runs, isBaseline, githubOwner, githubRepo, onOpenView, onOpenCodeBranch } = data;
   const status = latestRun?.status;
@@ -115,7 +81,20 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
     <div className={`exp-node ${live ? "live" : ""}`}>
       <Handle type="target" position={Position.Top} />
       <div className="node-eyebrow">
-        <span>{kind}</span>
+        <span className="node-eyebrow-left">
+          {kind}
+          <a
+            className="icon-btn node-gh"
+            title={`Open ${exp.branchName} on GitHub`}
+            aria-label={`Open ${exp.branchName} on GitHub`}
+            href={githubBranchUrl(githubOwner, githubRepo, exp.branchName)}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <GitHubMark size={12} />
+          </a>
+        </span>
         <span style={{ display: "inline-flex", gap: 6 }}>
           {exp.verdict && <StatusBadge status={exp.verdict} />}
           <StatusBadge status={status ?? "idle"} />
@@ -143,7 +122,14 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
       </div>
       {/* Direct view shortcuts — changes and code always, logs once there's a run. */}
       <div className="node-actions" onClick={(e) => e.stopPropagation()}>
-        <PlayButton expId={exp.id} />
+        <button
+          className="node-action"
+          title="Build & play this experiment"
+          onClick={() => onOpenView(exp.id, "play")}
+        >
+          <Play size={13} />
+          Play
+        </button>
         <button
           className="node-action"
           title="Open changes"
@@ -170,18 +156,6 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           <FolderTree size={13} />
           Code
         </button>
-        {/* Icon-only: labeled actions + the link overflow the card's fixed width. */}
-        <a
-          className="node-action node-action-ext"
-          title={`Open ${exp.branchName} on GitHub`}
-          aria-label={`Open ${exp.branchName} on GitHub`}
-          href={githubBranchUrl(githubOwner, githubRepo, exp.branchName)}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <GitHubMark size={13} />
-        </a>
       </div>
       <Handle type="source" position={Position.Bottom} />
     </div>

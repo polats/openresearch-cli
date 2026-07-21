@@ -326,6 +326,7 @@ impl Store {
             "ALTER TABLE local_experiments ADD COLUMN verdict_at INTEGER",
             "ALTER TABLE local_projects ADD COLUMN play_command TEXT",
             "ALTER TABLE local_projects ADD COLUMN play_dir TEXT",
+            "ALTER TABLE local_experiments ADD COLUMN play_entry TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -712,11 +713,11 @@ impl Store {
 
     pub fn create_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
+            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"),
             params![
                 e.id, e.project_id, e.parent_experiment_id, e.slug, e.branch_name,
                 e.title, e.description, e.run_command, e.agent_status, e.created_at, e.updated_at,
-                e.verdict, e.verdict_notes, e.verdict_at,
+                e.verdict, e.verdict_notes, e.verdict_at, e.play_entry,
             ],
         )?;
         Ok(())
@@ -746,11 +747,13 @@ impl Store {
     pub fn update_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
             "UPDATE local_experiments SET parent_experiment_id = ?2, slug = ?3, branch_name = ?4,
-                    title = ?5, description = ?6, run_command = ?7, agent_status = ?8, updated_at = ?9
+                    title = ?5, description = ?6, run_command = ?7, agent_status = ?8, updated_at = ?9,
+                    play_entry = ?10
              WHERE id = ?1",
             params![
                 e.id, e.parent_experiment_id, e.slug, e.branch_name,
                 e.title, e.description, e.run_command, e.agent_status, now_ms(),
+                e.play_entry,
             ],
         )?;
         Ok(())
@@ -1043,7 +1046,7 @@ const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, baseline_
 
 const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branch_name, \
                                title, description, run_command, agent_status, created_at, updated_at, \
-                               verdict, verdict_notes, verdict_at";
+                               verdict, verdict_notes, verdict_at, play_entry";
 
 fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlite::Error> {
     Ok(StoredRun {
@@ -1166,6 +1169,7 @@ mod tests {
             verdict: None,
             verdict_notes: None,
             verdict_at: None,
+            play_entry: None,
         };
         store.create_local_experiment(&exp).unwrap();
         store

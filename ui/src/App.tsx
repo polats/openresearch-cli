@@ -4,6 +4,7 @@ import {
   GitBranch,
   Maximize2,
   Minimize2,
+  Play,
   ScrollText,
   Terminal,
   X,
@@ -574,6 +575,8 @@ export default function App() {
                     icon={
                       t.view === "terminal" ? (
                         <Terminal size={12} style={{ flexShrink: 0 }} />
+                      ) : t.view === "play" ? (
+                        <Play size={12} style={{ flexShrink: 0 }} />
                       ) : (
                         <GitBranch size={12} style={{ flexShrink: 0 }} />
                       )
