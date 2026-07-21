@@ -207,6 +207,7 @@ fn router(state: AppState) -> Router {
         .route("/api/papers/search", get(search_papers_api))
         .route("/api/papers/resolve", get(resolve_paper_api))
         .route("/api/instances", get(list_instances))
+        .route("/api/instances/reconcile", post(reconcile_instances))
         .route("/api/experiments/{id}/run", post(run_experiment))
         .route("/api/runs/{id}/cancel", post(cancel_run))
         .route("/api/runs/{id}/log", get(run_log))
@@ -347,6 +348,20 @@ struct ApiRun {
     ended_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i64>,
+    /// Watcher (supervisor process) state for a live run: "alive" when its
+    /// heartbeat is fresh, "lost" when it stopped beating (reboot, kill).
+    /// Absent on terminal runs — nothing should be watching those.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    watcher: Option<&'static str>,
+}
+
+/// A watcher heartbeat this old means the supervisor is gone (it stamps every
+/// 5s poll; three misses is decisive).
+const WATCHER_FRESH_MS: i64 = 15_000;
+
+fn watcher_alive(run: &StoredRun) -> bool {
+    run.supervisor_heartbeat_ms
+        .is_some_and(|t| now_ms() - t < WATCHER_FRESH_MS)
 }
 
 impl From<&StoredRun> for ApiRun {
@@ -364,6 +379,13 @@ impl From<&StoredRun> for ApiRun {
             updated_at: run.updated_at,
             ended_at: run.ended_at,
             exit_code: run.exit_code,
+            watcher: if is_terminal(&run.status) {
+                None
+            } else if watcher_alive(run) {
+                Some("alive")
+            } else {
+                Some("lost")
+            },
         }
     }
 }
@@ -677,6 +699,25 @@ async fn list_instances() -> ApiResult {
         instances.push(value);
     }
     Ok(Json(json!({ "instances": instances })))
+}
+
+/// Re-attach watchers: for every non-terminal run whose supervisor heartbeat
+/// is stale or absent, respawn `orx supervise <id>`. Supervision is
+/// restart-idempotent — the fresh watcher re-inspects the backend and settles
+/// the row (a vanished local process becomes `failed`, a finished HF job
+/// `done`, a still-running job resumes live tailing). Runs whose watcher is
+/// alive are left alone, so the button is safe to mash.
+async fn reconcile_instances() -> ApiResult {
+    let store = Store::open()?;
+    let mut reattached: Vec<String> = Vec::new();
+    for run in store.list_runs(INSTANCES_LIMIT)? {
+        if is_terminal(&run.status) || watcher_alive(&run) {
+            continue;
+        }
+        crate::commands::exp::spawn_detached_supervise(&run.id)?;
+        reattached.push(run.id);
+    }
+    Ok(Json(json!({ "reattached": reattached })))
 }
 
 #[derive(Deserialize)]

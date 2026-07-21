@@ -43,6 +43,20 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     let stored = store
         .get_run(&run_id)?
         .ok_or_else(|| anyhow!("Run {} not found in the local store.", run_id))?;
+    // Watcher heartbeat: the Instances page reads its freshness to tell a
+    // live watcher from one lost to a reboot or kill. One task here covers
+    // every backend; it stops with the process, which is exactly the signal
+    // it exists to provide.
+    {
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            let Ok(store) = Store::open() else { return };
+            loop {
+                let _ = store.touch_supervisor(&run_id);
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        });
+    }
     // Local runs never touch client.rs; credentials load only on the server path.
     let local = store.get_local_experiment(&stored.experiment_id)?.is_some();
     let creds = if local {

@@ -44,6 +44,10 @@ export interface Run {
   updatedAt: number;
   endedAt?: number | null;
   exitCode?: number | null;
+  /** Watcher (supervisor process) state, present only on live runs:
+   *  "alive" = its heartbeat is fresh; "lost" = it stopped beating
+   *  (reboot, kill) and the status can no longer update on its own. */
+  watcher?: "alive" | "lost";
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -154,6 +158,11 @@ export interface Instance extends Run {
 
 export const listInstances = () =>
   get<{ instances: Instance[] }>("/api/instances").then((r) => r.instances);
+
+/** Respawn `orx supervise` for every live run whose watcher stopped beating;
+ *  returns the ids re-attached. No-op (empty list) when all watchers are alive. */
+export const reconcileInstances = () =>
+  post<{ reattached: string[] }>("/api/instances/reconcile").then((r) => r.reattached);
 
 export interface NewExperiment {
   /** Omit on an empty project to create the baseline root; once a root

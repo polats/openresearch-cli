@@ -7,6 +7,7 @@ import {
   HardDrive,
   Info,
   Plus,
+  RadioTower,
   RefreshCw,
   Server,
   SquareTerminal,
@@ -30,6 +31,7 @@ import {
   getSlurmSettings,
   getSshHosts,
   listInstances,
+  reconcileInstances,
   setComputeDefault,
   provisionModal,
   removeGitToken,
@@ -1970,8 +1972,25 @@ function runtimeLabel(inst: Instance): string {
   return "—";
 }
 
-/** One section's table: backend (logo + flavor), project, status, started, runtime. */
-function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; emptyLabel: string }) {
+/** The watcher (supervisor) badge for a live run. A lost watcher means the
+ *  status can no longer update on its own — Reattach watchers fixes it. */
+function WatcherBadge({ watcher }: { watcher?: "alive" | "lost" }) {
+  if (watcher === "alive") return <StatusBadge status="running" label="Watching" />;
+  if (watcher === "lost") return <StatusBadge status="failed" label="Lost" />;
+  return <>—</>;
+}
+
+/** One section's table: backend (logo + flavor), project, status, started,
+ *  runtime — plus the watcher column on the Running section. */
+function InstancesTable({
+  instances,
+  emptyLabel,
+  showWatcher,
+}: {
+  instances: Instance[];
+  emptyLabel: string;
+  showWatcher?: boolean;
+}) {
   if (instances.length === 0) {
     return <p className="instances-empty">{emptyLabel}</p>;
   }
@@ -1983,6 +2002,7 @@ function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; empt
             <th>Backend</th>
             <th>Project</th>
             <th>Status</th>
+            {showWatcher && <th>Watcher</th>}
             <th>Started</th>
             <th>Runtime</th>
           </tr>
@@ -2015,6 +2035,11 @@ function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; empt
                 <td>
                   <StatusBadge status={inst.status} />
                 </td>
+                {showWatcher && (
+                  <td>
+                    <WatcherBadge watcher={inst.watcher} />
+                  </td>
+                )}
                 <td>{timeAgo(inst.createdAt)}</td>
                 <td>{runtimeLabel(inst)}</td>
               </tr>
@@ -2030,6 +2055,8 @@ function InstancesTab() {
   const [instances, setInstances] = useState<Instance[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [reattaching, setReattaching] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   // Re-render every 30s so live rows' Runtime keeps counting (client-side
   // only — the minute-level display doesn't warrant a refetch).
@@ -2057,6 +2084,26 @@ function InstancesTab() {
   };
   useEffect(() => load(), []);
 
+  // Respawn watchers for live runs whose supervisor died (reboot, kill) —
+  // they re-inspect the backend and settle stuck statuses. The list is
+  // refetched right after so fresh heartbeats show up.
+  const reattach = () => {
+    setReattaching(true);
+    setNotice(null);
+    reconcileInstances()
+      .then((ids) => {
+        setNotice(
+          ids.length === 0
+            ? "All watchers are alive — nothing to reattach."
+            : `Reattached ${ids.length} watcher${ids.length === 1 ? "" : "s"} — statuses will settle shortly.`,
+        );
+        setError(null);
+        load();
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setReattaching(false));
+  };
+
   const byRecent = (a: Instance, b: Instance) => b.createdAt - a.createdAt;
   const running = instances?.filter((i) => isLive(i.status)).sort(byRecent);
   const past = instances?.filter((i) => !isLive(i.status)).sort(byRecent);
@@ -2068,11 +2115,20 @@ function InstancesTab() {
         <button className="btn sm" onClick={load} disabled={refreshing}>
           <RefreshCw size={12} className={refreshing ? "spin" : ""} /> Refresh
         </button>
+        <button
+          className="btn sm"
+          onClick={reattach}
+          disabled={reattaching}
+          title="Respawn watchers for live runs whose supervisor died, so stuck statuses settle"
+        >
+          <RadioTower size={12} className={reattaching ? "spin" : ""} /> Reattach watchers
+        </button>
       </div>
       <p className="settings-sub">
         Compute spun up across all projects — this machine, Modal, Hugging Face, SSH, Kubernetes,
         Slurm, and OpenResearch.
       </p>
+      {notice && <p className="settings-sub">{notice}</p>}
       {error && <div className="error">{error}</div>}
       {!running || !past ? (
         <div className="settings-loading">
@@ -2084,7 +2140,11 @@ function InstancesTab() {
             Running
             {running.length > 0 && <span className="count-badge">{running.length}</span>}
           </h2>
-          <InstancesTable instances={running} emptyLabel="Nothing running right now." />
+          <InstancesTable
+            instances={running}
+            emptyLabel="Nothing running right now."
+            showWatcher
+          />
           <h2 className="instances-section-title">Past</h2>
           <InstancesTable instances={past} emptyLabel="No past instances yet." />
         </>

@@ -144,6 +144,10 @@ pub struct StoredRun {
     pub result_markdown: Option<String>,
     /// Local-mode cancel intent (the supervisor polls it; server runs ignore it).
     pub cancel_requested: bool,
+    /// Unix millis of the last `orx supervise` heartbeat for this run — how
+    /// the Instances page tells a live watcher from one lost to a reboot or
+    /// kill. Null until the first supervisor stamp.
+    pub supervisor_heartbeat_ms: Option<i64>,
 }
 
 pub struct Store {
@@ -248,6 +252,7 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN reasoning_level TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
+            "ALTER TABLE runs ADD COLUMN supervisor_heartbeat_ms INTEGER",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -435,6 +440,18 @@ impl Store {
             )
             .optional()?;
         Ok(run)
+    }
+
+    /// Watcher heartbeat, stamped every poll by the run's `orx supervise`
+    /// process. Deliberately does NOT bump `updated_at`: a heartbeat is not a
+    /// change, and the SSE diff keys on (status, updated_at) — bumping it
+    /// would push a `run.updated` event to every subscriber every 5s per run.
+    pub fn touch_supervisor(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET supervisor_heartbeat_ms = ?2 WHERE id = ?1",
+            params![run_id, now_ms()],
+        )?;
+        Ok(())
     }
 
     pub fn set_cancel_requested(&self, run_id: &str, requested: bool) -> Result<()> {
@@ -892,7 +909,8 @@ fn row_to_chat_session(
 
 const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_json, command,
                                  created_at, updated_at, ended_at, exit_code,
-                                 commit_sha, result_markdown, cancel_requested FROM runs";
+                                 commit_sha, result_markdown, cancel_requested,
+                                 supervisor_heartbeat_ms FROM runs";
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, baseline_branch, \
                             repo_path, run_command, paper_id, created_at, updated_at";
@@ -915,6 +933,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlit
         commit_sha: row.get(10)?,
         result_markdown: row.get(11)?,
         cancel_requested: row.get(12)?,
+        supervisor_heartbeat_ms: row.get(13)?,
     })
 }
 

@@ -149,6 +149,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            supervisor_heartbeat_ms: None,
         }
     }
 

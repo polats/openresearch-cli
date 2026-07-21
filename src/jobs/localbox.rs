@@ -87,19 +87,24 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Is the recorded process still alive? `ps` rather than `kill -0`: a zombie
-/// (dead but not yet reaped by a still-living spawner) answers `kill -0` yet
-/// is not running. No libc dependency; works on macOS and Linux.
+/// Is the recorded process still alive *and still our job*? `ps` rather than
+/// `kill -0`: a zombie (dead but not yet reaped by a still-living spawner)
+/// answers `kill -0` yet is not running. The command must also mention
+/// run.sh — after a reboot the recorded pid can belong to an unrelated
+/// process (PID reuse; observed as a kernel thread), which a bare liveness
+/// probe reads as RUNNING forever. No libc dependency; works on macOS and
+/// Linux.
 fn pid_alive(pid: &str) -> bool {
     match std::process::Command::new("ps")
-        .args(["-o", "stat=", "-p", pid])
+        .args(["-o", "stat=,args=", "-p", pid])
         .stderr(std::process::Stdio::null())
         .output()
     {
         Ok(o) if o.status.success() => {
-            let stat = String::from_utf8_lossy(&o.stdout);
-            let stat = stat.trim();
-            !stat.is_empty() && !stat.starts_with('Z')
+            let line = String::from_utf8_lossy(&o.stdout);
+            let line = line.trim();
+            let stat = line.split_whitespace().next().unwrap_or("");
+            !stat.is_empty() && !stat.starts_with('Z') && line.contains("run.sh")
         }
         _ => false,
     }

@@ -188,6 +188,7 @@ pub async fn submit_local_modal(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         commit_sha: Some(commit_sha),
         result_markdown: None,
         cancel_requested: false,
+        supervisor_heartbeat_ms: None,
     };
     store.upsert_run(&run)?;
 
