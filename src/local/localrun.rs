@@ -71,16 +71,29 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
             )
         })?;
 
-    // One run in flight per experiment unless deliberately forced.
+    let kind = match args.kind.as_deref() {
+        None | Some("job") => "job",
+        Some("sim") => "sim",
+        Some(other) => {
+            return Err(anyhow!(
+                "Unknown run kind '{other}'. Supported: job, sim."
+            ))
+        }
+    };
+
+    // One run in flight per experiment AND kind unless deliberately forced —
+    // per-kind because a sim alongside a play build is the normal loop, and
+    // the guard exists to stop accidental duplicates, not concurrency.
     if !args.force {
         if let Some(r) = store
             .list_runs_by_experiment(&exp.id)?
             .into_iter()
-            .find(|r| !crate::local::is_terminal(&r.status))
+            .find(|r| !crate::local::is_terminal(&r.status) && r.kind == kind)
         {
             return Err(anyhow!(
-                "Run {} is already in flight for this experiment ({}). \
+                "A {} run ({}) is already in flight for this experiment ({}). \
                  Cancel it with `orx exp cancel {}` or pass --force to launch anyway.",
+                r.kind,
                 r.id,
                 r.status,
                 exp.id
@@ -115,16 +128,6 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         &project.github_repo,
         &run_command,
     );
-
-    let kind = match args.kind.as_deref() {
-        None | Some("job") => "job",
-        Some("sim") => "sim",
-        Some(other) => {
-            return Err(anyhow!(
-                "Unknown run kind '{other}'. Supported: job, sim."
-            ))
-        }
-    };
 
     // The run's env: everything the user synced (API keys), plus the tokens
     // the clone script expects. Exported inside run.sh (written owner-only).
