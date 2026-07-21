@@ -9,7 +9,9 @@
 //! Fully local: no OpenResearch api anywhere on these paths (the /api/papers
 //! routes proxy alphaXiv's public, token-free endpoints — needed because the
 //! browser can't call api.alphaxiv.org cross-origin). No auth — the bind is
-//! loopback-only.
+//! loopback-only by default; `--host` can widen it (e.g. 0.0.0.0 for the
+//! local network), which the startup output flags loudly since every surface
+//! is then open to whoever can reach the port.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -38,9 +40,15 @@ use crate::{browser, UpArgs};
 
 pub async fn run(args: UpArgs) -> Result<()> {
     let port = args.port;
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+    let host: std::net::IpAddr = args.host.parse().map_err(|_| {
+        anyhow!(
+            "Invalid --host '{}': expected an IP address (e.g. 127.0.0.1, or 0.0.0.0 for the local network)",
+            args.host
+        )
+    })?;
+    let listener = tokio::net::TcpListener::bind((host, port))
         .await
-        .map_err(|e| anyhow!("Could not bind 127.0.0.1:{}: {}", port, e))?;
+        .map_err(|e| anyhow!("Could not bind {}:{}: {}", host, port, e))?;
     // Open early so the schema exists before any request or agent spawn.
     Store::open()?;
 
@@ -65,7 +73,31 @@ pub async fn run(args: UpArgs) -> Result<()> {
     tokio::spawn(local::chat::watch_runs(state.chat.clone()));
 
     let app = router(state);
-    let url = format!("http://127.0.0.1:{port}");
+    // Loopback stays the browser URL when it's reachable (0.0.0.0 includes
+    // it); a specific non-loopback bind excludes loopback, so use it directly.
+    let url = if host.is_loopback() || host.is_unspecified() {
+        format!("http://127.0.0.1:{port}")
+    } else {
+        ip_url(host, port)
+    };
+    if !host.is_loopback() {
+        let lan = if host.is_unspecified() {
+            lan_ip()
+        } else {
+            Some(host)
+        };
+        if let Some(ip) = lan {
+            eprintln!(
+                "orx up: dashboard reachable on your network at {}",
+                ip_url(ip, port)
+            );
+        }
+        eprintln!(
+            "orx up: warning: --host {} exposes the unauthenticated dashboard beyond this \
+             machine — anyone who can reach the port can run code and read files as you.",
+            args.host
+        );
+    }
     // In an SSH session the loopback URL only works on the remote box and there's
     // no local browser to open — print forwarding guidance instead of the bare
     // URL, and skip the (futile) browser-open. Otherwise, today's local flow.
@@ -92,6 +124,24 @@ pub async fn run(args: UpArgs) -> Result<()> {
     agent.shutdown().await;
     codex.shutdown().await;
     Ok(())
+}
+
+/// `http://` URL for an IP:port, with the brackets IPv6 needs.
+fn ip_url(ip: std::net::IpAddr, port: u16) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => format!("http://{v4}:{port}"),
+        std::net::IpAddr::V6(v6) => format!("http://[{v6}]:{port}"),
+    }
+}
+
+/// Best-effort LAN address for the "reachable at" line when bound to
+/// 0.0.0.0: "connecting" a UDP socket picks the interface the OS would route
+/// through, without sending any packet. None (e.g. no network) just skips
+/// the line.
+fn lan_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    Some(socket.local_addr().ok()?.ip())
 }
 
 /// Resolves when the process is asked to stop. SIGINT everywhere; on Unix also
