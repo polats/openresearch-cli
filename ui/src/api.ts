@@ -27,15 +27,32 @@ export interface Experiment {
   agentStatus: string;
   createdAt: number;
   updatedAt: number;
+  /** Standing human verdict — set explicitly, never derived from runs. */
+  verdict?: Verdict | null;
+  verdictNotes?: string | null;
+  verdictAt?: number | null;
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
+
+/** What kind of evaluation a run is (see the Phase 1 spec). */
+export type RunKind = "job" | "play" | "sim" | "verify" | "ladder";
+
+/** Human judgment on a run or experiment. */
+export type Verdict = "keep" | "kill" | "iterate";
 
 export interface Run {
   id: string;
   experimentId: string;
   projectId: string;
   status: RunStatus;
+  kind: RunKind;
+  /** The `aggregate` slice of the run's ingested metrics (numbers, small);
+   *  the full document is `getRunMetrics`. */
+  metricsAggregate?: Record<string, unknown>;
+  verdict?: Verdict;
+  verdictNotes?: string;
+  verdictAt?: number;
   backend?: Record<string, unknown> | null;
   command?: string | null;
   commitSha?: string | null;
@@ -198,6 +215,46 @@ export const startRun = (
 ) => post<{ run: Run }>(`/api/experiments/${experimentId}/run`, body).then((r) => r.run);
 
 export const cancelRun = (runId: string) => post<{ ok: boolean }>(`/api/runs/${runId}/cancel`);
+
+// --- verdicts, metrics, artifacts, play builds (game-design experiments) ----
+
+export const setRunVerdict = (runId: string, verdict: Verdict | null, notes?: string) =>
+  post<{ run: Run }>(`/api/runs/${runId}/verdict`, { verdict, notes }).then((r) => r.run);
+
+export const setExperimentVerdict = (expId: string, verdict: Verdict | null, notes?: string) =>
+  post<{ experiment: Experiment }>(`/api/experiments/${expId}/verdict`, { verdict, notes }).then(
+    (r) => r.experiment,
+  );
+
+export const getRunMetrics = (runId: string) =>
+  get<{ metrics: Record<string, unknown> | null }>(`/api/runs/${runId}/metrics`).then(
+    (r) => r.metrics,
+  );
+
+export interface RunArtifact {
+  path: string;
+  size: number;
+  contentType: string;
+}
+
+export const listRunArtifacts = (runId: string) =>
+  get<{ artifacts: RunArtifact[]; truncated: boolean }>(`/api/runs/${runId}/artifacts`).then(
+    (r) => r.artifacts,
+  );
+
+export const runArtifactUrl = (runId: string, path: string) =>
+  `/api/runs/${runId}/artifacts/file?path=${encodeURIComponent(path)}`;
+
+export interface PlayBuild {
+  /** "ready" = a fresh build is being served; "building" = a build run is in flight. */
+  state: "ready" | "building";
+  url: string;
+  runId?: string;
+}
+
+/** Build (or reuse) the experiment's playable; idempotent. */
+export const startPlayBuild = (expId: string) =>
+  post<PlayBuild>(`/api/experiments/${expId}/play-build`);
 
 export interface LogChunk {
   dataBase64: string;

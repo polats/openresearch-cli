@@ -931,6 +931,11 @@ impl ServerPlane {
             result_markdown: None,
             cancel_requested: false,
             supervisor_heartbeat_ms: None,
+            kind: "job".to_string(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
         })?;
         if let Err(err) = crate::client::update_external_run(
             creds,
@@ -1072,6 +1077,11 @@ impl ServerPlane {
             result_markdown: None,
             cancel_requested: false,
             supervisor_heartbeat_ms: None,
+            kind: "job".to_string(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
         })?;
         if let Err(err) = crate::client::update_external_run(
             creds,

@@ -482,6 +482,17 @@ pub enum ExpCommand {
     /// Cancel the in-flight run.
     Cancel { exp_id: String },
 
+    /// Record the standing human verdict on an experiment (local mode):
+    /// keep, kill, or iterate — or `clear` to remove it.
+    Verdict {
+        exp_id: String,
+        /// keep | kill | iterate | clear
+        verdict: String,
+        /// Free-form notes on why (what felt off, what to try next).
+        #[arg(short = 'm', long)]
+        message: Option<String>,
+    },
+
     /// Wait for a run to finish: one experiment (`<expId>`) or the next completion in a project (`--project`).
     Wait {
         /// Experiment to watch; its latest run is polled until it reaches a
@@ -546,6 +557,11 @@ pub enum ReportCommand {
 #[derive(Args, Debug)]
 pub struct ExpRunArgs {
     pub exp_id: String,
+    /// What kind of evaluation this run is: `job` (default — a classic
+    /// script run) or `sim` (batch sim; its metrics JSON is ingested onto
+    /// the run). Local backend only.
+    #[arg(long)]
+    pub kind: Option<String>,
     /// Provision a new instance with this GPU id, e.g. `H100_SXM` — the exact
     /// id from `orx compute`, not a family name like `H100`.
     #[arg(long)]

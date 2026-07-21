@@ -1074,6 +1074,63 @@ async fn teardown_box(store: &Store, creds: &Credentials, sandbox_id: &str, run_
 // inspect/log reads are plain fs calls. Same cancel semantics — TERM leaves the
 // process dead without an exit_code (ERROR), reported as `cancelled`.
 
+/// Cap on an ingestible metrics doc; larger docs are dropped with a warning.
+const METRICS_MAX_BYTES: u64 = 2_000_000;
+/// Above this, keep only the `aggregate` slice — list/SSE payloads carry the
+/// stored doc, so a huge per-fight dump must not ride every runs listing.
+const METRICS_COMPACT_BYTES: usize = 100_000;
+
+/// The `$ORX_METRICS_PATH` contract: a JSON object left at the run's metrics
+/// path — or, zero-setup fallback, a log that IS one JSON object (sim-batch's
+/// stdout) — lands in `runs.metrics_json` when the run reaches terminal
+/// status. Best-effort: a bad or missing doc never fails supervision.
+fn ingest_metrics(store: &Store, run_id: &str) {
+    let path = crate::store::run_metrics_path(run_id);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => {
+            let Ok(log) = std::fs::read_to_string(log_path(run_id)) else {
+                return;
+            };
+            let t = log.trim();
+            if !(t.starts_with('{') && t.ends_with('}')) {
+                return;
+            }
+            t.to_string()
+        }
+    };
+    if raw.len() as u64 > METRICS_MAX_BYTES {
+        eprintln!(
+            "supervise {run_id}: metrics doc is {} bytes (cap {METRICS_MAX_BYTES}) — not ingested",
+            raw.len()
+        );
+        return;
+    }
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        // Only worth a warning when the run explicitly wrote the file.
+        if path.exists() {
+            eprintln!("supervise {run_id}: metrics file is not valid JSON — not ingested");
+        }
+        return;
+    };
+    if !doc.is_object() {
+        return;
+    }
+    let stored_doc = if raw.len() > METRICS_COMPACT_BYTES {
+        json!({
+            "aggregate": doc.get("aggregate").cloned().unwrap_or(serde_json::Value::Null),
+            "truncated": true,
+        })
+        .to_string()
+    } else {
+        raw
+    };
+    match store.set_run_metrics(run_id, &stored_doc) {
+        Ok(()) => eprintln!("supervise {run_id}: metrics ingested ({} bytes)", stored_doc.len()),
+        Err(err) => eprintln!("supervise {run_id}: metrics ingest failed: {err}"),
+    }
+}
+
 async fn run_local(
     store: Store,
     stored: crate::store::StoredRun,
@@ -1124,6 +1181,9 @@ async fn run_local(
             {
                 log_task.abort();
             }
+            // After the log drains (the stdout fallback needs the full log)
+            // and inside the already-serialized terminal path.
+            ingest_metrics(&store, &run_id);
             if let Some(creds) = &creds {
                 if let Err(err) = mirror_status(creds, &run_id, &status, &job.message).await {
                     eprintln!("supervise {run_id}: final status mirror failed: {err}");

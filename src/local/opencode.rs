@@ -615,6 +615,8 @@ mod tests {
             repo_path: "/tmp/nonexistent".into(),
             run_command: None,
             paper_id: None,
+            play_command: None,
+            play_dir: None,
             created_at: 0,
             updated_at: 0,
         }

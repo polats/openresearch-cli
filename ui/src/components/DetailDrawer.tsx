@@ -1,16 +1,22 @@
-import { ChevronDown, CircleStop, RotateCw } from "lucide-react";
+import { ChevronDown, CircleStop, NotebookPen, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   cancelRun,
   getCommitDiff,
   getWorkingTree,
   listExperimentCommits,
+  listRunArtifacts,
+  runArtifactUrl,
+  setExperimentVerdict,
+  setRunVerdict,
   timeAgo,
   type CommitInfo,
   type DiffPayload,
   type Experiment,
   type Project,
   type Run,
+  type RunArtifact,
+  type Verdict,
   type WorkingTree,
 } from "../api";
 import { BranchPill } from "./BranchPill";
@@ -43,6 +49,164 @@ function DiffView({ state }: { state: DiffState | undefined }) {
 
 export type ExperimentView = "terminal" | "changes";
 
+const VERDICTS: Verdict[] = ["keep", "kill", "iterate"];
+
+/** keep / kill / iterate chips + a notes toggle. Clicking the active chip
+ *  clears the verdict; notes save on blur. Optimistic — the SSE diff brings
+ *  the canonical state ~500ms later. */
+function VerdictChips({
+  verdict,
+  notes,
+  onSave,
+  label,
+}: {
+  verdict: Verdict | null | undefined;
+  notes: string | null | undefined;
+  onSave: (verdict: Verdict | null, notes: string) => void;
+  label?: string;
+}) {
+  const [current, setCurrent] = useState<Verdict | null>(verdict ?? null);
+  const [text, setText] = useState(notes ?? "");
+  const [notesOpen, setNotesOpen] = useState(false);
+  useEffect(() => setCurrent(verdict ?? null), [verdict]);
+  useEffect(() => setText(notes ?? ""), [notes]);
+
+  const pick = (v: Verdict) => {
+    const next = current === v ? null : v;
+    setCurrent(next);
+    onSave(next, text);
+  };
+  return (
+    <span className="verdict-control">
+      {label && <span className="verdict-label">{label}</span>}
+      {VERDICTS.map((v) => (
+        <button
+          key={v}
+          className={`verdict-chip ${v} ${current === v ? "active" : ""}`}
+          title={current === v ? `Clear ${v}` : v}
+          onClick={() => pick(v)}
+        >
+          {v}
+        </button>
+      ))}
+      <button
+        className={`icon-btn ${notesOpen || text ? "active" : ""}`}
+        title={text ? `Notes: ${text}` : "Add notes"}
+        aria-label="Verdict notes"
+        onClick={() => setNotesOpen((v) => !v)}
+      >
+        <NotebookPen size={13} />
+      </button>
+      {notesOpen && (
+        <input
+          className="input sm verdict-notes"
+          placeholder="Why? (saved on blur)"
+          value={text}
+          autoFocus
+          onChange={(e) => setText(e.target.value)}
+          onBlur={() => {
+            setNotesOpen(false);
+            onSave(current, text);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          }}
+        />
+      )}
+    </span>
+  );
+}
+
+/** Format a metric value compactly (3 significant digits for floats). */
+function fmtMetric(v: unknown): string {
+  if (typeof v === "number") {
+    return Number.isInteger(v) ? String(v) : v.toPrecision(3);
+  }
+  return String(v);
+}
+
+/** Metric chips for a run's `aggregate`, each with a delta vs the parent
+ *  experiment's latest sim aggregate when one exists. */
+function MetricChips({
+  aggregate,
+  parentAggregate,
+}: {
+  aggregate: Record<string, unknown>;
+  parentAggregate: Record<string, unknown> | null;
+}) {
+  return (
+    <div className="metric-chips">
+      {Object.entries(aggregate).map(([key, value]) => {
+        const parent = parentAggregate?.[key];
+        const delta =
+          typeof value === "number" && typeof parent === "number" ? value - parent : null;
+        return (
+          <span key={key} className="metric-chip" title={parent != null ? `parent: ${fmtMetric(parent)}` : undefined}>
+            <span className="metric-key">{key}</span>
+            <span className="metric-value">{fmtMetric(value)}</span>
+            {delta !== null && delta !== 0 && (
+              <span className={`metric-delta ${delta > 0 ? "up" : "down"}`}>
+                {delta > 0 ? "▲" : "▼"}
+                {fmtMetric(Math.abs(delta))}
+              </span>
+            )}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The run's media/output gallery ($ORX_ARTIFACTS_DIR). Images render
+ *  inline; everything else is a file chip. All entries open raw in a tab. */
+function ArtifactGallery({ runId, terminal }: { runId: string; terminal: boolean }) {
+  const [artifacts, setArtifacts] = useState<RunArtifact[] | null>(null);
+  useEffect(() => {
+    listRunArtifacts(runId)
+      .then(setArtifacts)
+      .catch(() => setArtifacts([]));
+    // Refetch when the run reaches a terminal state — most artifacts land at
+    // the end of a run.
+  }, [runId, terminal]);
+  if (!artifacts || artifacts.length === 0) return null;
+  const images = artifacts.filter((a) => a.contentType.startsWith("image/"));
+  const rest = artifacts.filter((a) => !a.contentType.startsWith("image/"));
+  return (
+    <div className="artifact-gallery">
+      {images.length > 0 && (
+        <div className="artifact-grid">
+          {images.map((a) => (
+            <a
+              key={a.path}
+              href={runArtifactUrl(runId, a.path)}
+              target="_blank"
+              rel="noreferrer"
+              title={a.path}
+            >
+              <img src={runArtifactUrl(runId, a.path)} alt={a.path} loading="lazy" />
+            </a>
+          ))}
+        </div>
+      )}
+      {rest.length > 0 && (
+        <div className="artifact-files">
+          {rest.map((a) => (
+            <a
+              key={a.path}
+              className="artifact-file"
+              href={runArtifactUrl(runId, a.path)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {a.path}
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** An experiment's detail view, rendered as right-pane tab content. Mount it
  *  keyed by `${experiment.id}:${view}` so per-view state resets on switch. */
 export function DetailDrawer({
@@ -65,15 +229,52 @@ export function DetailDrawer({
     .filter((r) => r.experimentId === experiment.id)
     .sort((a, b) => b.createdAt - a.createdAt);
 
-  return view === "terminal" ? (
-    <TerminalView
-      experiment={experiment}
-      expRuns={expRuns}
-      selectedRunId={selectedRunId}
-      onSelectRun={onSelectRun}
-    />
-  ) : (
-    <ChangesView experiment={experiment} project={project} />
+  // The parent experiment's latest sim aggregate — the baseline the delta
+  // chips compare against (`runs` is project-wide, so it's all here).
+  const parentAggregate =
+    (experiment.parentExperimentId &&
+      runs
+        .filter(
+          (r) =>
+            r.experimentId === experiment.parentExperimentId &&
+            r.kind === "sim" &&
+            r.status === "done" &&
+            r.metricsAggregate,
+        )
+        .sort((a, b) => b.createdAt - a.createdAt)[0]?.metricsAggregate) ||
+    null;
+
+  const body =
+    view === "terminal" ? (
+      <TerminalView
+        experiment={experiment}
+        expRuns={expRuns}
+        parentAggregate={parentAggregate}
+        selectedRunId={selectedRunId}
+        onSelectRun={onSelectRun}
+      />
+    ) : (
+      <ChangesView experiment={experiment} project={project} />
+    );
+  return (
+    <div className="exp-detail">
+      <div className="exp-verdict-strip">
+        <VerdictChips
+          label="Experiment verdict"
+          verdict={experiment.verdict as Verdict | null | undefined}
+          notes={experiment.verdictNotes}
+          onSave={(v, notes) => void setExperimentVerdict(experiment.id, v, notes).catch(() => {})}
+        />
+        {experiment.verdictNotes && (
+          <span className="verdict-notes-preview" title={experiment.verdictNotes}>
+            {experiment.verdictNotes}
+          </span>
+        )}
+      </div>
+      {/* .term-view/.drawer are inset-0 overlays — give them a positioned box
+          below the verdict strip to fill. */}
+      <div className="exp-detail-body">{body}</div>
+    </div>
   );
 }
 
@@ -85,11 +286,13 @@ export function DetailDrawer({
 function TerminalView({
   experiment,
   expRuns,
+  parentAggregate,
   selectedRunId,
   onSelectRun,
 }: {
   experiment: Experiment;
   expRuns: Run[];
+  parentAggregate: Record<string, unknown> | null;
   selectedRunId: string | null;
   onSelectRun: (id: string | null) => void;
 }) {
@@ -147,6 +350,13 @@ function TerminalView({
         </div>
         <span style={{ flex: 1 }} />
         {error && <span className="error">{error}</span>}
+        {selectedRun && !live && (
+          <VerdictChips
+            verdict={selectedRun.verdict ?? null}
+            notes={selectedRun.verdictNotes}
+            onSave={(v, notes) => void setRunVerdict(selectedRun.id, v, notes).catch(() => {})}
+          />
+        )}
         {live && (
           <button className="btn sm ghost" onClick={() => void stop()}>
             <CircleStop size={13} />
@@ -185,6 +395,22 @@ function TerminalView({
           </div>
         )}
       </div>
+
+      {selectedRun?.metricsAggregate && (
+        <div className="results-strip">
+          <MetricChips
+            aggregate={selectedRun.metricsAggregate}
+            parentAggregate={parentAggregate}
+          />
+        </div>
+      )}
+      {selectedRun && (
+        <ArtifactGallery
+          key={`art-${selectedRun.id}`}
+          runId={selectedRun.id}
+          terminal={!live}
+        />
+      )}
 
       <div className="term-fill">
         {selectedRun ? (

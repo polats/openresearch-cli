@@ -23,6 +23,10 @@ pub struct LocalProject {
     pub paper_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Build command for playable experiment builds (default `npm run build`).
+    pub play_command: Option<String>,
+    /// Dir (repo-relative) the play build outputs, served at /play (default `dist`).
+    pub play_dir: Option<String>,
 }
 
 impl LocalProject {
@@ -40,6 +44,8 @@ impl LocalProject {
             paper_id: row.get(8)?,
             created_at: row.get(9)?,
             updated_at: row.get(10)?,
+            play_command: row.get(11)?,
+            play_dir: row.get(12)?,
         })
     }
 }
@@ -60,6 +66,11 @@ pub struct LocalExperiment {
     pub agent_status: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Standing human verdict: keep | kill | iterate. Set explicitly, never
+    /// derived from run verdicts (see the Phase 1 spec).
+    pub verdict: Option<String>,
+    pub verdict_notes: Option<String>,
+    pub verdict_at: Option<i64>,
 }
 
 impl LocalExperiment {
@@ -77,6 +88,9 @@ impl LocalExperiment {
             agent_status: row.get(8)?,
             created_at: row.get(9)?,
             updated_at: row.get(10)?,
+            verdict: row.get(11)?,
+            verdict_notes: row.get(12)?,
+            verdict_at: row.get(13)?,
         })
     }
 

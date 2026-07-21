@@ -125,6 +125,9 @@ pub fn create_experiment(
         description,
         run_command,
         agent_status: "idle".to_string(),
+        verdict: None,
+        verdict_notes: None,
+        verdict_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -147,6 +150,8 @@ mod tests {
             repo_path: "/tmp/r".into(),
             run_command: None,
             paper_id: None,
+            play_command: None,
+            play_dir: None,
             created_at: 0,
             updated_at: 0,
         }
@@ -163,6 +168,9 @@ mod tests {
             description: None,
             run_command: String::new(),
             agent_status: "idle".into(),
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
             created_at: 0,
             updated_at: 0,
         }

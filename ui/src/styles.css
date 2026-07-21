@@ -4233,3 +4233,156 @@ a.files-pill:hover {
   border-bottom: 1px solid var(--border);
   border-left: 1px solid var(--border);
 }
+
+/* --- game-design experiments: verdicts, metrics, artifacts ---------------- */
+
+/* DetailDrawer wrapper: verdict strip on top, the existing inset-0 overlay
+   views (.term-view/.drawer) fill the positioned body below it. */
+.exp-detail {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--base);
+  z-index: 20;
+}
+.exp-detail-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.exp-verdict-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.verdict-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.verdict-label {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  margin-right: 2px;
+}
+.verdict-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  padding: 2px 9px;
+  cursor: pointer;
+}
+.verdict-chip:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+.verdict-chip.keep.active {
+  background: var(--accent-green, #2e7d32);
+  border-color: transparent;
+  color: #fff;
+}
+.verdict-chip.kill.active {
+  background: var(--accent-red, #c62828);
+  border-color: transparent;
+  color: #fff;
+}
+.verdict-chip.iterate.active {
+  background: var(--accent-amber, #ef6c00);
+  border-color: transparent;
+  color: #fff;
+}
+.verdict-notes {
+  width: 220px;
+}
+.verdict-notes-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+
+.results-strip {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.metric-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.metric-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-size: var(--fs-sm);
+  background: var(--panel);
+}
+.metric-chip .metric-key {
+  color: var(--text-dim);
+}
+.metric-chip .metric-value {
+  font-weight: var(--fw-semibold);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.metric-delta {
+  font-size: var(--fs-xs, 11px);
+  font-variant-numeric: tabular-nums;
+}
+.metric-delta.up {
+  color: var(--accent-green, #2e7d32);
+}
+.metric-delta.down {
+  color: var(--accent-red, #c62828);
+}
+
+.artifact-gallery {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.artifact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+.artifact-grid img {
+  width: 100%;
+  height: 90px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+.artifact-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.artifact-file {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  text-decoration: none;
+}
+.artifact-file:hover {
+  color: var(--text);
+}

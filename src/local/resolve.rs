@@ -111,6 +111,8 @@ mod tests {
             repo_path: "/tmp/repo".to_string(),
             run_command: None,
             paper_id: None,
+            play_command: None,
+            play_dir: None,
             created_at: now,
             updated_at: now,
         }
@@ -128,6 +130,9 @@ mod tests {
             description: None,
             run_command: "echo hi".to_string(),
             agent_status: "idle".to_string(),
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -150,6 +155,11 @@ mod tests {
             result_markdown: None,
             cancel_requested: false,
             supervisor_heartbeat_ms: None,
+            kind: "job".to_string(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
         }
     }
 

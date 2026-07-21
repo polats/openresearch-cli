@@ -37,6 +37,21 @@ pub fn session_worktree_path(owner: &str, repo: &str, session_id: &str) -> PathB
     worktrees_root(owner, repo).join(session_id)
 }
 
+/// Detached worktree a playable experiment build runs in
+/// (`~/.cache/openresearch/play-builds/<owner>/<repo>/<experiment-id>`).
+/// Its own root — never the chat session's worktree, so builds can't race
+/// the agent's edits.
+pub fn play_worktree_path(owner: &str, repo: &str, experiment_id: &str) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cache")
+        .join("openresearch")
+        .join("play-builds")
+        .join(owner)
+        .join(repo)
+        .join(experiment_id)
+}
+
 /// Run git with `args`, returning trimmed stdout; failures carry git's stderr.
 /// Headless: git must fail fast rather than prompt on /dev/tty (these calls
 /// run under a server, where a prompt would hang a worker forever).

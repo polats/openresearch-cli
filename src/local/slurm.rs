@@ -212,6 +212,11 @@ pub async fn submit_local_slurm(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         result_markdown: None,
         cancel_requested: false,
         supervisor_heartbeat_ms: None,
+        kind: "job".to_string(),
+        metrics_json: None,
+        verdict: None,
+        verdict_notes: None,
+        verdict_at: None,
     };
     store.upsert_run(&run)?;
 

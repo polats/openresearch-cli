@@ -116,6 +116,16 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         &run_command,
     );
 
+    let kind = match args.kind.as_deref() {
+        None | Some("job") => "job",
+        Some("sim") => "sim",
+        Some(other) => {
+            return Err(anyhow!(
+                "Unknown run kind '{other}'. Supported: job, sim."
+            ))
+        }
+    };
+
     // The run's env: everything the user synced (API keys), plus the tokens
     // the clone script expects. Exported inside run.sh (written owner-only).
     let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
@@ -125,6 +135,22 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     if let Some(gh) = git::resolve_github_token() {
         env.insert("GITHUB_TOKEN".to_string(), gh);
     }
+    // The metrics/artifacts contract (all kinds, sims especially): anything
+    // written to $ORX_ARTIFACTS_DIR becomes the run's gallery; a JSON doc at
+    // $ORX_METRICS_PATH is ingested onto the run when it finishes.
+    let artifacts_dir = crate::store::run_artifacts_dir(&run_id);
+    std::fs::create_dir_all(&artifacts_dir)
+        .map_err(|e| anyhow!("Could not create {}: {}", artifacts_dir.display(), e))?;
+    env.insert(
+        "ORX_ARTIFACTS_DIR".to_string(),
+        artifacts_dir.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "ORX_METRICS_PATH".to_string(),
+        crate::store::run_metrics_path(&run_id)
+            .to_string_lossy()
+            .into_owned(),
+    );
 
     let dir = localbox::run_job(&localbox::LocalJobSpec {
         run_id: run_id.clone(),
@@ -162,6 +188,11 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         result_markdown: None,
         cancel_requested: false,
         supervisor_heartbeat_ms: None,
+        kind: kind.to_string(),
+        metrics_json: None,
+        verdict: None,
+        verdict_notes: None,
+        verdict_at: None,
     };
     store.upsert_run(&run)?;
 

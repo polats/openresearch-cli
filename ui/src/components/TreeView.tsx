@@ -8,10 +8,17 @@ import {
   type Node,
   type NodeProps,
 } from "@xyflow/react";
-import { FolderTree, GitBranch, Terminal } from "lucide-react";
+import { FolderTree, GitBranch, Play, Terminal } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
-import { memo, useMemo } from "react";
-import { githubBranchUrl, timeAgo, type Experiment, type Project, type Run } from "../api";
+import { memo, useMemo, useState } from "react";
+import {
+  githubBranchUrl,
+  startPlayBuild,
+  timeAgo,
+  type Experiment,
+  type Project,
+  type Run,
+} from "../api";
 import type { ExperimentView } from "./DetailDrawer";
 import { StatusBadge } from "./StatusBadge";
 
@@ -71,6 +78,33 @@ function runSquareClass(status: string): string {
   return "other";
 }
 
+/// Play button: kicks the build (idempotent server-side) and opens the
+/// playable URL — the holding page auto-refreshes while the build runs.
+function PlayButton({ expId }: { expId: string }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      className="node-action"
+      title="Build & play this experiment"
+      disabled={busy}
+      onClick={() => {
+        setBusy(true);
+        // On failure, still open the play URL — its holding page explains
+        // the state (no build / failed) better than a blocking alert would.
+        startPlayBuild(expId)
+          .catch((err) => console.error("play-build:", err))
+          .finally(() => {
+            window.open(`/play/${expId}/`, "_blank");
+            setBusy(false);
+          });
+      }}
+    >
+      <Play size={13} />
+      Play
+    </button>
+  );
+}
+
 const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   const { exp, latestRun, runs, isBaseline, githubOwner, githubRepo, onOpenView, onOpenCodeBranch } = data;
   const status = latestRun?.status;
@@ -82,7 +116,10 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
       <Handle type="target" position={Position.Top} />
       <div className="node-eyebrow">
         <span>{kind}</span>
-        <StatusBadge status={status ?? "idle"} />
+        <span style={{ display: "inline-flex", gap: 6 }}>
+          {exp.verdict && <StatusBadge status={exp.verdict} />}
+          <StatusBadge status={status ?? "idle"} />
+        </span>
       </div>
       <div className="node-head">
         <span className="node-slug">{exp.slug}</span>
@@ -106,6 +143,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
       </div>
       {/* Direct view shortcuts — changes and code always, logs once there's a run. */}
       <div className="node-actions" onClick={(e) => e.stopPropagation()}>
+        <PlayButton expId={exp.id} />
         <button
           className="node-action"
           title="Open changes"

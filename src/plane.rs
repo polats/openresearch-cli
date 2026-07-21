@@ -412,6 +412,11 @@ mod tests {
             result_markdown: result_markdown.map(str::to_string),
             cancel_requested: false,
             supervisor_heartbeat_ms: None,
+            kind: "job".to_string(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
         }
     }
 

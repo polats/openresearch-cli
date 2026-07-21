@@ -210,6 +210,15 @@ fn router(state: AppState) -> Router {
         .route("/api/instances/reconcile", post(reconcile_instances))
         .route("/api/experiments/{id}/run", post(run_experiment))
         .route("/api/runs/{id}/cancel", post(cancel_run))
+        .route("/api/runs/{id}/verdict", post(set_run_verdict))
+        .route("/api/runs/{id}/metrics", get(run_metrics))
+        .route("/api/runs/{id}/artifacts", get(list_run_artifacts))
+        .route("/api/runs/{id}/artifacts/file", get(serve_run_artifact))
+        .route("/api/experiments/{id}/play-build", post(play_build))
+        .route("/play/{id}", get(play_root))
+        .route("/play/{id}/", get(play_index))
+        .route("/play/{id}/{*path}", get(play_file))
+        .route("/api/experiments/{id}/verdict", post(set_exp_verdict))
         .route("/api/runs/{id}/log", get(run_log))
         .route("/api/runs/{id}/diff", get(run_diff))
         .route("/api/experiments/{id}/commits", get(experiment_commits))
@@ -353,6 +362,18 @@ struct ApiRun {
     /// Absent on terminal runs — nothing should be watching those.
     #[serde(skip_serializing_if = "Option::is_none")]
     watcher: Option<&'static str>,
+    /// job | play | sim (later: verify, ladder).
+    kind: String,
+    /// The `aggregate` object of the run's ingested metrics — kept small so
+    /// list/SSE payloads stay light; the full doc is GET /api/runs/{id}/metrics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics_aggregate: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict_notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict_at: Option<i64>,
 }
 
 /// A watcher heartbeat this old means the supervisor is gone (it stamps every
@@ -386,6 +407,15 @@ impl From<&StoredRun> for ApiRun {
             } else {
                 Some("lost")
             },
+            kind: run.kind.clone(),
+            metrics_aggregate: run
+                .metrics_json
+                .as_deref()
+                .and_then(|m| serde_json::from_str::<Value>(m).ok())
+                .and_then(|v| v.get("aggregate").cloned()),
+            verdict: run.verdict.clone(),
+            verdict_notes: run.verdict_notes.clone(),
+            verdict_at: run.verdict_at,
         }
     }
 }
@@ -775,6 +805,8 @@ async fn create_experiment(
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct RunReq {
+    /// job (default) | sim — see ExpRunArgs::kind.
+    kind: Option<String>,
     backend: Option<String>,
     flavor: Option<String>,
     /// Repo-relative manifest path (k8s only; default .orx/k8s.yaml).
@@ -807,8 +839,18 @@ async fn run_experiment(
     let mut flavor = req.flavor.filter(|f| !f.trim().is_empty());
     local::apply_compute_default(&mut backend_opt, &mut flavor);
     let backend = backend_opt.unwrap_or_else(|| "hf".to_string());
+    // Typed runs are local-only in Phase 1 — the metrics/artifacts contract
+    // (env vars + supervisor ingestion) only exists on the local backend.
+    if matches!(req.kind.as_deref(), Some(k) if k != "job") && backend != "local" {
+        return Err(bad_request(format!(
+            "kind '{}' runs require the local backend (got '{}')",
+            req.kind.as_deref().unwrap_or_default(),
+            backend
+        )));
+    }
     let args = crate::ExpRunArgs {
         exp_id: id,
+        kind: req.kind,
         gpu: None,
         count: None,
         disk: None,
@@ -851,6 +893,406 @@ async fn cancel_run(Path(id): Path<String>) -> ApiResult {
     }
     store.set_cancel_requested(&run.id, true)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+// --- verdicts & metrics ----------------------------------------------------
+
+#[derive(Deserialize)]
+struct VerdictReq {
+    /// keep | kill | iterate; null/absent clears the verdict.
+    verdict: Option<String>,
+    notes: Option<String>,
+}
+
+/// Validate a verdict string against the fixed vocabulary.
+fn parse_verdict(v: &Option<String>) -> std::result::Result<Option<&str>, ApiError> {
+    match v.as_deref() {
+        None | Some("") => Ok(None),
+        Some(v @ ("keep" | "kill" | "iterate")) => Ok(Some(v)),
+        Some(other) => Err(bad_request(format!(
+            "invalid verdict '{other}': expected keep, kill, or iterate"
+        ))),
+    }
+}
+
+async fn set_run_verdict(Path(id): Path<String>, Json(req): Json<VerdictReq>) -> ApiResult {
+    let verdict = parse_verdict(&req.verdict)?;
+    let notes = req.notes.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let store = Store::open()?;
+    let run = store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
+    store.set_run_verdict(&run.id, verdict, notes)?;
+    let run = store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
+    Ok(Json(json!({ "run": ApiRun::from(&run) })))
+}
+
+async fn set_exp_verdict(Path(id): Path<String>, Json(req): Json<VerdictReq>) -> ApiResult {
+    let verdict = parse_verdict(&req.verdict)?;
+    let notes = req.notes.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let store = Store::open()?;
+    store
+        .get_local_experiment(&id)?
+        .ok_or_else(|| not_found("experiment"))?;
+    store.set_experiment_verdict(&id, verdict, notes)?;
+    let exp = store
+        .get_local_experiment(&id)?
+        .ok_or_else(|| not_found("experiment"))?;
+    Ok(Json(json!({ "experiment": exp })))
+}
+
+/// The run's full ingested metrics document (list payloads carry only the
+/// small `aggregate` slice).
+async fn run_metrics(Path(id): Path<String>) -> ApiResult {
+    let store = Store::open()?;
+    let run = store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
+    let metrics: Option<Value> = run
+        .metrics_json
+        .as_deref()
+        .and_then(|m| serde_json::from_str(m).ok());
+    Ok(Json(json!({ "metrics": metrics })))
+}
+
+// --- play builds -----------------------------------------------------------
+
+const DEFAULT_PLAY_COMMAND: &str = "npm run build";
+const DEFAULT_PLAY_DIR: &str = "dist";
+
+/// Where an experiment's playable build is served from.
+fn play_serve_dir(
+    project: &local::model::LocalProject,
+    experiment_id: &str,
+) -> std::path::PathBuf {
+    let play_dir = project
+        .play_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .unwrap_or(DEFAULT_PLAY_DIR);
+    local::git::play_worktree_path(&project.github_owner, &project.github_repo, experiment_id)
+        .join(play_dir)
+}
+
+/// Build (or reuse) the experiment's playable: a detached worktree at the
+/// branch head + the project's play command, tracked as a `kind: play` run so
+/// logs/status/supervision come for free. Idempotent: an in-flight build is
+/// returned as-is, and a finished build at the current head short-circuits to
+/// "ready".
+async fn play_build(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    let exp = store
+        .get_local_experiment(&id)?
+        .ok_or_else(|| not_found("experiment"))?;
+    let project = store
+        .get_local_project(&exp.project_id)?
+        .ok_or_else(|| not_found("project"))?;
+    let url = format!("/play/{}/", exp.id);
+
+    // The branch head in the hub clone — what the build must reflect. Play
+    // builds serve local work; no push/remote round-trip.
+    let head = {
+        let root = std::path::PathBuf::from(&project.repo_path);
+        let branch = exp.branch_name.clone();
+        tokio::task::spawn_blocking(move || local::git::resolve_branch_commit(&root, &branch))
+            .await
+            .map_err(|e| ApiError::from(anyhow!("git task failed: {e}")))??
+            .ok_or_else(|| bad_request("experiment branch has no commits to build"))?
+    };
+
+    let play_runs: Vec<_> = store
+        .list_runs_by_experiment(&exp.id)?
+        .into_iter()
+        .filter(|r| r.kind == "play")
+        .collect();
+    if let Some(r) = play_runs.iter().find(|r| !is_terminal(&r.status)) {
+        return Ok(Json(json!({ "state": "building", "runId": r.id, "url": url })));
+    }
+    let fresh = play_runs
+        .iter()
+        .find(|r| r.status == "done")
+        .is_some_and(|r| r.commit_sha.as_deref() == Some(head.as_str()));
+    if fresh && play_serve_dir(&project, &exp.id).is_dir() {
+        return Ok(Json(json!({ "state": "ready", "url": url })));
+    }
+
+    let play_command = project
+        .play_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .unwrap_or(DEFAULT_PLAY_COMMAND)
+        .to_string();
+    let worktree =
+        local::git::play_worktree_path(&project.github_owner, &project.github_repo, &exp.id);
+    let sq = crate::jobs::ssh::sh_quote;
+    // `set -e` so a failed step fails the run; prune first so a hand-deleted
+    // worktree dir doesn't wedge `worktree add` forever.
+    let script = format!(
+        "set -e\n\
+         HUB={hub}\n\
+         WT={wt}\n\
+         SHA={sha}\n\
+         git -C \"$HUB\" worktree prune\n\
+         if [ ! -e \"$WT/.git\" ]; then\n\
+           git -C \"$HUB\" worktree add --detach \"$WT\" \"$SHA\"\n\
+         else\n\
+           git -C \"$WT\" checkout --detach \"$SHA\"\n\
+           git -C \"$WT\" reset --hard \"$SHA\"\n\
+         fi\n\
+         cd \"$WT\"\n\
+         if [ -f package.json ] && [ ! -d node_modules ]; then\n\
+           if [ -f package-lock.json ]; then npm ci; else npm install; fi\n\
+         fi\n\
+         {cmd}\n",
+        hub = sq(&project.repo_path),
+        wt = sq(&worktree.to_string_lossy()),
+        sha = sq(&head),
+        cmd = play_command,
+    );
+
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let dir = crate::jobs::localbox::run_job(&crate::jobs::localbox::LocalJobSpec {
+        run_id: run_id.clone(),
+        script,
+        env,
+    })?;
+    let descriptor = crate::jobs::BackendDescriptor {
+        kind: "local_job".to_string(),
+        job_id: Some(dir.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    let run = StoredRun {
+        id: run_id.clone(),
+        experiment_id: exp.id.clone(),
+        project_id: project.id.clone(),
+        status: "starting".to_string(),
+        backend_json: descriptor.to_json(),
+        command: play_command,
+        created_at: now_ms(),
+        updated_at: now_ms(),
+        ended_at: None,
+        exit_code: None,
+        commit_sha: Some(head),
+        result_markdown: None,
+        cancel_requested: false,
+        supervisor_heartbeat_ms: None,
+        kind: "play".to_string(),
+        metrics_json: None,
+        verdict: None,
+        verdict_notes: None,
+        verdict_at: None,
+    };
+    store.upsert_run(&run)?;
+    crate::commands::exp::spawn_detached_supervise(&run_id)?;
+    Ok(Json(json!({ "state": "building", "runId": run_id, "url": url })))
+}
+
+async fn play_root(Path(id): Path<String>) -> Response {
+    axum::response::Redirect::permanent(&format!("/play/{id}/")).into_response()
+}
+
+async fn play_index(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    serve_play_path(state, id, String::new()).await
+}
+
+async fn play_file(
+    State(state): State<AppState>,
+    Path((id, path)): Path<(String, String)>,
+) -> Response {
+    serve_play_path(state, id, path).await
+}
+
+/// A minimal holding page while a build is in flight (auto-refreshes) or
+/// after a failure (points at the run's logs in the dashboard).
+fn play_holding_page(exp_name: &str, state: &str) -> Response {
+    let (title, body, refresh) = match state {
+        "building" => (
+            "Building…",
+            "The playable build is running. This page refreshes until it's ready.",
+            true,
+        ),
+        "failed" => (
+            "Build failed",
+            "The last build failed — check the run's logs in the dashboard, then press Play again.",
+            false,
+        ),
+        _ => (
+            "No build yet",
+            "No playable build exists for this experiment — press Play in the dashboard to start one.",
+            false,
+        ),
+    };
+    let meta = if refresh {
+        r#"<meta http-equiv="refresh" content="3">"#
+    } else {
+        ""
+    };
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">{meta}<title>{title}</title>\
+         <style>body{{font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0;color:#333}}\
+         main{{text-align:center}}</style></head>\
+         <body><main><h1>{title}</h1><p>{exp_name}</p><p>{body}</p></main></body></html>"
+    );
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "no-cache")],
+        Html(html),
+    )
+        .into_response()
+}
+
+async fn serve_play_path(_state: AppState, exp_id: String, rel: String) -> Response {
+    let result = tokio::task::spawn_blocking(move || -> Result<Response> {
+        let store = Store::open()?;
+        let Some(exp) = store.get_local_experiment(&exp_id)? else {
+            return Ok((StatusCode::NOT_FOUND, "experiment not found").into_response());
+        };
+        let Some(project) = store.get_local_project(&exp.project_id)? else {
+            return Ok((StatusCode::NOT_FOUND, "project not found").into_response());
+        };
+        let dir = play_serve_dir(&project, &exp.id);
+
+        // No completed build (or its dir is gone): explain instead of 404ing.
+        let play_runs: Vec<_> = store
+            .list_runs_by_experiment(&exp.id)?
+            .into_iter()
+            .filter(|r| r.kind == "play")
+            .collect();
+        let has_build = play_runs.iter().any(|r| r.status == "done") && dir.is_dir();
+        if !has_build {
+            let state = if play_runs.iter().any(|r| !is_terminal(&r.status)) {
+                "building"
+            } else if play_runs.iter().any(|r| r.status == "failed") {
+                "failed"
+            } else {
+                "none"
+            };
+            return Ok(play_holding_page(exp.display_name(), state));
+        }
+
+        let root = std::fs::canonicalize(&dir)
+            .map_err(|e| anyhow!("play dir unavailable: {e}"))?;
+        let rel = rel.trim_start_matches('/');
+        let candidate = if rel.is_empty() {
+            root.join("index.html")
+        } else {
+            root.join(rel)
+        };
+        // SPA fallback: unknown extensionless routes serve index.html.
+        let resolved = match std::fs::canonicalize(&candidate) {
+            Ok(p) if p.is_dir() => p.join("index.html"),
+            Ok(p) => p,
+            Err(_) if !rel.contains('.') => root.join("index.html"),
+            Err(_) => return Ok((StatusCode::NOT_FOUND, "not found").into_response()),
+        };
+        let resolved = std::fs::canonicalize(&resolved)
+            .map_err(|_| anyhow!("not found"))
+            .unwrap_or(resolved);
+        if !resolved.starts_with(&root) {
+            return Ok((StatusCode::BAD_REQUEST, "path escapes build dir").into_response());
+        }
+        let bytes = match std::fs::read(&resolved) {
+            Ok(b) => b,
+            Err(_) => return Ok((StatusCode::NOT_FOUND, "not found").into_response()),
+        };
+        let name = resolved.to_string_lossy();
+        let content_type = local::files::content_type_for_path(&name);
+        // HTML swaps in place on rebuild — never cache it; hashed assets can
+        // be cached briefly.
+        let cache = if content_type.starts_with("text/html") {
+            "no-cache"
+        } else {
+            "public, max-age=3600"
+        };
+        Ok((
+            [
+                (header::CONTENT_TYPE, content_type.to_string()),
+                (header::CACHE_CONTROL, cache.to_string()),
+            ],
+            bytes,
+        )
+            .into_response())
+    })
+    .await;
+    match result {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(err)) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+// --- run artifacts ---------------------------------------------------------
+
+/// Cap on artifact listing entries (a run dumping thousands of files still
+/// lists, truncated).
+const ARTIFACTS_LIMIT: usize = 2_000;
+
+async fn list_run_artifacts(Path(id): Path<String>) -> ApiResult {
+    blocking_api(move || {
+        let store = Store::open()?;
+        store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
+        let root = crate::store::run_artifacts_dir(&id);
+        let mut entries: Vec<(String, u64)> = Vec::new();
+        collect_files(&root, &root, &mut entries);
+        entries.sort();
+        let truncated = entries.len() > ARTIFACTS_LIMIT;
+        entries.truncate(ARTIFACTS_LIMIT);
+        let artifacts: Vec<Value> = entries
+            .iter()
+            .map(|(path, size)| {
+                json!({
+                    "path": path,
+                    "size": size,
+                    "contentType": local::files::content_type_for_path(path),
+                })
+            })
+            .collect();
+        Ok(Json(json!({ "artifacts": artifacts, "truncated": truncated })))
+    })
+    .await
+}
+
+/// Recursive file walk, paths relative to `root`. Missing dir = empty list
+/// (the run may simply never have written artifacts).
+fn collect_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, u64)>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(root, &path, out);
+        } else if let (Ok(rel), Ok(meta)) = (path.strip_prefix(root), entry.metadata()) {
+            out.push((rel.to_string_lossy().into_owned(), meta.len()));
+        }
+    }
+}
+
+async fn serve_run_artifact(
+    Path(id): Path<String>,
+    Query(q): Query<FilePathQuery>,
+) -> std::result::Result<Response, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let store = Store::open()?;
+        store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
+        let root = std::fs::canonicalize(crate::store::run_artifacts_dir(&id))
+            .map_err(|_| not_found("artifact"))?;
+        let full = std::fs::canonicalize(root.join(q.path.trim_start_matches('/')))
+            .map_err(|_| not_found("artifact"))?;
+        if !full.starts_with(&root) || full.is_dir() {
+            return Err(bad_request("invalid artifact path"));
+        }
+        let bytes = std::fs::read(&full).map_err(|_| not_found("artifact"))?;
+        let content_type = local::files::content_type_for_path(&full.to_string_lossy());
+        Ok((
+            [
+                (header::CONTENT_TYPE, content_type),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            bytes,
+        )
+            .into_response())
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("artifact task failed: {e}")))?
 }
 
 #[derive(Deserialize)]
