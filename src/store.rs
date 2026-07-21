@@ -140,6 +140,41 @@ pub fn run_metrics_path(run_id: &str) -> PathBuf {
     run_artifacts_dir(run_id).join("metrics.json")
 }
 
+/// The small metrics slice list payloads carry as `metricsAggregate`.
+/// Prefers a top-level `aggregate`; falls back to hoisting per-run aggregates
+/// from sim-batch's native `{runs: [{id, aggregate}]}` shape — a single run
+/// keeps plain keys, several are prefixed `<id>:<key>` so scenarios stay
+/// distinguishable.
+pub fn metrics_aggregate(doc: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    if let Some(agg) = doc.get("aggregate") {
+        return Some(agg.clone());
+    }
+    let runs = doc.get("runs")?.as_array()?;
+    let with_agg: Vec<(&str, &serde_json::Map<String, Value>)> = runs
+        .iter()
+        .filter_map(|r| {
+            Some((
+                r.get("id").and_then(Value::as_str).unwrap_or("run"),
+                r.get("aggregate")?.as_object()?,
+            ))
+        })
+        .collect();
+    match with_agg.as_slice() {
+        [] => None,
+        [(_, agg)] => Some(Value::Object((*agg).clone())),
+        many => {
+            let mut out = serde_json::Map::new();
+            for (id, agg) in many {
+                for (k, v) in agg.iter() {
+                    out.insert(format!("{id}:{k}"), v.clone());
+                }
+            }
+            Some(Value::Object(out))
+        }
+    }
+}
+
 /// A locally-tracked external run. `status` uses the server vocabulary
 /// (starting/running/done/failed/cancelled); `backend_json` is the opaque
 /// descriptor (kind, namespace, jobId, flavor…) shared with the api mirror.

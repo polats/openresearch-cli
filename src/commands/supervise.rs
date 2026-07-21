@@ -1118,7 +1118,7 @@ fn ingest_metrics(store: &Store, run_id: &str) {
     }
     let stored_doc = if raw.len() > METRICS_COMPACT_BYTES {
         json!({
-            "aggregate": doc.get("aggregate").cloned().unwrap_or(serde_json::Value::Null),
+            "aggregate": crate::store::metrics_aggregate(&doc).unwrap_or(serde_json::Value::Null),
             "truncated": true,
         })
         .to_string()

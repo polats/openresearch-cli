@@ -412,7 +412,7 @@ impl From<&StoredRun> for ApiRun {
                 .metrics_json
                 .as_deref()
                 .and_then(|m| serde_json::from_str::<Value>(m).ok())
-                .and_then(|v| v.get("aggregate").cloned()),
+                .and_then(|v| crate::store::metrics_aggregate(&v)),
             verdict: run.verdict.clone(),
             verdict_notes: run.verdict_notes.clone(),
             verdict_at: run.verdict_at,
