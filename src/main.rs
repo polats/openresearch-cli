@@ -646,7 +646,7 @@ pub struct SuperviseArgs {
 #[derive(Args, Debug)]
 pub struct UpArgs {
     /// Port to bind on 127.0.0.1. With `--remote`, the local port to forward.
-    #[arg(long, default_value_t = 4791)]
+    #[arg(long, default_value_t = 3333)]
     pub port: u16,
     /// IP address to bind (default 127.0.0.1 — this machine only). Use
     /// 0.0.0.0 to reach the dashboard from other devices on your local

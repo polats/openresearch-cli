@@ -25,7 +25,7 @@ curl -LsSf https://openresearch.sh/install.sh | sh
 orx up
 ```
 
-The dashboard opens at `http://127.0.0.1:4791`. Give the agent a goal — for
+The dashboard opens at `http://127.0.0.1:3333`. Give the agent a goal — for
 example, ask it to reproduce a paper:
 
 ```
