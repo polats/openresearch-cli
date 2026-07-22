@@ -267,6 +267,19 @@ export const setExperimentPlayEntry = (expId: string, playEntry: string | null) 
     (r) => r.experiment,
   );
 
+/** Start-or-keep-alive the experiment's play session (the play tab calls it
+ *  every 10s while mounted). Errors while the build isn't ready yet. */
+export const beatPlaySession = (expId: string) =>
+  post<{ run: Run }>(`/api/experiments/${expId}/play-session/beat`).then((r) => r.run);
+
+/** End the open play session; the verdict (if any) lands on the session run.
+ *  No open session is a no-op. */
+export const endPlaySession = (expId: string, verdict?: Verdict | null, notes?: string) =>
+  post<{ run: Run | null }>(`/api/experiments/${expId}/play-session/end`, {
+    verdict: verdict ?? null,
+    notes,
+  }).then((r) => r.run);
+
 export interface LogChunk {
   dataBase64: string;
   nextOffset: number;

@@ -466,6 +466,23 @@ impl Store {
         Ok(())
     }
 
+    /// End play-session runs whose UI heartbeat went stale — the browser
+    /// vanished without a clean end. Each is closed at its last heartbeat
+    /// (created_at when it never beat), not at reap time, so durations stay
+    /// honest. Returns how many were ended.
+    pub fn reap_stale_play_sessions(&self, stale_before_ms: i64) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE runs SET status = 'done',
+                             ended_at = COALESCE(supervisor_heartbeat_ms, created_at),
+                             updated_at = ?2
+             WHERE kind = 'play-session'
+               AND status NOT IN ('done', 'failed', 'cancelled')
+               AND COALESCE(supervisor_heartbeat_ms, created_at) < ?1",
+            params![stale_before_ms, now_ms()],
+        )?;
+        Ok(n)
+    }
+
     /// Standing verdict on an experiment (None clears). Bumps updated_at so
     /// the SSE experiment diff pushes the change.
     pub fn set_experiment_verdict(

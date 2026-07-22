@@ -4423,3 +4423,20 @@ a.files-pill:hover {
 .node-eyebrow-left .node-gh {
   padding: 1px;
 }
+
+/* Session clock in the play bar: pulsing dot + elapsed play time. */
+.session-clock {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.session-clock .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-green, #2e7d32);
+  animation: pulse 2s ease-in-out infinite;
+}

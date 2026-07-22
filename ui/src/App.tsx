@@ -12,6 +12,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelRun,
+  endPlaySession,
   getFiles,
   listExperiments,
   listProjects,
@@ -306,6 +307,9 @@ export default function App() {
     (tab: ExpViewDef) => {
       const idx = expTabs.findIndex((t) => sameExpTab(t, tab));
       if (idx === -1) return;
+      // Closing a play tab ends its session (no-op when none is open —
+      // e.g. it already ended via a verdict or the stale reaper).
+      if (tab.view === "play") void endPlaySession(tab.id).catch(() => {});
       const next = expTabs.filter((_, i) => i !== idx);
       setExpTabs(next);
       // Closing the focused tab falls back to a neighbor, else the Log tab.

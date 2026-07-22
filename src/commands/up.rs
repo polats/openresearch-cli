@@ -68,6 +68,19 @@ pub async fn run(args: UpArgs) -> Result<()> {
     spawn_hf_preflight();
     spawn_k8s_preflight();
     spawn_agent_git_preflight();
+    // End play-session runs whose browser vanished without a clean end —
+    // the play tab beats every 10s; minutes of silence means it's gone.
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            if let Ok(store) = Store::open() {
+                match store.reap_stale_play_sessions(now_ms() - PLAY_SESSION_STALE_MS) {
+                    Ok(0) | Err(_) => {}
+                    Ok(n) => eprintln!("orx up: ended {n} stale play session(s)"),
+                }
+            }
+        }
+    });
     // Wake an idle chat session when a run completes (the agent's wait loop
     // covers the busy case; this covers turns that ended early).
     tokio::spawn(local::chat::watch_runs(state.chat.clone()));
@@ -215,6 +228,14 @@ fn router(state: AppState) -> Router {
         .route("/api/runs/{id}/artifacts", get(list_run_artifacts))
         .route("/api/runs/{id}/artifacts/file", get(serve_run_artifact))
         .route("/api/experiments/{id}/play-build", post(play_build))
+        .route(
+            "/api/experiments/{id}/play-session/beat",
+            post(play_session_beat),
+        )
+        .route(
+            "/api/experiments/{id}/play-session/end",
+            post(play_session_end),
+        )
         .route(
             "/api/experiments/{id}",
             axum::routing::patch(update_experiment),
@@ -745,7 +766,9 @@ async fn reconcile_instances() -> ApiResult {
     let store = Store::open()?;
     let mut reattached: Vec<String> = Vec::new();
     for run in store.list_runs(INSTANCES_LIMIT)? {
-        if is_terminal(&run.status) || watcher_alive(&run) {
+        // Play sessions have no supervisor — the stale-session reaper is
+        // their reconciliation.
+        if is_terminal(&run.status) || watcher_alive(&run) || run.kind == "play-session" {
             continue;
         }
         crate::commands::exp::spawn_detached_supervise(&run.id)?;
@@ -894,6 +917,11 @@ async fn cancel_run(Path(id): Path<String>) -> ApiResult {
     // A terminal run must not gain a stale cancel_requested flag.
     if is_terminal(&run.status) {
         return Err(bad_request(format!("run already {}", run.status)));
+    }
+    // No supervisor polls a play session — cancel means "end it now".
+    if run.kind == "play-session" {
+        store.update_status(&run.id, "cancelled", Some(now_ms()), None)?;
+        return Ok(Json(json!({ "ok": true })));
     }
     store.set_cancel_requested(&run.id, true)?;
     Ok(Json(json!({ "ok": true })))
@@ -1141,6 +1169,88 @@ async fn update_experiment(
         .get_local_experiment(&id)?
         .ok_or_else(|| not_found("experiment"))?;
     Ok(Json(json!({ "experiment": exp })))
+}
+
+/// A session with no heartbeat for this long is over — generous enough that
+/// a detour to the Logs tab (which pauses beats) doesn't clip a live session.
+const PLAY_SESSION_STALE_MS: i64 = 180_000;
+
+/// Start-or-keep-alive for the experiment's play session. The play tab calls
+/// this every 10s while mounted: an open session gets its heartbeat touched;
+/// none open starts one, stamped with the served build's commit and entry
+/// page. One open session per experiment.
+async fn play_session_beat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    let exp = store
+        .get_local_experiment(&id)?
+        .ok_or_else(|| not_found("experiment"))?;
+    let runs = store.list_runs_by_experiment(&exp.id)?;
+    if let Some(open) = runs
+        .iter()
+        .find(|r| r.kind == "play-session" && !is_terminal(&r.status))
+    {
+        store.touch_supervisor(&open.id)?;
+        let run = store.get_run(&open.id)?.ok_or_else(|| not_found("run"))?;
+        return Ok(Json(json!({ "run": ApiRun::from(&run) })));
+    }
+    // Sessions attach to a served build — its commit is the provenance.
+    let sha = runs
+        .iter()
+        .find(|r| r.kind == "play" && r.status == "done")
+        .and_then(|r| r.commit_sha.clone())
+        .ok_or_else(|| bad_request("no playable build to attach a session to"))?;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let run = StoredRun {
+        id: run_id.clone(),
+        experiment_id: exp.id.clone(),
+        project_id: exp.project_id.clone(),
+        status: "running".to_string(),
+        backend_json: json!({ "kind": "play_session", "entry": exp.play_entry }).to_string(),
+        command: String::new(),
+        created_at: now_ms(),
+        updated_at: now_ms(),
+        ended_at: None,
+        exit_code: None,
+        commit_sha: Some(sha),
+        result_markdown: None,
+        cancel_requested: false,
+        supervisor_heartbeat_ms: None,
+        kind: "play-session".to_string(),
+        metrics_json: None,
+        verdict: None,
+        verdict_notes: None,
+        verdict_at: None,
+    };
+    store.upsert_run(&run)?;
+    store.touch_supervisor(&run_id)?;
+    let run = store.get_run(&run_id)?.ok_or_else(|| not_found("run"))?;
+    Ok(Json(json!({ "run": ApiRun::from(&run) })))
+}
+
+/// End the experiment's open play session (tab closed, or a verdict given —
+/// the verdict lands on the session run). No open session is a no-op, so the
+/// tab-close path can fire blind.
+async fn play_session_end(Path(id): Path<String>, Json(req): Json<VerdictReq>) -> ApiResult {
+    let verdict = parse_verdict(&req.verdict)?;
+    let notes = req.notes.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let store = Store::open()?;
+    store
+        .get_local_experiment(&id)?
+        .ok_or_else(|| not_found("experiment"))?;
+    let open = store
+        .list_runs_by_experiment(&id)?
+        .into_iter()
+        .find(|r| r.kind == "play-session" && !is_terminal(&r.status));
+    let Some(open) = open else {
+        return Ok(Json(json!({ "run": Value::Null })));
+    };
+    store.update_status(&open.id, "done", Some(now_ms()), None)?;
+    if verdict.is_some() || notes.is_some() {
+        store.set_run_verdict(&open.id, verdict, notes)?;
+    }
+    let run = store.get_run(&open.id)?.ok_or_else(|| not_found("run"))?;
+    Ok(Json(json!({ "run": ApiRun::from(&run) })))
 }
 
 async fn play_root(Path(id): Path<String>) -> Response {

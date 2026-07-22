@@ -1,7 +1,10 @@
 import { ChevronDown, CircleStop, ExternalLink, NotebookPen, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
+  beatPlaySession,
   cancelRun,
+  endPlaySession,
+  fmtDuration,
   getCommitDiff,
   getWorkingTree,
   listExperimentCommits,
@@ -65,6 +68,36 @@ function PlayView({ experiment }: { experiment: Experiment }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [experiment.id, reloadKey]);
 
+  // Session runs: beat every 10s while the tab is mounted — the first beat
+  // after the build lands starts the session (earlier ones error and are
+  // ignored), so build wait never counts as play time. Giving a verdict ends
+  // the session and the verdict rides the session run; the server-side
+  // reaper covers a browser that just vanishes.
+  const [session, setSession] = useState<Run | null>(null);
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    let stopped = false;
+    const beat = () =>
+      beatPlaySession(experiment.id)
+        .then((r) => {
+          if (!stopped) setSession(r);
+        })
+        .catch(() => {});
+    beat();
+    const beats = setInterval(beat, 10_000);
+    const clock = setInterval(() => setTick((n) => n + 1), 30_000);
+    return () => {
+      stopped = true;
+      clearInterval(beats);
+      clearInterval(clock);
+    };
+  }, [experiment.id, reloadKey]);
+  const endWithVerdict = (v: Verdict | null, notes: string) => {
+    endPlaySession(experiment.id, v, notes)
+      .then(() => setSession(null))
+      .catch((err) => console.error("play-session:", err));
+  };
+
   const src = playUrl({ id: experiment.id, playEntry: experiment.playEntry });
   const saveEntry = () => {
     const next = entry.trim() || null;
@@ -88,6 +121,19 @@ function PlayView({ experiment }: { experiment: Experiment }) {
           }}
         />
         <span style={{ flex: 1 }} />
+        {session && (
+          <>
+            <span className="session-clock" title={`Session started ${timeAgo(session.createdAt)}`}>
+              <span className="dot" />
+              {fmtDuration(Date.now() - session.createdAt)}
+            </span>
+            <VerdictChips
+              verdict={session.verdict ?? null}
+              notes={session.verdictNotes}
+              onSave={endWithVerdict}
+            />
+          </>
+        )}
         <button
           className="btn sm"
           title="Rebuild from the branch head and reload"
