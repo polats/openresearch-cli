@@ -3,7 +3,7 @@
 // links) render as chips that open the file as a right-pane tab.
 
 import { Check, Copy, FileCode } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -191,7 +191,17 @@ export const mdCodeComponents: Record<string, (props: any) => ReactNode> = {
   pre: ({ children }: any) => <>{children}</>,
 };
 
-export function Md({ text, onOpenFile }: { text: string; onOpenFile?: (path: string) => void }) {
+/** Memoized: markdown + KaTeX parsing is the expensive part of a chat render,
+ * and during streaming only the growing part's text actually changes — every
+ * other Md in the transcript can skip the re-parse (memo compares `text` by
+ * value; keep `onOpenFile` referentially stable at call sites). */
+export const Md = memo(function Md({
+  text,
+  onOpenFile,
+}: {
+  text: string;
+  onOpenFile?: (path: string) => void;
+}) {
   const components: Record<string, (props: any) => ReactNode> = {
     "file-mention": (props) => (
       <FileChip path={props.path} lines={props.lines} onOpenFile={onOpenFile} />
@@ -222,4 +232,4 @@ export function Md({ text, onOpenFile }: { text: string; onOpenFile?: (path: str
       </ReactMarkdown>
     </div>
   );
-}
+});
