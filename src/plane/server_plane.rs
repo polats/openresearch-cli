@@ -609,7 +609,13 @@ impl ControlPlane for ServerPlane {
             description,
             run_command,
             baseline: _,
+            merge,
         } = spec;
+        if merge.is_some() {
+            return Err(anyhow!(
+                "--merge is local-mode only; merge experiments are not supported on server projects."
+            ));
+        }
 
         let experiment: crate::client::Experiment;
         let kind: String;

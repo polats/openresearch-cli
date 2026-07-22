@@ -75,7 +75,13 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   const { exp, latestRun, runs, isBaseline, githubOwner, githubRepo, onOpenView, onOpenCodeBranch } = data;
   const status = latestRun?.status;
   const live = status === "running" || status === "starting";
-  const kind = isBaseline ? "Baseline" : live ? "Running" : "Experiment";
+  const kind = isBaseline
+    ? "Baseline"
+    : live
+      ? "Running"
+      : exp.mergeParentExperimentId
+        ? "Merge"
+        : "Experiment";
   const squares = runs.slice(-MAX_SQUARES);
   return (
     <div className={`exp-node ${live ? "live" : ""}`}>
@@ -237,6 +243,19 @@ export function TreeView({
       const w = subtreeWidth(root);
       layout(root, rx + w / 2, 0);
       rx += w + GAP_X;
+    }
+    // Merge lineage: a dashed second edge from the merged-in experiment to
+    // the merge node, on top of the tree's parent edges.
+    const placed = new Set(nodes.map((n) => n.id));
+    for (const e of experiments) {
+      if (e.mergeParentExperimentId && placed.has(e.mergeParentExperimentId) && placed.has(e.id)) {
+        edges.push({
+          id: `m-${e.mergeParentExperimentId}-${e.id}`,
+          source: e.mergeParentExperimentId,
+          target: e.id,
+          style: { stroke: "var(--text)", strokeWidth: 1.5, opacity: 0.45, strokeDasharray: "5 4" },
+        });
+      }
     }
     return { nodes, edges };
   }, [experiments, runs, onOpenView, onOpenCodeBranch, project.githubOwner, project.githubRepo]);

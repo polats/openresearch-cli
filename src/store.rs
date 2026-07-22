@@ -328,6 +328,8 @@ impl Store {
             "ALTER TABLE local_projects ADD COLUMN play_dir TEXT",
             "ALTER TABLE local_experiments ADD COLUMN play_entry TEXT",
             "ALTER TABLE local_projects ADD COLUMN persona TEXT",
+            "ALTER TABLE local_experiments ADD COLUMN merge_parent_experiment_id TEXT",
+            "ALTER TABLE local_projects ADD COLUMN auto_prompts TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -624,11 +626,12 @@ impl Store {
 
     pub fn create_local_project(&self, p: &LocalProject) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
+            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"),
             params![
                 p.id, p.name, p.slug, p.github_owner, p.github_repo,
                 p.baseline_branch, p.repo_path, p.run_command, p.paper_id, p.created_at, p.updated_at,
                 p.play_command, p.play_dir, p.persona,
+                p.auto_prompts.as_ref().and_then(|a| serde_json::to_string(a).ok()),
             ],
         )?;
         Ok(())
@@ -707,7 +710,8 @@ impl Store {
         self.conn.execute(
             "UPDATE local_projects SET name = ?2, slug = ?3, github_owner = ?4, github_repo = ?5,
                     baseline_branch = ?6, repo_path = ?7, run_command = ?8, paper_id = ?9,
-                    updated_at = ?10, play_command = ?11, play_dir = ?12, persona = ?13
+                    updated_at = ?10, play_command = ?11, play_dir = ?12, persona = ?13,
+                    auto_prompts = ?14
              WHERE id = ?1",
             params![
                 p.id,
@@ -723,6 +727,9 @@ impl Store {
                 p.play_command,
                 p.play_dir,
                 p.persona,
+                p.auto_prompts
+                    .as_ref()
+                    .and_then(|a| serde_json::to_string(a).ok()),
             ],
         )?;
         Ok(())
@@ -732,11 +739,12 @@ impl Store {
 
     pub fn create_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"),
+            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"),
             params![
                 e.id, e.project_id, e.parent_experiment_id, e.slug, e.branch_name,
                 e.title, e.description, e.run_command, e.agent_status, e.created_at, e.updated_at,
                 e.verdict, e.verdict_notes, e.verdict_at, e.play_entry,
+                e.merge_parent_experiment_id,
             ],
         )?;
         Ok(())
@@ -1061,11 +1069,12 @@ const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, baseline_branch, \
                             repo_path, run_command, paper_id, created_at, updated_at, \
-                            play_command, play_dir, persona";
+                            play_command, play_dir, persona, auto_prompts";
 
 const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branch_name, \
                                title, description, run_command, agent_status, created_at, updated_at, \
-                               verdict, verdict_notes, verdict_at, play_entry";
+                               verdict, verdict_notes, verdict_at, play_entry, \
+                               merge_parent_experiment_id";
 
 fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlite::Error> {
     Ok(StoredRun {
@@ -1110,7 +1119,8 @@ mod tests {
     }
 
     fn temp_store(name: &str) -> (Store, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("orx-store-test-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         (Store::open_at(dir.clone()).unwrap(), dir)
     }
@@ -1154,13 +1164,21 @@ mod tests {
         store
             .set_run_metrics("r1", r#"{"aggregate":{"winRate":0.54}}"#)
             .unwrap();
-        store.set_run_verdict("r1", Some("keep"), Some("felt tactical")).unwrap();
+        store
+            .set_run_verdict("r1", Some("keep"), Some("felt tactical"))
+            .unwrap();
         let run = store.get_run("r1").unwrap().unwrap();
-        assert_eq!(run.metrics_json.as_deref(), Some(r#"{"aggregate":{"winRate":0.54}}"#));
+        assert_eq!(
+            run.metrics_json.as_deref(),
+            Some(r#"{"aggregate":{"winRate":0.54}}"#)
+        );
         assert_eq!(run.verdict.as_deref(), Some("keep"));
         assert_eq!(run.verdict_notes.as_deref(), Some("felt tactical"));
         assert!(run.verdict_at.is_some());
-        assert!(run.updated_at > 1, "verdict/metrics writes must bump updated_at");
+        assert!(
+            run.updated_at > 1,
+            "verdict/metrics writes must bump updated_at"
+        );
 
         store.set_run_verdict("r1", None, None).unwrap();
         let run = store.get_run("r1").unwrap().unwrap();
@@ -1189,6 +1207,7 @@ mod tests {
             verdict_notes: None,
             verdict_at: None,
             play_entry: None,
+            merge_parent_experiment_id: None,
         };
         store.create_local_experiment(&exp).unwrap();
         store

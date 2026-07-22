@@ -368,6 +368,11 @@ pub struct CreateExperimentArgs {
     /// inherit from the parent / project default.
     #[arg(long = "run-command")]
     pub run_command: Option<String>,
+    /// Merge this experiment's branch into the new node (a second parent —
+    /// the tree draws it as a merge edge). Local mode only. Conflicts are
+    /// reported and left for you to resolve in your worktree.
+    #[arg(long)]
+    pub merge: Option<String>,
 }
 
 #[derive(Args, Debug)]

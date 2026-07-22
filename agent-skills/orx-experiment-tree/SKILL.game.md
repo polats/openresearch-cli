@@ -170,6 +170,20 @@ run command:
    The baseline stays untouched throughout — promotion moves the *focal parent* down the
    tree, it never edits the root.
 
+**Combining variants.** When two branches both earned a `keep` and the next
+step is one build with both changes, create a **merge node**:
+
+```sh
+orx create-experiment <projectId> --parent <keeperA> --merge <keeperB> \
+  --title "A + B"
+```
+
+The merge commit lands on the new child's branch in one step and the node is
+immediately playable; the tree draws a dashed merge edge from B. On
+conflicts, the command says so — check out the new branch in your worktree,
+`git merge <B's branch>`, resolve, push. Never merge into A's or B's own
+branches (cardinal rule 6).
+
 Stop when the goal is met, or when a round comes back all-kill with no new
 ideas. When a line of work concludes, make sure every judged node carries its
 verdict and its `orx exp desc` says how it felt and why it was kept or killed

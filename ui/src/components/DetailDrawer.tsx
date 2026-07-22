@@ -324,6 +324,7 @@ export function DetailDrawer({
   runs,
   selectedRunId,
   onSelectRun,
+  mergeParent = null,
 }: {
   experiment: Experiment;
   /** Owning project — supplies owner/repo for the GitHub branch link. */
@@ -332,6 +333,8 @@ export function DetailDrawer({
   runs: Run[];
   selectedRunId: string | null;
   onSelectRun: (id: string | null) => void;
+  /** The merged-in experiment, when this node is a merge (dashed edge). */
+  mergeParent?: Experiment | null;
 }) {
   const expRuns = runs
     .filter((r) => r.experimentId === experiment.id)
@@ -378,6 +381,14 @@ export function DetailDrawer({
         {experiment.verdictNotes && (
           <span className="verdict-notes-preview" title={experiment.verdictNotes}>
             {experiment.verdictNotes}
+          </span>
+        )}
+        {mergeParent && (
+          <span
+            className="verdict-notes-preview"
+            title={`Branch ${mergeParent.branchName} was merged into this node at creation`}
+          >
+            merged from {mergeParent.title || mergeParent.slug}
           </span>
         )}
       </div>

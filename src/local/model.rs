@@ -2,7 +2,7 @@
 //! HTTP API serves. Row conversions live here beside the structs; the SQL
 //! (matching column order) lives in `store.rs`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +29,24 @@ pub struct LocalProject {
     pub play_dir: Option<String>,
     /// Agent persona wire id (`research` | `game-designer`); NULL = research.
     pub persona: Option<String>,
+    /// Which automatic `[orx]` chat prompts fire for this project. NULL (and
+    /// every unset field) = off — the agent is only prompted when the user
+    /// opts in via the Persona tab.
+    pub auto_prompts: Option<AutoPrompts>,
+}
+
+/// Per-project switches for the run-watcher's automatic chat prompts
+/// (`chat::watch_runs`). All default **off**: unsolicited agent turns proved
+/// intrusive during playtests. Stored as JSON in `local_projects.auto_prompts`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AutoPrompts {
+    /// A play session ended → ask the user how it felt, record the verdict.
+    pub play_session: bool,
+    /// A play build failed → tell the agent to fix the branch.
+    pub play_build_failed: bool,
+    /// A job/sim run completed → reconcile and continue the loop.
+    pub run_completed: bool,
 }
 
 impl LocalProject {
@@ -49,6 +67,9 @@ impl LocalProject {
             play_command: row.get(11)?,
             play_dir: row.get(12)?,
             persona: row.get(13)?,
+            auto_prompts: row
+                .get::<_, Option<String>>(14)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
         })
     }
 
@@ -83,6 +104,10 @@ pub struct LocalExperiment {
     /// The playable's entry page under /play/<id>/ (path + optional query,
     /// e.g. `gambit-slots.html?x=1`). None = the build's index.html.
     pub play_entry: Option<String>,
+    /// Second parent for merge nodes: the experiment whose branch was merged
+    /// into this one at creation (`create-experiment --merge`). Drawn as a
+    /// dashed extra edge in the tree.
+    pub merge_parent_experiment_id: Option<String>,
 }
 
 impl LocalExperiment {
@@ -104,6 +129,7 @@ impl LocalExperiment {
             verdict_notes: row.get(12)?,
             verdict_at: row.get(13)?,
             play_entry: row.get(14)?,
+            merge_parent_experiment_id: row.get(15)?,
         })
     }
 

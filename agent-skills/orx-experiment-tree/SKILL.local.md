@@ -157,6 +157,13 @@ intended flow — do **not** edit the baseline or rewrite the run command:
    The baseline stays untouched throughout — promotion moves the *focal parent* down the
    tree, it never edits the root.
 
+**Combining branches.** To bring two lines of work together, create a
+**merge node**: `orx create-experiment <projectId> --parent <A> --merge <B>`
+puts the merge commit on a new child branch in one step (dashed merge edge in
+the tree). On conflicts, the command says so — resolve with `git merge` in
+your worktree and push. Never merge into A's or B's own branches (cardinal
+rule 6).
+
 Stop when the goal is met, or after ~3 consecutive failed or regressed runs.
 When you stop, write up the tree as a report in the project's files dir — see
 the `orx-reports` skill for the folder layout and section structure.

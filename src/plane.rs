@@ -333,6 +333,8 @@ pub struct CreateExperimentSpec {
     pub baseline: bool,
     pub description: Option<String>,
     pub run_command: Option<String>,
+    /// Merge this experiment's branch into the new node (local mode only).
+    pub merge: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
