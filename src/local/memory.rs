@@ -206,6 +206,7 @@ mod tests {
             paper_id: None,
             play_command: None,
             play_dir: None,
+            persona: None,
             created_at: 0,
             updated_at: 0,
         };

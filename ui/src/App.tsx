@@ -550,7 +550,11 @@ export default function App() {
                 ) : null;
               })()
             ) : mainView !== "chat" ? (
-              <SettingsView tab={mainView} />
+              <SettingsView
+                tab={mainView}
+                project={activeProject}
+                onProjectUpdated={(p) => setProjects((cur) => (cur ? upsert(cur, p) : [p]))}
+              />
             ) : null}
           </ChatPanel>
         )}

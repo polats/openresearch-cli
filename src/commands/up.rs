@@ -312,6 +312,7 @@ fn router(state: AppState) -> Router {
         .route("/api/settings/openresearch", get(openresearch_settings))
         .route("/api/harnesses", get(list_harnesses))
         .route("/api/skills", get(list_skills))
+        .route("/api/personas", get(list_personas))
         .route(
             "/api/chat/sessions",
             get(list_chat_sessions).post(create_chat_session),
@@ -468,6 +469,35 @@ async fn list_skills() -> Json<Value> {
         })
         .collect();
     Json(json!({ "skills": skills }))
+}
+
+/// The available agent personas, for the dashboard's Persona tab: label,
+/// blurb, the system-prompt template (repo-reader comment stripped, `{token}`
+/// placeholders left visible), and the skill set each persona injects.
+async fn list_personas() -> Json<Value> {
+    let personas: Vec<Value> = local::agent_skills::Persona::ALL
+        .iter()
+        .map(|&p| {
+            let skills: Vec<Value> = local::agent_skills::skills_for_persona(p)
+                .iter()
+                .map(|s| {
+                    json!({
+                        "name": s.name,
+                        "description": s.description,
+                        "content": s.content,
+                    })
+                })
+                .collect();
+            json!({
+                "id": p.as_str(),
+                "label": p.label(),
+                "description": p.blurb(),
+                "systemPrompt": local::opencode::persona_template(p),
+                "skills": skills,
+            })
+        })
+        .collect();
+    Json(json!({ "personas": personas }))
 }
 
 async fn list_projects() -> ApiResult {
@@ -638,6 +668,8 @@ struct UpdateProjectReq {
     name: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     run_command: Option<Option<String>>,
+    /// Agent persona wire id (`research` | `game-designer`).
+    persona: Option<String>,
 }
 
 async fn update_project(
@@ -646,9 +678,9 @@ async fn update_project(
     Json(req): Json<UpdateProjectReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
-    if req.name.is_none() && req.run_command.is_none() {
+    if req.name.is_none() && req.run_command.is_none() && req.persona.is_none() {
         return Err(bad_request(
-            "nothing to update: pass name and/or runCommand",
+            "nothing to update: pass name, runCommand, and/or persona",
         ));
     }
     let store = Store::open()?;
@@ -663,6 +695,11 @@ async fn update_project(
     }
     if let Some(cmd) = req.run_command {
         project.run_command = cmd.filter(|c| !c.trim().is_empty());
+    }
+    if let Some(persona) = req.persona {
+        let parsed = local::agent_skills::Persona::parse(Some(persona.trim()))
+            .map_err(bad_request)?;
+        project.persona = Some(parsed.as_str().to_string());
     }
     store.update_local_project(&project)?;
     // Re-read: update bumps updated_at, which is also what fires the SSE

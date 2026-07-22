@@ -19,6 +19,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
 use crate::error::{anyhow, Result};
+use crate::local::agent_skills::Persona;
 use crate::local::git;
 use crate::local::model::LocalProject;
 use crate::store;
@@ -108,6 +109,23 @@ fn opencode_config_json(model: Option<&str>, instructions: &str) -> String {
 /// placeholders are substituted (project facts, the compute default, the
 /// skills index, persisted memory).
 const SYSTEM_PROMPT: &str = include_str!("../../SYSTEM_PROMPT.md");
+/// The game-designer persona's playbook template — same token vocabulary,
+/// game-design loop (branch → build → play → verdict) instead of the
+/// auto-research loop. Selected via `local_projects.persona`.
+const SYSTEM_PROMPT_GAME: &str = include_str!("../../SYSTEM_PROMPT_GAME.md");
+
+/// A persona's playbook template with the leading repo-reader HTML comment
+/// stripped — the text tokens are substituted into at render time, and what
+/// the dashboard's Persona tab displays verbatim.
+pub fn persona_template(persona: Persona) -> &'static str {
+    let raw = match persona {
+        Persona::Research => SYSTEM_PROMPT,
+        Persona::GameDesigner => SYSTEM_PROMPT_GAME,
+    };
+    raw.split_once("-->\n\n")
+        .map(|(_, rest)| rest)
+        .unwrap_or(raw)
+}
 
 fn playbook_md(project: &LocalProject) -> String {
     playbook_md_with_memory(project, &super::memory::memory_section(project))
@@ -200,18 +218,17 @@ fn playbook_md_with_memory(project: &LocalProject, memory: &str) -> String {
          hf/modal, `--host` for ssh/slurm; k8s reads the committed manifest; local\n   \
          takes no flags)."
     };
-    // The modular skills installed into this session's worktree (see
-    // `agent_skills::ensure_session_skills`). Generated from the Local set so
-    // the playbook index and the files on disk can never drift.
-    let skills_list = super::agent_skills::skills(super::agent_skills::SkillSet::Local)
+    // The persona picks the template and the skill set. The modular skills
+    // are installed into this session's worktree (see
+    // `agent_skills::ensure_session_skills`); the index is generated from the
+    // same persona set so the playbook and the files on disk can never drift.
+    let persona = project.persona();
+    let skills_list = super::agent_skills::skills_for_persona(persona)
         .iter()
         .map(|s| format!("- **{}** — {}", s.name, s.description))
         .collect::<Vec<_>>()
         .join("\n");
-    let template = SYSTEM_PROMPT
-        .split_once("-->\n\n")
-        .map(|(_, rest)| rest)
-        .unwrap_or(SYSTEM_PROMPT);
+    let template = persona_template(persona);
     template
         .replace("{name}", name)
         .replace("{id}", id)
@@ -298,7 +315,7 @@ pub fn ensure_playbook(
     // Modular skills, written fresh beside the playbook (same freshness
     // semantics) so this session's agent discovers them natively.
     if let Some(dir) = session_skills_dir {
-        super::agent_skills::ensure_session_skills(&workdir, dir)?;
+        super::agent_skills::ensure_session_skills(&workdir, dir, project.persona())?;
     }
     // One shared exclude covers every worktree.
     exclude_agent_files(&git::clone_path(
@@ -602,9 +619,9 @@ impl AgentHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::agent_skills::{self, SkillSet};
+    use crate::local::agent_skills;
 
-    fn sample_project() -> LocalProject {
+    fn sample_project(persona: Persona) -> LocalProject {
         LocalProject {
             id: "proj_test".into(),
             name: "Test Project".into(),
@@ -617,6 +634,7 @@ mod tests {
             paper_id: None,
             play_command: None,
             play_dir: None,
+            persona: Some(persona.as_str().to_string()),
             created_at: 0,
             updated_at: 0,
         }
@@ -624,82 +642,107 @@ mod tests {
 
     /// Render with a fixed memory stub — tests must never read the
     /// developer's real memory files through `data_dir()`.
-    fn sample_playbook() -> String {
+    fn sample_playbook(persona: Persona) -> String {
         let memory = crate::local::memory::render_memory_section(
             "/tmp/x/user.md",
             "/tmp/x/memory.md",
             None,
             None,
         );
-        playbook_md_with_memory(&sample_project(), &memory)
+        playbook_md_with_memory(&sample_project(persona), &memory)
     }
 
-    /// The playbook's "## Skills" index must list exactly the Local-set skills,
-    /// in order — regenerate-and-compare so it can never freeze out of sync with
-    /// `agent_skills::skills` (the same set written into the session worktree).
+    /// Each persona's playbook "## Skills" index must list exactly that
+    /// persona's skills, in order — regenerate-and-compare so it can never
+    /// freeze out of sync with `agent_skills::skills_for_persona` (the same
+    /// set written into the session worktree).
     #[test]
-    fn playbook_skills_index_matches_local_set() {
-        let md = sample_playbook();
-        let expected: Vec<String> = agent_skills::skills(SkillSet::Local)
-            .iter()
-            .map(|s| format!("- **{}** — {}", s.name, s.description))
-            .collect();
+    fn playbook_skills_index_matches_persona_set() {
+        for persona in Persona::ALL {
+            let md = sample_playbook(persona);
+            let expected: Vec<String> = agent_skills::skills_for_persona(persona)
+                .iter()
+                .map(|s| format!("- **{}** — {}", s.name, s.description))
+                .collect();
 
-        // The "## Skills" section body: between the heading and the next `## `.
-        let after = md
-            .split("## Skills\n")
-            .nth(1)
-            .expect("no ## Skills section");
-        let section = after.split("\n## ").next().unwrap();
+            // The "## Skills" section body: between the heading and the next `## `.
+            let after = md
+                .split("## Skills\n")
+                .nth(1)
+                .expect("no ## Skills section");
+            let section = after.split("\n## ").next().unwrap();
 
-        let listed: Vec<String> = section
-            .lines()
-            .filter(|l| l.starts_with("- **"))
-            .map(str::to_string)
-            .collect();
-        assert_eq!(
-            listed, expected,
-            "playbook Skills index drifted from Local set"
-        );
+            let listed: Vec<String> = section
+                .lines()
+                .filter(|l| l.starts_with("- **"))
+                .map(str::to_string)
+                .collect();
+            assert_eq!(
+                listed,
+                expected,
+                "{}: playbook Skills index drifted from persona set",
+                persona.as_str()
+            );
+        }
     }
 
-    /// The slimmed playbook keeps its templated conditional logic — the
-    /// compute-default branch's placeholders must still resolve (no leftover
-    /// `{...}` braces from a botched edit).
+    /// Both playbooks keep their templated conditional logic — every
+    /// placeholder must resolve (no leftover `{...}` braces from a botched
+    /// edit in either template).
     #[test]
     fn playbook_has_no_unresolved_placeholders() {
-        let md = sample_playbook();
-        // Every token the template may carry must be substituted — a typo'd or
-        // newly added token that playbook_md doesn't know about fails here.
-        for token in [
-            "{name}",
-            "{id}",
-            "{repo}",
-            "{baseline}",
-            "{paper_line}",
-            "{compute_bullet}",
-            "{files}",
-            "{skills_list}",
-            "{launch_step}",
-            "{backends_intro}",
-            "{memory}",
-        ] {
-            assert!(!md.contains(token), "unresolved placeholder {token}");
+        for persona in Persona::ALL {
+            let md = sample_playbook(persona);
+            // Every token a template may carry must be substituted — a typo'd
+            // or newly added token that playbook_md doesn't know about fails
+            // here.
+            for token in [
+                "{name}",
+                "{id}",
+                "{repo}",
+                "{baseline}",
+                "{paper_line}",
+                "{compute_bullet}",
+                "{files}",
+                "{skills_list}",
+                "{launch_step}",
+                "{backends_intro}",
+                "{memory}",
+            ] {
+                assert!(
+                    !md.contains(token),
+                    "{}: unresolved placeholder {token}",
+                    persona.as_str()
+                );
+            }
+            // The template's leading HTML comment (repo-reader documentation)
+            // must be stripped — the prompt starts at the persona's title.
+            let title = match persona {
+                Persona::Research => "# OpenResearch local agent",
+                Persona::GameDesigner => "# OpenResearch game-design agent",
+            };
+            assert!(md.starts_with(title), "template comment not stripped");
+            assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
+            // Sanity: the slimmed pointers to the modules survived, and each
+            // persona points only at its own modules.
+            assert!(md.contains("orx-compute"));
+            assert!(md.contains("orx-evidence"));
+            match persona {
+                Persona::Research => {
+                    assert!(md.contains("orx-reports"));
+                    assert!(md.contains("orx-lit"));
+                    assert!(!md.contains("orx-play"));
+                }
+                Persona::GameDesigner => {
+                    assert!(md.contains("orx-play"));
+                    assert!(!md.contains("orx-reports"));
+                    assert!(!md.contains("orx-lit"));
+                }
+            }
+            // The memory section rendered with both scopes present.
+            assert!(md.contains("## Memory"));
+            assert!(md.contains("### User memory"));
+            assert!(md.contains("### Project memory"));
         }
-        // The template's leading HTML comment (repo-reader documentation) must
-        // be stripped — the prompt starts at the title.
-        assert!(
-            md.starts_with("# OpenResearch local agent"),
-            "template comment not stripped"
-        );
-        assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
-        // Sanity: the slimmed pointers to the modules survived.
-        assert!(md.contains("orx-compute"));
-        assert!(md.contains("orx-reports"));
-        assert!(md.contains("orx-evidence"));
-        // The memory section rendered with both scopes present.
-        assert!(md.contains("## Memory"));
-        assert!(md.contains("### User memory"));
-        assert!(md.contains("### Project memory"));
     }
 }

@@ -27,6 +27,8 @@ pub struct LocalProject {
     pub play_command: Option<String>,
     /// Dir (repo-relative) the play build outputs, served at /play (default `dist`).
     pub play_dir: Option<String>,
+    /// Agent persona wire id (`research` | `game-designer`); NULL = research.
+    pub persona: Option<String>,
 }
 
 impl LocalProject {
@@ -46,7 +48,14 @@ impl LocalProject {
             updated_at: row.get(10)?,
             play_command: row.get(11)?,
             play_dir: row.get(12)?,
+            persona: row.get(13)?,
         })
+    }
+
+    /// The agent persona this project runs under. Defaults to research; an
+    /// unknown stored value also falls back rather than breaking sessions.
+    pub fn persona(&self) -> super::agent_skills::Persona {
+        super::agent_skills::Persona::parse(self.persona.as_deref()).unwrap_or_default()
     }
 }
 

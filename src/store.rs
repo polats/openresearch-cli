@@ -327,6 +327,7 @@ impl Store {
             "ALTER TABLE local_projects ADD COLUMN play_command TEXT",
             "ALTER TABLE local_projects ADD COLUMN play_dir TEXT",
             "ALTER TABLE local_experiments ADD COLUMN play_entry TEXT",
+            "ALTER TABLE local_projects ADD COLUMN persona TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -623,11 +624,11 @@ impl Store {
 
     pub fn create_local_project(&self, p: &LocalProject) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
             params![
                 p.id, p.name, p.slug, p.github_owner, p.github_repo,
                 p.baseline_branch, p.repo_path, p.run_command, p.paper_id, p.created_at, p.updated_at,
-                p.play_command, p.play_dir,
+                p.play_command, p.play_dir, p.persona,
             ],
         )?;
         Ok(())
@@ -706,7 +707,7 @@ impl Store {
         self.conn.execute(
             "UPDATE local_projects SET name = ?2, slug = ?3, github_owner = ?4, github_repo = ?5,
                     baseline_branch = ?6, repo_path = ?7, run_command = ?8, paper_id = ?9,
-                    updated_at = ?10, play_command = ?11, play_dir = ?12
+                    updated_at = ?10, play_command = ?11, play_dir = ?12, persona = ?13
              WHERE id = ?1",
             params![
                 p.id,
@@ -721,6 +722,7 @@ impl Store {
                 now_ms(),
                 p.play_command,
                 p.play_dir,
+                p.persona,
             ],
         )?;
         Ok(())
@@ -1059,7 +1061,7 @@ const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, baseline_branch, \
                             repo_path, run_command, paper_id, created_at, updated_at, \
-                            play_command, play_dir";
+                            play_command, play_dir, persona";
 
 const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branch_name, \
                                title, description, run_command, agent_status, created_at, updated_at, \

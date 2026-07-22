@@ -11,6 +11,8 @@ export interface Project {
   runCommand?: string | null;
   /** arXiv id the project starts from (versionless). */
   paperId?: string | null;
+  /** Agent persona wire id ("research" | "game-designer"); null = research. */
+  persona?: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -145,8 +147,28 @@ export const resolvePaper = (id: string) =>
     (r) => r.paper,
   );
 
-export const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
-  patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
+export const updateProject = (
+  projectId: string,
+  body: { runCommand?: string; name?: string; persona?: string },
+) => patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
+
+export interface PersonaSkill {
+  name: string;
+  description: string;
+  content: string;
+}
+
+export interface PersonaInfo {
+  id: string;
+  label: string;
+  description: string;
+  /** The persona's system-prompt template ({token} placeholders visible). */
+  systemPrompt: string;
+  skills: PersonaSkill[];
+}
+
+export const getPersonas = () =>
+  get<{ personas: PersonaInfo[] }>("/api/personas").then((r) => r.personas);
 
 /** Record a visit: bumps the project's updatedAt, which drives the recency sort. */
 export const openProject = (projectId: string) =>

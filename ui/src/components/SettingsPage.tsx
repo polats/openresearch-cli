@@ -2,6 +2,7 @@ import {
   Blocks,
   ChevronDown,
   Cpu,
+  Drama,
   ExternalLink,
   GitBranch,
   HardDrive,
@@ -21,6 +22,8 @@ import {
   fmtDuration,
   getComputeSettings,
   getEnvVars,
+  getPersonas,
+  updateProject,
   getGitSettings,
   getHarnesses,
   getHfSettings,
@@ -64,6 +67,8 @@ import {
   type ModalSettings,
   type ModalTokenSource,
   type OpenResearchSettings,
+  type PersonaInfo,
+  type Project,
   type SlurmPreflight,
   type SlurmSettings,
   type SshHost,
@@ -72,10 +77,12 @@ import {
 } from "../api";
 import { onDataDirMove } from "../events";
 import { GitTokenForm } from "./GitTokenForm";
+import { Md } from "./Md";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { StatusBadge } from "./StatusBadge";
 
 export type SettingsTab =
+  | "persona"
   | "harnesses"
   | "compute"
   | "instances"
@@ -2153,10 +2160,197 @@ function InstancesTab() {
   );
 }
 
+// --- persona -----------------------------------------------------------------
+
+/** One persona's card: pick it for the current project, and inspect exactly
+ * what it injects — the system prompt template and the skill set. */
+function PersonaRow({
+  persona,
+  isActive,
+  hasProject,
+  open,
+  saving,
+  onToggle,
+  onActivate,
+}: {
+  persona: PersonaInfo;
+  isActive: boolean;
+  hasProject: boolean;
+  open: boolean;
+  saving: boolean;
+  onToggle: () => void;
+  onActivate: () => void;
+}) {
+  const [openSkill, setOpenSkill] = useState<string | null>(null);
+  const [showPrompt, setShowPrompt] = useState(false);
+
+  return (
+    <div className={`compute-row${open ? " open" : ""}`}>
+      {/* Same pattern as the Compute rows: a clickable head holding real
+          buttons, with the chevron as the keyboard-reachable control. */}
+      <div className="compute-row-head" onClick={onToggle}>
+        <span className="compute-row-name">{persona.label}</span>
+        <span className="compute-row-summary">{persona.description}</span>
+        {isActive ? (
+          <span className="badge compute-default-pill">Active</span>
+        ) : (
+          <button
+            type="button"
+            className="btn sm compute-make-default"
+            onClick={(e) => {
+              e.stopPropagation(); // the header click is expand/collapse
+              onActivate();
+            }}
+            disabled={saving || !hasProject}
+          >
+            Use for this project
+          </button>
+        )}
+        <button
+          type="button"
+          className="compute-chevron-btn"
+          aria-expanded={open}
+          aria-label={`${open ? "Collapse" : "Expand"} ${persona.label}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle();
+          }}
+        >
+          <ChevronDown size={16} className="compute-chevron" />
+        </button>
+      </div>
+      {open && (
+        <div className="compute-row-body">
+          <h3 className="persona-section-title">Skills</h3>
+          <p className="settings-note">
+            Installed fresh into every chat session&apos;s worktree — the agent auto-loads them.
+          </p>
+          <div className="persona-skill-list">
+            {persona.skills.map((s) => {
+              const skillOpen = openSkill === s.name;
+              return (
+                <div key={s.name} className="persona-skill">
+                  <button
+                    type="button"
+                    className="persona-skill-head"
+                    aria-expanded={skillOpen}
+                    onClick={() => setOpenSkill(skillOpen ? null : s.name)}
+                  >
+                    <ChevronDown
+                      size={14}
+                      className="compute-chevron"
+                      style={skillOpen ? { transform: "rotate(180deg)" } : undefined}
+                    />
+                    <span className="persona-skill-name">{s.name}</span>
+                    <span className="persona-skill-desc">{s.description}</span>
+                  </button>
+                  {skillOpen && (
+                    <div className="persona-doc">
+                      <Md text={s.content} />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <h3 className="persona-section-title">System prompt</h3>
+          <p className="settings-note">
+            Injected into every chat turn; <code>{"{token}"}</code> placeholders are filled with
+            project facts at render time.{" "}
+            <button type="button" className="btn sm" onClick={() => setShowPrompt(!showPrompt)}>
+              {showPrompt ? "Hide" : "Show"} system prompt
+            </button>
+          </p>
+          {showPrompt && (
+            <div className="persona-doc">
+              <Md text={persona.systemPrompt} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PersonaTab({
+  project,
+  onProjectUpdated,
+}: {
+  project: Project | null;
+  onProjectUpdated: (p: Project) => void;
+}) {
+  const [personas, setPersonas] = useState<PersonaInfo[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    getPersonas()
+      .then((p) => {
+        setPersonas(p);
+        setLoadError(null);
+      })
+      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  const active = project?.persona ?? "research";
+
+  async function activate(personaId: string) {
+    if (!project || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      onProjectUpdated(await updateProject(project.id, { persona: personaId }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <h1>Persona</h1>
+      <p className="settings-sub">
+        Who the agent is for{" "}
+        {project ? (
+          <strong>{project.name}</strong>
+        ) : (
+          "this project"
+        )}
+        : each persona sets the system prompt and the skills injected into every chat session.
+      </p>
+      {!project && (
+        <p className="settings-note">Open a project to switch its persona.</p>
+      )}
+      {loadError && <div className="error">{loadError}</div>}
+      {error && <div className="error">{error}</div>}
+      {personas && (
+        <div className="compute-list">
+          {personas.map((p) => (
+            <PersonaRow
+              key={p.id}
+              persona={p}
+              isActive={active === p.id}
+              hasProject={project !== null}
+              open={expanded === p.id}
+              saving={saving}
+              onToggle={() => setExpanded(expanded === p.id ? null : p.id)}
+              onActivate={() => void activate(p.id)}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 // --- embedded view -----------------------------------------------------------
 
 /** Rail nav entries, one per settings section (rendered in the agents rail). */
 export const SETTINGS_NAV: { id: Tab; label: string; icon: React.ReactNode }[] = [
+  { id: "persona", label: "Persona", icon: <Drama size={15} /> },
   { id: "harnesses", label: "Harnesses", icon: <Blocks size={15} /> },
   { id: "compute", label: "Compute", icon: <Cpu size={15} /> },
   { id: "instances", label: "Instances", icon: <Server size={15} /> },
@@ -2165,10 +2359,21 @@ export const SETTINGS_NAV: { id: Tab; label: string; icon: React.ReactNode }[] =
   { id: "storage", label: "Storage", icon: <HardDrive size={15} /> },
 ];
 
-/** One settings section's content, shown in the middle pane in place of chat. */
-export function SettingsView({ tab }: { tab: Tab }) {
+/** One settings section's content, shown in the middle pane in place of chat.
+ * `project`/`onProjectUpdated` back the Persona section — the one per-project
+ * setting here; every other section is global. */
+export function SettingsView({
+  tab,
+  project = null,
+  onProjectUpdated = () => {},
+}: {
+  tab: Tab;
+  project?: Project | null;
+  onProjectUpdated?: (p: Project) => void;
+}) {
   return (
     <div className="settings-view">
+      {tab === "persona" && <PersonaTab project={project} onProjectUpdated={onProjectUpdated} />}
       {tab === "harnesses" && <HarnessesTab />}
       {tab === "compute" && <ComputeTab />}
       {tab === "environment" && (

@@ -63,6 +63,7 @@ pub fn create_project(
         paper_id: paper_id.filter(|p| !p.trim().is_empty()),
         play_command: None,
         play_dir: None,
+        persona: None,
         created_at: now,
         updated_at: now,
     };

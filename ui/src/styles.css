@@ -3072,6 +3072,66 @@ a.files-pill:hover {
   color: var(--muted);
 }
 
+/* persona cards (Settings → Persona) — reuse the compute-row family for the
+   card chrome; these cover only the skill list and embedded doc viewers. */
+.persona-section-title {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--text);
+  margin: 14px 0 4px;
+}
+.persona-section-title:first-child {
+  margin-top: 0;
+}
+.persona-skill-list {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 6px;
+}
+.persona-skill {
+  border-top: 1px solid var(--border);
+}
+.persona-skill:first-child {
+  border-top: none;
+}
+.persona-skill-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 4px;
+  border-radius: var(--radius-sm);
+}
+.persona-skill-head:hover {
+  background: var(--surface);
+}
+.persona-skill-name {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--text);
+  flex: none;
+}
+.persona-skill-desc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.persona-doc {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  padding: 2px 14px;
+  margin: 4px 0 10px;
+  max-height: 440px;
+  overflow-y: auto;
+  font-size: var(--fs-sm);
+}
+
 /* compute target list (Settings → Compute) */
 .compute-list {
   display: flex;
