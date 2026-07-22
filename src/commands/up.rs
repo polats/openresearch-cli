@@ -237,6 +237,10 @@ fn router(state: AppState) -> Router {
             post(play_session_end),
         )
         .route(
+            "/api/experiments/{id}/play-session/events",
+            post(play_session_events),
+        )
+        .route(
             "/api/experiments/{id}",
             axum::routing::patch(update_experiment),
         )
@@ -1251,6 +1255,65 @@ async fn play_session_end(Path(id): Path<String>, Json(req): Json<VerdictReq>) -
     }
     let run = store.get_run(&open.id)?.ok_or_else(|| not_found("run"))?;
     Ok(Json(json!({ "run": ApiRun::from(&run) })))
+}
+
+/// Cap on a session's events.jsonl — beyond it, events drop (counted in the
+/// response) rather than growing unbounded.
+const SESSION_EVENTS_MAX_BYTES: u64 = 5_000_000;
+
+#[derive(Deserialize)]
+struct SessionEventsReq {
+    events: Vec<Value>,
+}
+
+/// Telemetry from the playable into the open play session: events append to
+/// `events.jsonl` in the session run's artifacts dir (so they list and serve
+/// through the normal artifact machinery). Fire-and-forget contract: no open
+/// session (or a full file) drops events without erroring — the game must
+/// never break because the ledger isn't listening.
+async fn play_session_events(
+    Path(id): Path<String>,
+    Json(req): Json<SessionEventsReq>,
+) -> ApiResult {
+    if req.events.is_empty() || req.events.len() > 500 {
+        return Err(bad_request("expected 1..=500 events"));
+    }
+    blocking_api(move || {
+        let store = Store::open()?;
+        store
+            .get_local_experiment(&id)?
+            .ok_or_else(|| not_found("experiment"))?;
+        let open = store
+            .list_runs_by_experiment(&id)?
+            .into_iter()
+            .find(|r| r.kind == "play-session" && !is_terminal(&r.status));
+        let Some(open) = open else {
+            return Ok(Json(json!({ "ok": true, "run": Value::Null, "dropped": true })));
+        };
+        let dir = crate::store::run_artifacts_dir(&open.id);
+        std::fs::create_dir_all(&dir).map_err(|e| anyhow!("create {}: {e}", dir.display()))?;
+        let path = dir.join("events.jsonl");
+        let existing = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if existing >= SESSION_EVENTS_MAX_BYTES {
+            return Ok(Json(json!({ "ok": true, "run": open.id, "dropped": true })));
+        }
+        let now = now_ms();
+        let mut out = String::new();
+        for ev in &req.events {
+            // Stamp receive time; the event's own payload rides untouched.
+            out.push_str(&json!({ "at": now, "event": ev }).to_string());
+            out.push('\n');
+        }
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| f.write_all(out.as_bytes()))
+            .map_err(|e| anyhow!("append events: {e}"))?;
+        Ok(Json(json!({ "ok": true, "run": open.id })))
+    })
+    .await
 }
 
 async fn play_root(Path(id): Path<String>) -> Response {
