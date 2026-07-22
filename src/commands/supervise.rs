@@ -1126,7 +1126,10 @@ fn ingest_metrics(store: &Store, run_id: &str) {
         raw
     };
     match store.set_run_metrics(run_id, &stored_doc) {
-        Ok(()) => eprintln!("supervise {run_id}: metrics ingested ({} bytes)", stored_doc.len()),
+        Ok(()) => eprintln!(
+            "supervise {run_id}: metrics ingested ({} bytes)",
+            stored_doc.len()
+        ),
         Err(err) => eprintln!("supervise {run_id}: metrics ingest failed: {err}"),
     }
 }

@@ -26,6 +26,7 @@ pub mod modal;
 pub mod model;
 pub mod opencode;
 pub mod openresearch;
+pub mod play;
 pub mod projects;
 pub mod resolve;
 pub mod skills;

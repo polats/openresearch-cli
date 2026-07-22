@@ -116,9 +116,12 @@ async fn wait(
 /// human judgment on an experiment. Local mode only: verdicts are a
 /// game-design-ledger concept with no server-side counterpart.
 fn verdict_cmd(store: Store, exp_id: &str, verdict: &str, notes: Option<&str>) -> Result<()> {
-    let exp = store
-        .get_local_experiment(exp_id)?
-        .ok_or_else(|| anyhow!("Local experiment {} not found (verdicts are local-mode only).", exp_id))?;
+    let exp = store.get_local_experiment(exp_id)?.ok_or_else(|| {
+        anyhow!(
+            "Local experiment {} not found (verdicts are local-mode only).",
+            exp_id
+        )
+    })?;
     let value = match verdict {
         "keep" | "kill" | "iterate" => Some(verdict),
         "clear" => None,
@@ -128,7 +131,11 @@ fn verdict_cmd(store: Store, exp_id: &str, verdict: &str, notes: Option<&str>) -
             ))
         }
     };
-    store.set_experiment_verdict(&exp.id, value, notes.map(str::trim).filter(|n| !n.is_empty()))?;
+    store.set_experiment_verdict(
+        &exp.id,
+        value,
+        notes.map(str::trim).filter(|n| !n.is_empty()),
+    )?;
     match value {
         Some(v) => println!("✓ {} — verdict: {v}", exp.display_name()),
         None => println!("✓ {} — verdict cleared", exp.display_name()),

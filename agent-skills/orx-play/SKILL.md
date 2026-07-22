@@ -22,7 +22,30 @@ Each experiment card in the dashboard has a **Play** button. Pressing it:
 The build is tracked as a `kind: play` run on the experiment — its log is
 readable with `orx logs <runId>` like any other run, which is where you look
 when a Play build fails. A rebuild only happens when the branch tip moved;
-otherwise Play serves the existing build.
+otherwise Play serves the existing build. **Creating an experiment kicks off
+a play build automatically** (of the fork-point code), so every new variant
+card starts playable; your committed changes are picked up on the next Play
+press.
+
+### Builds must be subpath-portable — the #1 playability failure
+
+The playable is served under **`/play/<expId>/`**, not at the site root.
+Bundlers default to **root-absolute** asset paths (`/assets/app.js`), which
+404 there and render a blank page even though the build "succeeded". The
+play run ends with a **playability check** that greps the built output for
+root-absolute `src=`/`href=`/`url(` references and **fails the build with
+the offending lines** when it finds any. Fix it at the source, once, on the
+baseline:
+
+- **Vite**: `base: './'` in `vite.config.{ts,js}`.
+- **CRA**: `"homepage": "."` in `package.json`.
+- **Plain HTML/CSS/JS**: relative paths only (`./assets/x.png`, never
+  `/assets/x.png`); CSS `url(...)` resolves from the stylesheet's location.
+- **Runtime loads** (fetch, dynamic imports, sprite sheets built from JS):
+  resolve from the document, e.g. `new URL('sprites.png', import.meta.url)`
+  or relative fetch paths — the check can't see these, so they're on you.
+
+Get this right in the baseline and every branched variant inherits it.
 
 Play settings live **on the project** (play command + play dir, one contract
 for every variant — same spirit as the fixed run command) and are edited in

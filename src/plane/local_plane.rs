@@ -465,6 +465,7 @@ impl ControlPlane for LocalPlane {
             baseline,
             description,
             run_command,
+            merge,
         } = spec;
 
         let mut defaulted_to_root = false;
@@ -489,7 +490,18 @@ impl ControlPlane for LocalPlane {
             "baseline"
         };
 
-        let experiment = crate::local::experiments::create_experiment(
+        let merge_exp = match &merge {
+            Some(merge_id) => Some(store.get_local_experiment(merge_id)?.ok_or_else(|| {
+                anyhow!(
+                    "Merge experiment {} not found in the local store — \
+                     pass the experiment id shown by `orx project view`.",
+                    merge_id
+                )
+            })?),
+            None => None,
+        };
+
+        let (experiment, merge_warning) = crate::local::experiments::create_experiment(
             store,
             project,
             parent_exp.as_ref(),
@@ -497,9 +509,19 @@ impl ControlPlane for LocalPlane {
             Some(title),
             description,
             run_command,
+            merge_exp.as_ref(),
         )?;
+        // Playable from the moment the card exists (game projects): build
+        // the fork-point code now; later edits rebuild via Play.
+        crate::local::play::auto_build(store, project, &experiment);
 
         println!("\u{2713} Created local {} experiment", kind);
+        if let Some(m) = &merge_exp {
+            match &merge_warning {
+                None => println!("  merged:  {} ({})", m.display_name(), m.branch_name),
+                Some(w) => println!("  merge:   INCOMPLETE — {w}"),
+            }
+        }
         if defaulted_to_root {
             let root = parent_exp.as_ref().unwrap();
             println!("  parent:  {} (project root, defaulted)", root.id);

@@ -74,11 +74,7 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     let kind = match args.kind.as_deref() {
         None | Some("job") => "job",
         Some("sim") => "sim",
-        Some(other) => {
-            return Err(anyhow!(
-                "Unknown run kind '{other}'. Supported: job, sim."
-            ))
-        }
+        Some(other) => return Err(anyhow!("Unknown run kind '{other}'. Supported: job, sim.")),
     };
 
     // One run in flight per experiment AND kind unless deliberately forced —
