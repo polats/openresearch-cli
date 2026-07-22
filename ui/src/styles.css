@@ -2350,6 +2350,22 @@ textarea::placeholder {
   font-size: var(--fs-sm);
   color: var(--muted);
 }
+/* Percent unknown (clone connecting / counting): a sweeping pulse. */
+.progress-fill.indeterminate {
+  width: 30%;
+  animation: progress-sweep 1.2s ease-in-out infinite;
+}
+@keyframes progress-sweep {
+  0% {
+    margin-left: 0;
+  }
+  50% {
+    margin-left: 70%;
+  }
+  100% {
+    margin-left: 0;
+  }
+}
 
 .settings-form {
   margin-top: 14px;
@@ -3069,6 +3085,83 @@ a.files-pill:hover {
   margin: 4px 0 0;
 }
 .muted {
+  color: var(--muted);
+}
+
+/* persona identity colors — blue = research agent, orange = game designer.
+   Used by the Persona tab cards and the session-header persona bar. */
+:root {
+  --persona-research: var(--accent-blue);
+  --persona-game-designer: var(--accent-orange);
+}
+.persona-swatch {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+}
+.persona-swatch.persona-research {
+  background: var(--persona-research);
+}
+.persona-swatch.persona-game-designer {
+  background: var(--persona-game-designer);
+}
+.persona-card.persona-research {
+  border-left: 3px solid var(--persona-research);
+}
+.persona-card.persona-game-designer {
+  border-left: 3px solid var(--persona-game-designer);
+}
+.persona-active-pill.persona-research {
+  color: var(--persona-research);
+  border-color: var(--persona-research);
+}
+.persona-active-pill.persona-game-designer {
+  color: var(--persona-game-designer);
+  border-color: var(--persona-game-designer);
+}
+/* Vertical bar beside the session name — instant persona read. */
+.persona-bar {
+  flex: none;
+  width: 4px;
+  height: 16px;
+  border-radius: var(--radius-full);
+}
+.persona-bar.persona-research {
+  background: var(--persona-research);
+}
+.persona-bar.persona-game-designer {
+  background: var(--persona-game-designer);
+}
+/* Compact variant for the Recents session rows — snugged up to the title
+   (the row's 8px gap reads too airy for a 3px bar). */
+.persona-bar.sm {
+  width: 3px;
+  height: 12px;
+  margin-right: -4px;
+}
+/* Automatic-prompt toggles (Persona tab). */
+.persona-prompt-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.persona-prompt-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.persona-prompt-toggle input {
+  accent-color: var(--primary);
+}
+.persona-prompt-label {
+  font-weight: var(--fw-semibold);
+  color: var(--text);
+}
+.persona-prompt-hint {
   color: var(--muted);
 }
 

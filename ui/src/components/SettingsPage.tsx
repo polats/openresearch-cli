@@ -66,6 +66,7 @@ import {
   type LocalMachine,
   type ModalSettings,
   type ModalTokenSource,
+  type AutoPrompts,
   type OpenResearchSettings,
   type PersonaInfo,
   type Project,
@@ -2185,14 +2186,15 @@ function PersonaRow({
   const [showPrompt, setShowPrompt] = useState(false);
 
   return (
-    <div className={`compute-row${open ? " open" : ""}`}>
+    <div className={`compute-row persona-card persona-${persona.id}${open ? " open" : ""}`}>
       {/* Same pattern as the Compute rows: a clickable head holding real
           buttons, with the chevron as the keyboard-reachable control. */}
       <div className="compute-row-head" onClick={onToggle}>
+        <span className={`persona-swatch persona-${persona.id}`} />
         <span className="compute-row-name">{persona.label}</span>
         <span className="compute-row-summary">{persona.description}</span>
         {isActive ? (
-          <span className="badge compute-default-pill">Active</span>
+          <span className={`badge persona-active-pill persona-${persona.id}`}>Active</span>
         ) : (
           <button
             type="button"
@@ -2309,6 +2311,40 @@ function PersonaTab({
     }
   }
 
+  const prompts = project?.autoPrompts ?? {};
+  async function setPrompt(key: keyof AutoPrompts, on: boolean) {
+    if (!project || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      onProjectUpdated(
+        await updateProject(project.id, { autoPrompts: { ...prompts, [key]: on } }),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const promptToggles: { key: keyof AutoPrompts; label: string; hint: string }[] = [
+    {
+      key: "playSession",
+      label: "Play session ended",
+      hint: "prompt the agent to ask how it felt and record your verdict",
+    },
+    {
+      key: "playBuildFailed",
+      label: "Play build failed",
+      hint: "prompt the agent to read the log and fix the branch",
+    },
+    {
+      key: "runCompleted",
+      label: "Job / sim run completed",
+      hint: "prompt the agent to analyze the result and continue the loop",
+    },
+  ];
+
   return (
     <>
       <h1>Persona</h1>
@@ -2341,6 +2377,32 @@ function PersonaTab({
             />
           ))}
         </div>
+      )}
+      {project && (
+        <>
+          <h3 className="persona-section-title">Automatic agent prompts</h3>
+          <p className="settings-note">
+            When enabled, the dashboard sends the agent an <code>[orx]</code> message as these
+            events finish (only while it&apos;s idle). All off by default — the agent only acts
+            when you talk to it.
+          </p>
+          <div className="persona-prompt-toggles">
+            {promptToggles.map((t) => (
+              <label key={t.key} className="persona-prompt-toggle">
+                <input
+                  type="checkbox"
+                  checked={prompts[t.key] === true}
+                  disabled={saving}
+                  onChange={(e) => void setPrompt(t.key, e.target.checked)}
+                />
+                <span>
+                  <span className="persona-prompt-label">{t.label}</span>
+                  <span className="persona-prompt-hint"> — {t.hint}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </>
       )}
     </>
   );
