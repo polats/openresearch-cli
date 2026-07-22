@@ -207,6 +207,7 @@ mod tests {
             play_command: None,
             play_dir: None,
             persona: None,
+            auto_prompts: None,
             created_at: 0,
             updated_at: 0,
         };

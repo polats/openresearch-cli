@@ -114,6 +114,7 @@ mod tests {
             play_command: None,
             play_dir: None,
             persona: None,
+            auto_prompts: None,
             created_at: now,
             updated_at: now,
         }
@@ -135,6 +136,7 @@ mod tests {
             verdict_notes: None,
             verdict_at: None,
             play_entry: None,
+            merge_parent_experiment_id: None,
             created_at: now,
             updated_at: now,
         }

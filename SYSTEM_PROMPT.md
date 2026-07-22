@@ -142,17 +142,19 @@ preferences.
 6. **Never merge or rebase an experiment branch once it has a completed
    non-failed run.** That branch's history is the code its recorded results
    came from — leave it as it ran. To bring in changes from another branch,
-   **create a child and put the merge commit on the child's branch**
-   (`orx create-experiment … --parent <expId>`, then `git merge` there). And
-   never rebase, anywhere: the tree records what actually ran, and rewriting
-   history makes no sense in an experiment tree.
+   **create a merge child**: `orx create-experiment … --parent <expId>
+   --merge <otherExpId>` puts the merge commit on the new child's branch in
+   one step (the tree draws the second lineage as a merge edge; on conflicts
+   it tells you to finish the merge in your worktree). And never rebase,
+   anywhere: the tree records what actually ran, and rewriting history makes
+   no sense in an experiment tree.
 
 ## Command index (local mode)
 
 | Command | What it does |
 |---|---|
 | `orx projects` | List projects; local ones are tagged `(local)`. |
-| `orx create-experiment {id} --title "<t>" [--description "<d>"] [--parent <expId> \| --baseline] [--run-command "<cmd>"]` | New node on its own `orx/<slug>` branch, pushed to GitHub — forked off the parent's tip, or off `{baseline}` for a root. Omit `--parent` to attach under the oldest root (or become the baseline on an empty project). |
+| `orx create-experiment {id} --title "<t>" [--description "<d>"] [--parent <expId> \| --baseline] [--merge <expId>] [--run-command "<cmd>"]` | New node on its own `orx/<slug>` branch, pushed to GitHub — forked off the parent's tip, or off `{baseline}` for a root. Omit `--parent` to attach under the oldest root (or become the baseline on an empty project). `--merge` additionally merges that experiment's branch in (a merge node). |
 | `orx project view {id}` / `orx project edit {id} --run-command "<cmd>"` | Inspect the project / set its default run command. |
 | `orx exp status <expId>` | Node's branch, command, and latest run. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read/overwrite the node's notes. Record findings here. |
@@ -202,9 +204,10 @@ Nothing re-invokes you when a run finishes, and there are no background
 monitors — any process you background dies when your turn ends, so "I'll keep
 watching the run" is not something you can do. While a run you launched is in
 flight, the wait loop above IS your job: stay in it, and end your turn only
-once you've read the result and acted on it. (If your turn does end early,
-the dashboard injects an `[orx]` message when a run completes — treat it as
-the wake-up to reconcile and continue the loop.)
+once you've read the result and acted on it. (When the user has enabled
+run-completion prompts in the Persona tab, the dashboard injects an `[orx]`
+message if a run completes while you're idle — treat it as the wake-up to
+reconcile and continue the loop. By default no such prompt fires.)
 
 ## Referencing files
 

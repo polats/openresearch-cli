@@ -1525,6 +1525,7 @@ impl TurnCtx {
                 play_command: None,
                 play_dir: None,
                 persona: None,
+                auto_prompts: None,
                 created_at: 0,
                 updated_at: 0,
             },
@@ -1747,12 +1748,58 @@ pub async fn watch_runs(chat: Arc<ChatHost>) {
             if chat.is_busy(&session.id).await {
                 continue;
             }
-            let text = format!(
-                "[orx] Run `{}` finished with status **{}**. Reconcile with \
-                 `orx runs {}`, analyze the result (`orx logs {}`), and \
-                 continue the loop.",
-                run.id, run.status, run.project_id, run.id
-            );
+            // Every automatic prompt is opt-in per project (Persona tab) —
+            // unsolicited agent turns proved intrusive during playtests.
+            let prompts = store
+                .get_local_project(&run.project_id)
+                .ok()
+                .flatten()
+                .and_then(|p| p.auto_prompts)
+                .unwrap_or_default();
+            let enabled = match run.kind.as_str() {
+                "play-session" => prompts.play_session,
+                "play" => prompts.play_build_failed,
+                _ => prompts.run_completed,
+            };
+            if !enabled {
+                continue;
+            }
+            // The nudge is kind-aware: a play session ending means a human
+            // just played — the move is gathering feel + verdict, not log
+            // analysis. Play *builds* are routine (auto-builds would spam);
+            // only a failed one needs the agent.
+            let exp_label = store
+                .get_local_experiment(&run.experiment_id)
+                .ok()
+                .flatten()
+                .map(|e| format!("**{}** (`{}`)", e.display_name(), e.id))
+                .unwrap_or_else(|| format!("`{}`", run.experiment_id));
+            let text = match run.kind.as_str() {
+                // Explicitly cancelled sessions were dismissed on purpose.
+                "play-session" if run.status != "done" => continue,
+                "play-session" => format!(
+                    "[orx] A play session on experiment {exp_label} just ended. \
+                     Ask the user how it felt, then record their judgment: \
+                     `orx exp verdict {} keep|kill|iterate -m \"<their words>\"` \
+                     — and note observations in `orx exp desc`. Don't invent a \
+                     verdict from telemetry alone.",
+                    run.experiment_id
+                ),
+                "play" if run.status == "done" => continue,
+                "play" => format!(
+                    "[orx] The play build for experiment {exp_label} **{}** \
+                     (run `{}`). Read `orx logs {}`, fix the branch so the play \
+                     command builds cleanly (see the orx-play skill), commit, \
+                     and press on — the variant can't be judged until it plays.",
+                    run.status, run.id, run.id
+                ),
+                _ => format!(
+                    "[orx] Run `{}` finished with status **{}**. Reconcile with \
+                     `orx runs {}`, analyze the result (`orx logs {}`), and \
+                     continue the loop.",
+                    run.id, run.status, run.project_id, run.id
+                ),
+            };
             if let Err(err) = chat
                 .send_message(&session.id, text, TurnOverrides::default(), Vec::new())
                 .await
