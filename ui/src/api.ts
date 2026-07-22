@@ -13,8 +13,21 @@ export interface Project {
   paperId?: string | null;
   /** Agent persona wire id ("research" | "game-designer"); null = research. */
   persona?: string | null;
+  /** Automatic [orx] prompt switches; null/absent = all off. */
+  autoPrompts?: AutoPrompts | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Per-project switches for the run-watcher's automatic chat prompts.
+ * All default off — unsolicited agent turns proved intrusive. */
+export interface AutoPrompts {
+  /** Play session ended → ask the user for a verdict. */
+  playSession?: boolean;
+  /** Play build failed → tell the agent to fix the branch. */
+  playBuildFailed?: boolean;
+  /** Job/sim run completed → reconcile and continue the loop. */
+  runCompleted?: boolean;
 }
 
 export interface Experiment {
@@ -33,6 +46,8 @@ export interface Experiment {
   verdict?: Verdict | null;
   verdictNotes?: string | null;
   verdictAt?: number | null;
+  /** Second parent: experiment whose branch was merged in at creation. */
+  mergeParentExperimentId?: string | null;
   /** Entry page under /play/<id>/ (path + optional query); null = index.html. */
   playEntry?: string | null;
 }
@@ -149,8 +164,30 @@ export const resolvePaper = (id: string) =>
 
 export const updateProject = (
   projectId: string,
-  body: { runCommand?: string; name?: string; persona?: string },
+  body: {
+    runCommand?: string;
+    name?: string;
+    persona?: string;
+    autoPrompts?: AutoPrompts;
+    /** Branch new baselines fork from (must exist on origin). */
+    baselineBranch?: string;
+  },
 ) => patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
+
+/** The repo's pickable fork-point branches (origin, minus orx/* experiment
+ * branches) plus the project's current baseline. */
+export const listProjectBranches = (projectId: string) =>
+  get<{ branches: string[]; baseline: string }>(`/api/projects/${projectId}/branches`);
+
+export interface GithubRepo {
+  fullName: string;
+  private: boolean;
+}
+
+/** The signed-in user's repos, most recently pushed first (empty without a
+ * GitHub token) — backs the New Project repo autocomplete. */
+export const listGithubRepos = () =>
+  get<{ repos: GithubRepo[] }>("/api/github/repos").then((r) => r.repos);
 
 export interface PersonaSkill {
   name: string;
@@ -215,6 +252,8 @@ export interface NewExperiment {
   title?: string;
   description?: string;
   runCommand?: string;
+  /** Merge this experiment's branch into the new node (second parent). */
+  mergeParentExperimentId?: string;
 }
 
 export const createExperiment = (projectId: string, body: NewExperiment) =>

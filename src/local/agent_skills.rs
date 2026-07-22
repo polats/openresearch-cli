@@ -277,7 +277,11 @@ pub fn find(name: &str) -> Option<&'static AgentSkill> {
 /// removed, so a persona switch never leaves stale skills behind. Returns
 /// `Err` on the first write failure; the caller treats it like a
 /// playbook-write error.
-pub fn ensure_session_skills(worktree: &Path, skills_dir_rel: &str, persona: Persona) -> Result<()> {
+pub fn ensure_session_skills(
+    worktree: &Path,
+    skills_dir_rel: &str,
+    persona: Persona,
+) -> Result<()> {
     let base = worktree.join(skills_dir_rel);
     let current = skills_for_persona(persona);
     for skill in &current {

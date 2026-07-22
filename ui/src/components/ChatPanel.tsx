@@ -21,10 +21,12 @@ import {
   getSkills,
   interruptChat,
   listChatSessions,
+  listProjectBranches,
   renameChatSession,
   respondChat,
   sendChatMessage,
   setChatSessionArchived,
+  updateProject,
   type ChatImageAttachment,
   type ChatMessage,
   type ChatPart,
@@ -683,6 +685,7 @@ function SessionRow({
   active,
   busy,
   waiting,
+  persona,
   onOpen,
   onRename,
   onSetArchived,
@@ -693,6 +696,8 @@ function SessionRow({
   busy: boolean;
   /** Turn held on an unanswered card: steady dot, not the working pulse. */
   waiting: boolean;
+  /** The project's persona wire id — colors the row's persona bar. */
+  persona?: string | null;
   onOpen: () => void;
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
@@ -759,6 +764,10 @@ function SessionRow({
       <span className="session-dot">
         {busy && <span className={`busy-dot ${waiting ? "waiting" : ""}`} />}
       </span>
+      <span
+        className={`persona-bar sm persona-${persona ?? "research"}`}
+        title={persona === "game-designer" ? "Game designer persona" : "Research agent persona"}
+      />
       {editing ? (
         <input
           ref={inputRef}
@@ -847,6 +856,8 @@ export function ChatPanel({
   onOpenFile,
   onOpenPlan,
   onStartTour,
+  persona,
+  baselineBranch,
   children,
 }: {
   projectId: string;
@@ -872,11 +883,24 @@ export function ChatPanel({
   onOpenPlan?: (plan: string, sessionId: string, promptId: string) => void;
   /** Replay the onboarding tour (chat header help button). */
   onStartTour?: () => void;
+  /** The project's persona wire id — colors the session-title bar. */
+  persona?: string | null;
+  /** Branch new baselines fork from — shown in the composer's branch picker. */
+  baselineBranch?: string | null;
   /** Middle-pane content when a settings section is active (the SettingsView). */
   children?: React.ReactNode;
 }) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  // Fork-point branches for the composer's baseline picker (origin branches,
+  // orx/* excluded). Fetched once per project; the picker hides until loaded.
+  const [branches, setBranches] = useState<string[]>([]);
+  useEffect(() => {
+    setBranches([]);
+    listProjectBranches(projectId)
+      .then((r) => setBranches(r.branches))
+      .catch(() => setBranches([]));
+  }, [projectId]);
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
   const [draft, setDraft] = useState("");
   // Pasted/dropped images waiting in the composer, as data URLs.
@@ -1405,6 +1429,7 @@ export function ChatPanel({
             active={s.id === activeId && mainView === "chat"}
             busy={state.busySessions.has(s.id)}
             waiting={sessionWaiting(s.id)}
+            persona={persona}
             onOpen={() => {
               setActiveId(s.id);
               onSelectMainView("chat");
@@ -1467,6 +1492,10 @@ export function ChatPanel({
           right, fading into the chat below (sessions live in the rail). */}
       <div className={headerClass}>
         {railReopen}
+        <span
+          className={`persona-bar persona-${persona ?? "research"}`}
+          title={persona === "game-designer" ? "Game designer persona" : "Research agent persona"}
+        />
         <div
           className="title"
           title={activeSession ? activeSession.title?.trim() || "Untitled" : "New session"}
@@ -1676,6 +1705,23 @@ export function ChatPanel({
               numbered
               title="Permission mode for this chat"
               onSelect={setPermissionMode}
+            />
+            {/* Fork point for new baselines — a project-level setting, placed
+                here so the working branch is always one glance away. */}
+            <OptionPicker
+              choices={branches.map((b) => ({ id: b, label: b }))}
+              value={baselineBranch ?? null}
+              header="Baseline branch"
+              align="left"
+              variant="bare"
+              title="Branch new baselines fork from"
+              onSelect={(b) => {
+                if (b !== baselineBranch) {
+                  void updateProject(projectId, { baselineBranch: b }).catch((err) =>
+                    console.error("baseline branch:", err),
+                  );
+                }
+              }}
             />
             <div style={{ flex: 1 }} />
             {/* Bottom-right: model, then reasoning level. The picker reflects the

@@ -520,6 +520,8 @@ export default function App() {
           <ChatPanel
             projectId={projectId}
             paperId={projects.find((p) => p.id === projectId)?.paperId}
+            persona={projects.find((p) => p.id === projectId)?.persona}
+            baselineBranch={projects.find((p) => p.id === projectId)?.baselineBranch}
             railHeader={railHeader}
             railOpen={railOpen}
             onShowRail={() => setRailOpen(true)}
@@ -741,6 +743,12 @@ export default function App() {
                   runs={runs}
                   selectedRunId={selectedRunId}
                   onSelectRun={setSelectedRunId}
+                  mergeParent={
+                    tabExperiment.mergeParentExperimentId
+                      ? (experiments?.find((e) => e.id === tabExperiment.mergeParentExperimentId) ??
+                        null)
+                      : null
+                  }
                 />
               )}
             </div>

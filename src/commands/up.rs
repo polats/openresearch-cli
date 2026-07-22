@@ -217,6 +217,7 @@ fn router(state: AppState) -> Router {
             get(list_experiments).post(create_experiment),
         )
         .route("/api/projects/{id}/runs", get(list_project_runs))
+        .route("/api/projects/{id}/branches", get(list_project_branches))
         .route("/api/papers/search", get(search_papers_api))
         .route("/api/papers/resolve", get(resolve_paper_api))
         .route("/api/instances", get(list_instances))
@@ -313,6 +314,7 @@ fn router(state: AppState) -> Router {
         .route("/api/harnesses", get(list_harnesses))
         .route("/api/skills", get(list_skills))
         .route("/api/personas", get(list_personas))
+        .route("/api/github/repos", get(list_github_repos))
         .route(
             "/api/chat/sessions",
             get(list_chat_sessions).post(create_chat_session),
@@ -471,6 +473,34 @@ async fn list_skills() -> Json<Value> {
     Json(json!({ "skills": skills }))
 }
 
+/// The project repo's pickable fork-point branches (origin, minus `orx/*`
+/// experiment branches) plus the current baseline — backs the composer's
+/// baseline-branch picker.
+async fn list_project_branches(Path(id): Path<String>) -> ApiResult {
+    let result = tokio::task::spawn_blocking(move || -> Result<(Vec<String>, String)> {
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| anyhow!("project not found"))?;
+        let repo = std::path::PathBuf::from(&project.repo_path);
+        let _ = local::git::fetch_origin(&repo);
+        let branches = local::git::list_remote_branches(&repo)?;
+        Ok((branches, project.baseline_branch))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("git task failed: {e}")))?
+    .map_err(bad_request)?;
+    let (branches, baseline) = result;
+    Ok(Json(json!({ "branches": branches, "baseline": baseline })))
+}
+
+/// The signed-in user's GitHub repos (most recently pushed first) for the
+/// New Project repo autocomplete. Empty when no token is configured.
+async fn list_github_repos() -> ApiResult {
+    let repos = local::github::list_user_repos().await?;
+    Ok(Json(json!({ "repos": repos })))
+}
+
 /// The available agent personas, for the dashboard's Persona tab: label,
 /// blurb, the system-prompt template (repo-reader comment stripped, `{token}`
 /// placeholders left visible), and the skill set each persona injects.
@@ -593,12 +623,26 @@ async fn create_project(
                 .unwrap_or(true);
         if fork {
             // The entered branch picks what gets copied; the fork itself
-            // starts at its default branch.
+            // starts at its default branch. The seed clone/push streams the
+            // same progress events as a direct clone, tagged with the SOURCE
+            // repo (the fork's name isn't known to the dialog).
+            let (chat, ev_owner, ev_repo) = (state.chat.clone(), owner.clone(), repo.clone());
             let (owner, repo, default_branch) = local::github::fork_copy_repo(
                 &owner,
                 &repo,
                 branch,
                 req.github_organization.as_deref(),
+                move |p: local::git::CloneProgress| {
+                    chat.emit_event(
+                        "project.clone.progress",
+                        json!({
+                            "owner": ev_owner,
+                            "repo": ev_repo,
+                            "phase": p.phase,
+                            "percent": p.percent,
+                        }),
+                    );
+                },
             )
             .await
             .map_err(bad_request)?;
@@ -610,8 +654,23 @@ async fn create_project(
     // The clone shells out to git (network); keep it off the async workers.
     let run_command = req.run_command;
     let paper_id = req.paper_id.filter(|p| !p.trim().is_empty());
+    let chat = state.chat.clone();
     let clone = move || {
         let store = Store::open()?;
+        // Clone progress → SSE, so the New Project dialog can show a live
+        // bar (`emit_event` is a sync broadcast send — fine off-runtime).
+        let (chat, ev_owner, ev_repo) = (chat.clone(), owner.clone(), repo.clone());
+        let on_progress = move |p: local::git::CloneProgress| {
+            chat.emit_event(
+                "project.clone.progress",
+                json!({
+                    "owner": ev_owner,
+                    "repo": ev_repo,
+                    "phase": p.phase,
+                    "percent": p.percent,
+                }),
+            );
+        };
         local::projects::create_project(
             &store,
             &name,
@@ -620,6 +679,7 @@ async fn create_project(
             baseline_branch,
             run_command,
             paper_id,
+            &on_progress,
         )
     };
     let mut result = tokio::task::spawn_blocking(clone.clone())
@@ -670,6 +730,10 @@ struct UpdateProjectReq {
     run_command: Option<Option<String>>,
     /// Agent persona wire id (`research` | `game-designer`).
     persona: Option<String>,
+    /// Automatic `[orx]` prompt switches (whole object replaces the stored one).
+    auto_prompts: Option<local::model::AutoPrompts>,
+    /// Branch new baselines fork from (must exist on origin).
+    baseline_branch: Option<String>,
 }
 
 async fn update_project(
@@ -678,9 +742,14 @@ async fn update_project(
     Json(req): Json<UpdateProjectReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
-    if req.name.is_none() && req.run_command.is_none() && req.persona.is_none() {
+    if req.name.is_none()
+        && req.run_command.is_none()
+        && req.persona.is_none()
+        && req.auto_prompts.is_none()
+        && req.baseline_branch.is_none()
+    {
         return Err(bad_request(
-            "nothing to update: pass name, runCommand, and/or persona",
+            "nothing to update: pass name, runCommand, persona, autoPrompts, and/or baselineBranch",
         ));
     }
     let store = Store::open()?;
@@ -697,9 +766,34 @@ async fn update_project(
         project.run_command = cmd.filter(|c| !c.trim().is_empty());
     }
     if let Some(persona) = req.persona {
-        let parsed = local::agent_skills::Persona::parse(Some(persona.trim()))
-            .map_err(bad_request)?;
+        let parsed =
+            local::agent_skills::Persona::parse(Some(persona.trim())).map_err(bad_request)?;
         project.persona = Some(parsed.as_str().to_string());
+    }
+    if let Some(prompts) = req.auto_prompts {
+        project.auto_prompts = Some(prompts);
+    }
+    if let Some(branch) = req.baseline_branch {
+        let branch = branch.trim().to_string();
+        if branch.is_empty() {
+            return Err(bad_request("baselineBranch cannot be empty"));
+        }
+        // Must exist on origin — a typo'd fork point would surface much later
+        // as an opaque branch-create failure.
+        let repo_path = std::path::PathBuf::from(&project.repo_path);
+        let check = branch.clone();
+        let exists = tokio::task::spawn_blocking(move || {
+            let _ = local::git::fetch_origin(&repo_path);
+            local::git::resolve_branch_commit(&repo_path, &check)
+        })
+        .await
+        .map_err(|e| ApiError::from(anyhow!("git task failed: {e}")))??;
+        if exists.is_none() {
+            return Err(bad_request(format!(
+                "branch '{branch}' not found on origin"
+            )));
+        }
+        project.baseline_branch = branch;
     }
     store.update_local_project(&project)?;
     // Re-read: update bumps updated_at, which is also what fires the SSE
@@ -829,6 +923,8 @@ struct CreateExperimentReq {
     title: Option<String>,
     description: Option<String>,
     run_command: Option<String>,
+    /// Second parent: merge this experiment's branch into the new node.
+    merge_parent_experiment_id: Option<String>,
 }
 
 async fn create_experiment(
@@ -854,7 +950,15 @@ async fn create_experiment(
             None if req.baseline => None,
             None => local::experiments::project_root(&store, &project.id)?,
         };
-        local::experiments::create_experiment(
+        let merge_parent = match &req.merge_parent_experiment_id {
+            Some(mid) => Some(
+                store
+                    .get_local_experiment(mid)?
+                    .ok_or_else(|| not_found("merge experiment"))?,
+            ),
+            None => None,
+        };
+        let (experiment, merge_warning) = local::experiments::create_experiment(
             &store,
             &project,
             parent.as_ref(),
@@ -862,12 +966,20 @@ async fn create_experiment(
             req.title,
             req.description,
             req.run_command,
+            merge_parent.as_ref(),
         )
-        .map_err(bad_request)
+        .map_err(bad_request)?;
+        // Playable from the moment the card exists (game projects): build
+        // the fork-point code now; the agent's edits rebuild via Play.
+        local::play::auto_build(&store, &project, &experiment);
+        Ok::<_, ApiError>((experiment, merge_warning))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("branch task failed: {e}")))??;
-    Ok(Json(json!({ "experiment": experiment })))
+    let (experiment, merge_warning) = experiment;
+    Ok(Json(
+        json!({ "experiment": experiment, "mergeWarning": merge_warning }),
+    ))
 }
 
 #[derive(Deserialize, Default)]
@@ -990,7 +1102,11 @@ fn parse_verdict(v: &Option<String>) -> std::result::Result<Option<&str>, ApiErr
 
 async fn set_run_verdict(Path(id): Path<String>, Json(req): Json<VerdictReq>) -> ApiResult {
     let verdict = parse_verdict(&req.verdict)?;
-    let notes = req.notes.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let notes = req
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
     let store = Store::open()?;
     let run = store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
     store.set_run_verdict(&run.id, verdict, notes)?;
@@ -1000,7 +1116,11 @@ async fn set_run_verdict(Path(id): Path<String>, Json(req): Json<VerdictReq>) ->
 
 async fn set_exp_verdict(Path(id): Path<String>, Json(req): Json<VerdictReq>) -> ApiResult {
     let verdict = parse_verdict(&req.verdict)?;
-    let notes = req.notes.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let notes = req
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
     let store = Store::open()?;
     store
         .get_local_experiment(&id)?
@@ -1026,138 +1146,45 @@ async fn run_metrics(Path(id): Path<String>) -> ApiResult {
 
 // --- play builds -----------------------------------------------------------
 
-const DEFAULT_PLAY_COMMAND: &str = "npm run build";
-const DEFAULT_PLAY_DIR: &str = "dist";
-
-/// Where an experiment's playable build is served from.
-fn play_serve_dir(
-    project: &local::model::LocalProject,
-    experiment_id: &str,
-) -> std::path::PathBuf {
-    let play_dir = project
-        .play_dir
-        .as_deref()
-        .map(str::trim)
-        .filter(|d| !d.is_empty())
-        .unwrap_or(DEFAULT_PLAY_DIR);
-    local::git::play_worktree_path(&project.github_owner, &project.github_repo, experiment_id)
-        .join(play_dir)
-}
-
-/// Build (or reuse) the experiment's playable: a detached worktree at the
-/// branch head + the project's play command, tracked as a `kind: play` run so
-/// logs/status/supervision come for free. Idempotent: an in-flight build is
-/// returned as-is, and a finished build at the current head short-circuits to
-/// "ready".
+/// Build (or reuse) the experiment's playable — thin wrapper over
+/// `local::play::start_play_build` (shared with the auto-build on experiment
+/// creation). Idempotent: an in-flight build is returned as-is, and a
+/// finished build at the current head short-circuits to "ready".
 async fn play_build(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     reject_if_moving(&state)?;
-    let store = Store::open()?;
-    let exp = store
-        .get_local_experiment(&id)?
-        .ok_or_else(|| not_found("experiment"))?;
-    let project = store
-        .get_local_project(&exp.project_id)?
-        .ok_or_else(|| not_found("project"))?;
-    let url = format!("/play/{}/", exp.id);
-
-    // The branch head in the hub clone — what the build must reflect. Play
-    // builds serve local work; no push/remote round-trip.
-    let head = {
-        let root = std::path::PathBuf::from(&project.repo_path);
-        let branch = exp.branch_name.clone();
-        tokio::task::spawn_blocking(move || local::git::resolve_branch_commit(&root, &branch))
-            .await
-            .map_err(|e| ApiError::from(anyhow!("git task failed: {e}")))??
-            .ok_or_else(|| bad_request("experiment branch has no commits to build"))?
-    };
-
-    let play_runs: Vec<_> = store
-        .list_runs_by_experiment(&exp.id)?
-        .into_iter()
-        .filter(|r| r.kind == "play")
-        .collect();
-    if let Some(r) = play_runs.iter().find(|r| !is_terminal(&r.status)) {
-        return Ok(Json(json!({ "state": "building", "runId": r.id, "url": url })));
-    }
-    let fresh = play_runs
-        .iter()
-        .find(|r| r.status == "done")
-        .is_some_and(|r| r.commit_sha.as_deref() == Some(head.as_str()));
-    if fresh && play_serve_dir(&project, &exp.id).is_dir() {
-        return Ok(Json(json!({ "state": "ready", "url": url })));
-    }
-
-    let play_command = project
-        .play_command
-        .as_deref()
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-        .unwrap_or(DEFAULT_PLAY_COMMAND)
-        .to_string();
-    let worktree =
-        local::git::play_worktree_path(&project.github_owner, &project.github_repo, &exp.id);
-    let sq = crate::jobs::ssh::sh_quote;
-    // `set -e` so a failed step fails the run; prune first so a hand-deleted
-    // worktree dir doesn't wedge `worktree add` forever.
-    let script = format!(
-        "set -e\n\
-         HUB={hub}\n\
-         WT={wt}\n\
-         SHA={sha}\n\
-         git -C \"$HUB\" worktree prune\n\
-         if [ ! -e \"$WT/.git\" ]; then\n\
-           git -C \"$HUB\" worktree add --detach \"$WT\" \"$SHA\"\n\
-         else\n\
-           git -C \"$WT\" checkout --detach \"$SHA\"\n\
-           git -C \"$WT\" reset --hard \"$SHA\"\n\
-         fi\n\
-         cd \"$WT\"\n\
-         if [ -f package.json ] && [ ! -d node_modules ]; then\n\
-           if [ -f package-lock.json ]; then npm ci; else npm install; fi\n\
-         fi\n\
-         {cmd}\n",
-        hub = sq(&project.repo_path),
-        wt = sq(&worktree.to_string_lossy()),
-        sha = sq(&head),
-        cmd = play_command,
-    );
-
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
-    let dir = crate::jobs::localbox::run_job(&crate::jobs::localbox::LocalJobSpec {
-        run_id: run_id.clone(),
-        script,
-        env,
-    })?;
-    let descriptor = crate::jobs::BackendDescriptor {
-        kind: "local_job".to_string(),
-        job_id: Some(dir.to_string_lossy().into_owned()),
-        ..Default::default()
-    };
-    let run = StoredRun {
-        id: run_id.clone(),
-        experiment_id: exp.id.clone(),
-        project_id: project.id.clone(),
-        status: "starting".to_string(),
-        backend_json: descriptor.to_json(),
-        command: play_command,
-        created_at: now_ms(),
-        updated_at: now_ms(),
-        ended_at: None,
-        exit_code: None,
-        commit_sha: Some(head),
-        result_markdown: None,
-        cancel_requested: false,
-        supervisor_heartbeat_ms: None,
-        kind: "play".to_string(),
-        metrics_json: None,
-        verdict: None,
-        verdict_notes: None,
-        verdict_at: None,
-    };
-    store.upsert_run(&run)?;
-    crate::commands::exp::spawn_detached_supervise(&run_id)?;
-    Ok(Json(json!({ "state": "building", "runId": run_id, "url": url })))
+    // Shells out to git — off the async workers.
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<(String, local::play::PlayBuild)> {
+            let store = Store::open()?;
+            let exp = store
+                .get_local_experiment(&id)?
+                .ok_or_else(|| anyhow!("experiment not found"))?;
+            let project = store
+                .get_local_project(&exp.project_id)?
+                .ok_or_else(|| anyhow!("project not found"))?;
+            let url = format!("/play/{}/", exp.id);
+            let build = local::play::start_play_build(&store, &project, &exp).map_err(|e| {
+                if e.to_string().contains("no commits") {
+                    e
+                } else {
+                    anyhow!("play build failed to start: {e}")
+                }
+            })?;
+            Ok((url, build))
+        })
+        .await
+        .map_err(|e| ApiError::from(anyhow!("build task failed: {e}")))?
+        .map_err(bad_request)?;
+    let (url, build) = result;
+    Ok(Json(match build {
+        local::play::PlayBuild::Building(run_id) => {
+            json!({ "state": "building", "runId": run_id, "url": url })
+        }
+        local::play::PlayBuild::Ready => json!({ "state": "ready", "url": url }),
+        local::play::PlayBuild::Started(run_id) => {
+            json!({ "state": "building", "runId": run_id, "url": url })
+        }
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1274,7 +1301,11 @@ async fn play_session_beat(State(state): State<AppState>, Path(id): Path<String>
 /// tab-close path can fire blind.
 async fn play_session_end(Path(id): Path<String>, Json(req): Json<VerdictReq>) -> ApiResult {
     let verdict = parse_verdict(&req.verdict)?;
-    let notes = req.notes.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let notes = req
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
     let store = Store::open()?;
     store
         .get_local_experiment(&id)?
@@ -1325,7 +1356,9 @@ async fn play_session_events(
             .into_iter()
             .find(|r| r.kind == "play-session" && !is_terminal(&r.status));
         let Some(open) = open else {
-            return Ok(Json(json!({ "ok": true, "run": Value::Null, "dropped": true })));
+            return Ok(Json(
+                json!({ "ok": true, "run": Value::Null, "dropped": true }),
+            ));
         };
         let dir = crate::store::run_artifacts_dir(&open.id);
         std::fs::create_dir_all(&dir).map_err(|e| anyhow!("create {}: {e}", dir.display()))?;
@@ -1416,7 +1449,7 @@ async fn serve_play_path(_state: AppState, exp_id: String, rel: String) -> Respo
         let Some(project) = store.get_local_project(&exp.project_id)? else {
             return Ok((StatusCode::NOT_FOUND, "project not found").into_response());
         };
-        let dir = play_serve_dir(&project, &exp.id);
+        let dir = local::play::play_serve_dir(&project, &exp.id);
 
         // No completed build (or its dir is gone): explain instead of 404ing.
         let play_runs: Vec<_> = store
@@ -1440,7 +1473,11 @@ async fn serve_play_path(_state: AppState, exp_id: String, rel: String) -> Respo
         // (repos like gambit-arena have no index.html — game.html and harness
         // pages are the real entries).
         if rel.is_empty() {
-            if let Some(entry) = exp.play_entry.as_deref().map(str::trim).filter(|e| !e.is_empty())
+            if let Some(entry) = exp
+                .play_entry
+                .as_deref()
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
             {
                 return Ok(axum::response::Redirect::temporary(&format!(
                     "/play/{}/{}",
@@ -1450,8 +1487,7 @@ async fn serve_play_path(_state: AppState, exp_id: String, rel: String) -> Respo
             }
         }
 
-        let root = std::fs::canonicalize(&dir)
-            .map_err(|e| anyhow!("play dir unavailable: {e}"))?;
+        let root = std::fs::canonicalize(&dir).map_err(|e| anyhow!("play dir unavailable: {e}"))?;
         let rel = rel.trim_start_matches('/');
         let candidate = if rel.is_empty() {
             root.join("index.html")
@@ -1527,7 +1563,9 @@ async fn list_run_artifacts(Path(id): Path<String>) -> ApiResult {
                 })
             })
             .collect();
-        Ok(Json(json!({ "artifacts": artifacts, "truncated": truncated })))
+        Ok(Json(
+            json!({ "artifacts": artifacts, "truncated": truncated }),
+        ))
     })
     .await
 }
@@ -1535,7 +1573,9 @@ async fn list_run_artifacts(Path(id): Path<String>) -> ApiResult {
 /// Recursive file walk, paths relative to `root`. Missing dir = empty list
 /// (the run may simply never have written artifacts).
 fn collect_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, u64)>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -3709,10 +3749,7 @@ async fn spa(uri: Uri, headers: axum::http::HeaderMap) -> Response {
 /// Serve `path` from the play build of the experiment named in the request's
 /// `/play/<id>/…` Referer, if that file exists there. None = not a play-page
 /// request or no such file — fall through to the normal SPA handling.
-async fn play_referer_asset(
-    headers: &axum::http::HeaderMap,
-    path: &str,
-) -> Option<Response> {
+async fn play_referer_asset(headers: &axum::http::HeaderMap, path: &str) -> Option<Response> {
     let referer = headers.get(header::REFERER)?.to_str().ok()?;
     let exp_id = referer
         .split("/play/")
@@ -3729,7 +3766,7 @@ async fn play_referer_asset(
         let store = Store::open().ok()?;
         let exp = store.get_local_experiment(&exp_id).ok()??;
         let project = store.get_local_project(&exp.project_id).ok()??;
-        let root = std::fs::canonicalize(play_serve_dir(&project, &exp.id)).ok()?;
+        let root = std::fs::canonicalize(local::play::play_serve_dir(&project, &exp.id)).ok()?;
         let full = std::fs::canonicalize(root.join(&rel)).ok()?;
         if !full.starts_with(&root) || full.is_dir() {
             return None;
