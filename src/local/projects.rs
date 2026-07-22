@@ -34,7 +34,9 @@ fn unique_project_slug(store: &Store, base: &str) -> Result<String> {
 
 /// Clone the repo and create the project row. No experiments are created —
 /// the tree starts empty and the baseline is created lazily (first no-parent
-/// `create_experiment`).
+/// `create_experiment`). Clone progress ticks flow to `on_progress` (the API
+/// handler forwards them over SSE; CLI callers pass a no-op).
+#[allow(clippy::too_many_arguments)]
 pub fn create_project(
     store: &Store,
     name: &str,
@@ -43,12 +45,14 @@ pub fn create_project(
     baseline_branch: Option<String>,
     run_command: Option<String>,
     paper_id: Option<String>,
+    on_progress: &(dyn Fn(git::CloneProgress) + Send + Sync),
 ) -> Result<LocalProject> {
     let baseline_branch = baseline_branch
         .filter(|b| !b.trim().is_empty())
         .unwrap_or_else(|| "main".to_string());
     let slug = unique_project_slug(store, &slugify(name))?;
-    let repo_path = git::ensure_clone(github_owner, github_repo, &baseline_branch)?;
+    let repo_path =
+        git::ensure_clone_with_progress(github_owner, github_repo, &baseline_branch, on_progress)?;
 
     let now = now_ms();
     let project = LocalProject {
@@ -64,6 +68,7 @@ pub fn create_project(
         play_command: None,
         play_dir: None,
         persona: None,
+        auto_prompts: None,
         created_at: now,
         updated_at: now,
     };

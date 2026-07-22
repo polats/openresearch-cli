@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import {
   createProject,
+  listGithubRepos,
   resolvePaper,
   searchPapers,
+  type GithubRepo,
   type PaperHit,
   type Project,
   type ResolvedPaper,
 } from "../api";
+import { onProjectClone, type ProjectCloneEvent } from "../events";
 
 /** owner/repo out of anything a user pastes: a full GitHub URL (https or ssh),
  * with or without .git, or the bare `owner/repo` shorthand. */
@@ -66,6 +69,17 @@ export function NewProjectForm({
   const [branch, setBranch] = useState("main");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cloneProgress, setCloneProgress] = useState<ProjectCloneEvent | null>(null);
+
+  // Live clone progress over SSE while our POST is pending. No owner/repo
+  // filtering: one create at a time on a single-user dashboard.
+  useEffect(() => {
+    if (!pending) {
+      setCloneProgress(null);
+      return;
+    }
+    return onProjectClone(setCloneProgress);
+  }, [pending]);
 
   // "From a paper" mode.
   const [paperQuery, setPaperQuery] = useState("");
@@ -90,6 +104,28 @@ export function NewProjectForm({
     // Name follows the repo until the user edits it themselves.
     if (!nameTouched) setName(parseRepo(value)?.repo ?? "");
   };
+
+  // Repo autocomplete: the signed-in user's repos (most recently pushed
+  // first), fetched once when the Existing-repo field first shows and
+  // filtered locally as they type. Empty without a GitHub token — the field
+  // still accepts anything pasted.
+  const [myRepos, setMyRepos] = useState<GithubRepo[] | null>(null);
+  const [repoFocus, setRepoFocus] = useState(false);
+  useEffect(() => {
+    if (mode === "existing" && myRepos === null) {
+      listGithubRepos()
+        .then(setMyRepos)
+        .catch(() => setMyRepos([]));
+    }
+  }, [mode, myRepos]);
+  const repoQuery = repoInput.trim().toLowerCase();
+  const repoSuggestions = (myRepos ?? [])
+    .filter(
+      (r) =>
+        r.fullName.toLowerCase() !== repoQuery &&
+        (repoQuery === "" || r.fullName.toLowerCase().includes(repoQuery)),
+    )
+    .slice(0, 8);
 
   async function selectPaper(id: string) {
     const seq = ++paperSeq.current;
@@ -263,6 +299,8 @@ export function NewProjectForm({
             <input
               value={repoInput}
               onChange={(e) => onRepoChange(e.target.value)}
+              onFocus={() => setRepoFocus(true)}
+              onBlur={() => setRepoFocus(false)}
               placeholder="https://github.com/karpathy/nanoGPT"
               autoFocus
               spellCheck={false}
@@ -275,6 +313,23 @@ export function NewProjectForm({
                   : "URL or owner/repo — cloned with your git credentials"}
             </span>
           </label>
+          {repoFocus && repoSuggestions.length > 0 && (
+            <div className="paper-results">
+              {repoSuggestions.map((r) => (
+                <button
+                  key={r.fullName}
+                  type="button"
+                  // Keep the input focused so blur can't hide the list
+                  // before this click lands.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => onRepoChange(r.fullName)}
+                >
+                  <span className="title">{r.fullName}</span>
+                  <span className="id">{r.private ? "private" : "public"}</span>
+                </button>
+              ))}
+            </div>
+          )}
           {repoFields}
         </>
       )}
@@ -384,6 +439,26 @@ export function NewProjectForm({
       )}
 
       {error && <div className="error">{error}</div>}
+      {pending && cloneProgress && (
+        <div className="progress">
+          <div className="progress-track">
+            <div
+              className={`progress-fill${cloneProgress.percent == null ? " indeterminate" : ""}`}
+              style={
+                cloneProgress.percent == null
+                  ? undefined
+                  : { width: `${cloneProgress.percent}%` }
+              }
+            />
+          </div>
+          <div className="progress-caption">
+            <span>
+              {cloneProgress.phase}
+              {cloneProgress.percent != null ? ` ${cloneProgress.percent}%` : "…"}
+            </span>
+          </div>
+        </div>
+      )}
       <div className="actions">
         {onCancel && (
           <button type="button" className="btn ghost" onClick={onCancel}>

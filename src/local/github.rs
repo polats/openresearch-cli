@@ -10,6 +10,15 @@ use crate::error::{anyhow, Result};
 
 const UA: &str = concat!("orx/", env!("CARGO_PKG_VERSION"));
 
+/// All GitHub calls here sit inside a blocking `POST /api/projects` — a
+/// stalled request must error in bounded time, never hang the create flow.
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
+}
+
 /// Create a blank private repo with an auto-init commit so the clone/branch
 /// flow works immediately. An organization target is optional; without one,
 /// GitHub creates the repo under the token's user.
@@ -20,12 +29,61 @@ pub async fn create_repo(
     create_repo_api(repo, true, organization).await
 }
 
+/// One repo row for the New Project autocomplete.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserRepo {
+    pub full_name: String,
+    pub private: bool,
+}
+
+/// The token user's repos (owner, collaborator, or org member), most recently
+/// pushed first — backs the New Project repo autocomplete. Empty when no
+/// token is available: the field still accepts any pasted repo, so "no
+/// suggestions" is the graceful degradation, not an error.
+pub async fn list_user_repos() -> Result<Vec<UserRepo>> {
+    let Some(token) = resolve_github_token() else {
+        return Ok(Vec::new());
+    };
+    let res = client()
+        .get(
+            "https://api.github.com/user/repos\
+             ?affiliation=owner,collaborator,organization_member&sort=pushed&per_page=100",
+        )
+        .bearer_auth(&token)
+        .header("user-agent", UA)
+        .header("accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| anyhow!("GitHub API unreachable: {e}"))?;
+    if !res.status().is_success() {
+        return Err(anyhow!("GitHub repo list failed ({})", res.status()));
+    }
+    let body: Value = res
+        .json()
+        .await
+        .map_err(|e| anyhow!("GitHub response: {e}"))?;
+    Ok(body
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    Some(UserRepo {
+                        full_name: r.get("full_name")?.as_str()?.to_string(),
+                        private: r.get("private").and_then(Value::as_bool).unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Whether the token can push to `owner/repo`. `None` means "could not
 /// determine" (no token, network error, auth trouble) — callers should treat
 /// that as access rather than surprise-forking on a transient failure.
 pub async fn has_push_access(owner: &str, repo: &str) -> Option<bool> {
     let token = resolve_github_token()?;
-    let res = reqwest::Client::new()
+    let res = client()
         .get(format!("https://api.github.com/repos/{owner}/{repo}"))
         .bearer_auth(&token)
         .header("user-agent", UA)
@@ -57,6 +115,7 @@ pub async fn fork_copy_repo(
     src_repo: &str,
     src_branch: Option<String>,
     destination_organization: Option<&str>,
+    on_progress: impl Fn(super::git::CloneProgress) + Send + Sync + 'static,
 ) -> Result<(String, String, String)> {
     let hash = &uuid::Uuid::new_v4().simple().to_string()[..8];
     let name = format!("{}-{hash}", crate::local::slugify(src_repo));
@@ -70,6 +129,7 @@ pub async fn fork_copy_repo(
             src_branch.as_deref(),
             &dst_owner,
             &dst_repo,
+            &on_progress,
         )
     })
     .await
@@ -107,7 +167,7 @@ async fn create_repo_api(
             "Creating a GitHub repo needs credentials — run `gh auth login` or set GITHUB_TOKEN."
         )
     })?;
-    let res = reqwest::Client::new()
+    let res = client()
         .post(create_repo_endpoint(organization)?)
         .bearer_auth(&token)
         .header("user-agent", UA)
