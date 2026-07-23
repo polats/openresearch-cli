@@ -73,6 +73,30 @@ function emitDataDirMove(ev: DataDirMoveEvent) {
   dataDirMoveListeners.forEach((fn) => fn(ev));
 }
 
+// Clone progress during project creation fans out the same way so the New
+// Project dialog can show a live bar while its POST is pending.
+export interface ProjectCloneEvent {
+  owner: string;
+  repo: string;
+  /** Git's phase line ("Receiving objects", …) or the synthetic "Connecting". */
+  phase: string;
+  percent?: number | null;
+}
+
+type ProjectCloneListener = (ev: ProjectCloneEvent) => void;
+const projectCloneListeners = new Set<ProjectCloneListener>();
+
+export function onProjectClone(fn: ProjectCloneListener): () => void {
+  projectCloneListeners.add(fn);
+  return () => {
+    projectCloneListeners.delete(fn);
+  };
+}
+
+function emitProjectClone(ev: ProjectCloneEvent) {
+  projectCloneListeners.forEach((fn) => fn(ev));
+}
+
 export interface OrxEventHandlers {
   onRun: (run: Run) => void;
   onExperiment: (experiment: Experiment) => void;
@@ -143,6 +167,10 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
     es.addEventListener("datadir.move.error", (e) => {
       const d = parse<{ error: string }>(e as MessageEvent);
       if (d) emitDataDirMove({ type: "error", error: d.error });
+    });
+    es.addEventListener("project.clone.progress", (e) => {
+      const d = parse<ProjectCloneEvent>(e as MessageEvent);
+      if (d?.phase) emitProjectClone(d);
     });
     return () => es.close();
   }, []);

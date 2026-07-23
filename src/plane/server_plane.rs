@@ -609,7 +609,13 @@ impl ControlPlane for ServerPlane {
             description,
             run_command,
             baseline: _,
+            merge,
         } = spec;
+        if merge.is_some() {
+            return Err(anyhow!(
+                "--merge is local-mode only; merge experiments are not supported on server projects."
+            ));
+        }
 
         let experiment: crate::client::Experiment;
         let kind: String;
@@ -930,6 +936,12 @@ impl ServerPlane {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            supervisor_heartbeat_ms: None,
+            kind: "job".to_string(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
         })?;
         if let Err(err) = crate::client::update_external_run(
             creds,
@@ -1070,6 +1082,12 @@ impl ServerPlane {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            supervisor_heartbeat_ms: None,
+            kind: "job".to_string(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
         })?;
         if let Err(err) = crate::client::update_external_run(
             creds,

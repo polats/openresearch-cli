@@ -15,6 +15,11 @@ export const STATUS_STYLES: Record<string, StatusStyle> = {
   cancelled: { className: "st-cancelled", live: false },
   editing: { className: "st-editing", live: true },
   idle: { className: "st-idle", live: false },
+  // Verdicts ride the same badge component (keep = healthy, kill = dead,
+  // iterate = in motion).
+  keep: { className: "st-done", live: false },
+  kill: { className: "st-failed", live: false },
+  iterate: { className: "st-editing", live: false },
 };
 
 export function statusStyle(status: string): StatusStyle {

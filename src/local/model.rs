@@ -2,7 +2,7 @@
 //! HTTP API serves. Row conversions live here beside the structs; the SQL
 //! (matching column order) lives in `store.rs`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +23,30 @@ pub struct LocalProject {
     pub paper_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Build command for playable experiment builds (default `npm run build`).
+    pub play_command: Option<String>,
+    /// Dir (repo-relative) the play build outputs, served at /play (default `dist`).
+    pub play_dir: Option<String>,
+    /// Agent persona wire id (`research` | `game-designer`); NULL = research.
+    pub persona: Option<String>,
+    /// Which automatic `[orx]` chat prompts fire for this project. NULL (and
+    /// every unset field) = off — the agent is only prompted when the user
+    /// opts in via the Persona tab.
+    pub auto_prompts: Option<AutoPrompts>,
+}
+
+/// Per-project switches for the run-watcher's automatic chat prompts
+/// (`chat::watch_runs`). All default **off**: unsolicited agent turns proved
+/// intrusive during playtests. Stored as JSON in `local_projects.auto_prompts`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AutoPrompts {
+    /// A play session ended → ask the user how it felt, record the verdict.
+    pub play_session: bool,
+    /// A play build failed → tell the agent to fix the branch.
+    pub play_build_failed: bool,
+    /// A job/sim run completed → reconcile and continue the loop.
+    pub run_completed: bool,
 }
 
 impl LocalProject {
@@ -40,7 +64,19 @@ impl LocalProject {
             paper_id: row.get(8)?,
             created_at: row.get(9)?,
             updated_at: row.get(10)?,
+            play_command: row.get(11)?,
+            play_dir: row.get(12)?,
+            persona: row.get(13)?,
+            auto_prompts: row
+                .get::<_, Option<String>>(14)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
         })
+    }
+
+    /// The agent persona this project runs under. Defaults to research; an
+    /// unknown stored value also falls back rather than breaking sessions.
+    pub fn persona(&self) -> super::agent_skills::Persona {
+        super::agent_skills::Persona::parse(self.persona.as_deref()).unwrap_or_default()
     }
 }
 
@@ -60,6 +96,18 @@ pub struct LocalExperiment {
     pub agent_status: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Standing human verdict: keep | kill | iterate. Set explicitly, never
+    /// derived from run verdicts (see the Phase 1 spec).
+    pub verdict: Option<String>,
+    pub verdict_notes: Option<String>,
+    pub verdict_at: Option<i64>,
+    /// The playable's entry page under /play/<id>/ (path + optional query,
+    /// e.g. `gambit-slots.html?x=1`). None = the build's index.html.
+    pub play_entry: Option<String>,
+    /// Second parent for merge nodes: the experiment whose branch was merged
+    /// into this one at creation (`create-experiment --merge`). Drawn as a
+    /// dashed extra edge in the tree.
+    pub merge_parent_experiment_id: Option<String>,
 }
 
 impl LocalExperiment {
@@ -77,6 +125,11 @@ impl LocalExperiment {
             agent_status: row.get(8)?,
             created_at: row.get(9)?,
             updated_at: row.get(10)?,
+            verdict: row.get(11)?,
+            verdict_notes: row.get(12)?,
+            verdict_at: row.get(13)?,
+            play_entry: row.get(14)?,
+            merge_parent_experiment_id: row.get(15)?,
         })
     }
 

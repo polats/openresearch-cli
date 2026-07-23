@@ -2350,6 +2350,22 @@ textarea::placeholder {
   font-size: var(--fs-sm);
   color: var(--muted);
 }
+/* Percent unknown (clone connecting / counting): a sweeping pulse. */
+.progress-fill.indeterminate {
+  width: 30%;
+  animation: progress-sweep 1.2s ease-in-out infinite;
+}
+@keyframes progress-sweep {
+  0% {
+    margin-left: 0;
+  }
+  50% {
+    margin-left: 70%;
+  }
+  100% {
+    margin-left: 0;
+  }
+}
 
 .settings-form {
   margin-top: 14px;
@@ -3070,6 +3086,143 @@ a.files-pill:hover {
 }
 .muted {
   color: var(--muted);
+}
+
+/* persona identity colors — blue = research agent, orange = game designer.
+   Used by the Persona tab cards and the session-header persona bar. */
+:root {
+  --persona-research: var(--accent-blue);
+  --persona-game-designer: var(--accent-orange);
+}
+.persona-swatch {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+}
+.persona-swatch.persona-research {
+  background: var(--persona-research);
+}
+.persona-swatch.persona-game-designer {
+  background: var(--persona-game-designer);
+}
+.persona-card.persona-research {
+  border-left: 3px solid var(--persona-research);
+}
+.persona-card.persona-game-designer {
+  border-left: 3px solid var(--persona-game-designer);
+}
+.persona-active-pill.persona-research {
+  color: var(--persona-research);
+  border-color: var(--persona-research);
+}
+.persona-active-pill.persona-game-designer {
+  color: var(--persona-game-designer);
+  border-color: var(--persona-game-designer);
+}
+/* Vertical bar beside the session name — instant persona read. */
+.persona-bar {
+  flex: none;
+  width: 4px;
+  height: 16px;
+  border-radius: var(--radius-full);
+}
+.persona-bar.persona-research {
+  background: var(--persona-research);
+}
+.persona-bar.persona-game-designer {
+  background: var(--persona-game-designer);
+}
+/* Compact variant for the Recents session rows — snugged up to the title
+   (the row's 8px gap reads too airy for a 3px bar). */
+.persona-bar.sm {
+  width: 3px;
+  height: 12px;
+  margin-right: -4px;
+}
+/* Automatic-prompt toggles (Persona tab). */
+.persona-prompt-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.persona-prompt-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.persona-prompt-toggle input {
+  accent-color: var(--primary);
+}
+.persona-prompt-label {
+  font-weight: var(--fw-semibold);
+  color: var(--text);
+}
+.persona-prompt-hint {
+  color: var(--muted);
+}
+
+/* persona cards (Settings → Persona) — reuse the compute-row family for the
+   card chrome; these cover only the skill list and embedded doc viewers. */
+.persona-section-title {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--text);
+  margin: 14px 0 4px;
+}
+.persona-section-title:first-child {
+  margin-top: 0;
+}
+.persona-skill-list {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 6px;
+}
+.persona-skill {
+  border-top: 1px solid var(--border);
+}
+.persona-skill:first-child {
+  border-top: none;
+}
+.persona-skill-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 4px;
+  border-radius: var(--radius-sm);
+}
+.persona-skill-head:hover {
+  background: var(--surface);
+}
+.persona-skill-name {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--text);
+  flex: none;
+}
+.persona-skill-desc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.persona-doc {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  padding: 2px 14px;
+  margin: 4px 0 10px;
+  max-height: 440px;
+  overflow-y: auto;
+  font-size: var(--fs-sm);
 }
 
 /* compute target list (Settings → Compute) */
@@ -4232,4 +4385,211 @@ a.files-pill:hover {
   top: calc(50% - 6px);
   border-bottom: 1px solid var(--border);
   border-left: 1px solid var(--border);
+}
+
+/* --- game-design experiments: verdicts, metrics, artifacts ---------------- */
+
+/* DetailDrawer wrapper: verdict strip on top, the existing inset-0 overlay
+   views (.term-view/.drawer) fill the positioned body below it. */
+.exp-detail {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--base);
+  z-index: 20;
+}
+.exp-detail-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.exp-verdict-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.verdict-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.verdict-label {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  margin-right: 2px;
+}
+.verdict-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  padding: 2px 9px;
+  cursor: pointer;
+}
+.verdict-chip:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+.verdict-chip.keep.active {
+  background: var(--accent-green, #2e7d32);
+  border-color: transparent;
+  color: #fff;
+}
+.verdict-chip.kill.active {
+  background: var(--accent-red, #c62828);
+  border-color: transparent;
+  color: #fff;
+}
+.verdict-chip.iterate.active {
+  background: var(--accent-amber, #ef6c00);
+  border-color: transparent;
+  color: #fff;
+}
+.verdict-notes {
+  width: 220px;
+}
+.verdict-notes-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+
+.results-strip {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.metric-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.metric-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-size: var(--fs-sm);
+  background: var(--panel);
+}
+.metric-chip .metric-key {
+  color: var(--text-dim);
+}
+.metric-chip .metric-value {
+  font-weight: var(--fw-semibold);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.metric-delta {
+  font-size: var(--fs-xs, 11px);
+  font-variant-numeric: tabular-nums;
+}
+.metric-delta.up {
+  color: var(--accent-green, #2e7d32);
+}
+.metric-delta.down {
+  color: var(--accent-red, #c62828);
+}
+
+.artifact-gallery {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.artifact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+.artifact-grid img {
+  width: 100%;
+  height: 90px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+.artifact-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.artifact-file {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  text-decoration: none;
+}
+.artifact-file:hover {
+  color: var(--text);
+}
+
+/* --- play view (embedded playable) ---------------------------------------- */
+.play-view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--base);
+  z-index: 20;
+}
+.play-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.play-entry-input {
+  width: 280px;
+}
+.play-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+.node-eyebrow-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.node-eyebrow-left .node-gh {
+  padding: 1px;
+}
+
+/* Session clock in the play bar: pulsing dot + elapsed play time. */
+.session-clock {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.session-clock .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-green, #2e7d32);
+  animation: pulse 2s ease-in-out infinite;
 }

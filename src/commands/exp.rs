@@ -44,11 +44,27 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
         }
         ExpCommand::Run(run_args) => {
             let run_args = *run_args;
+            // Typed runs are local-backend-only in Phase 1 (the metrics/
+            // artifacts contract only exists there). Checked here so every
+            // backend gets the same message instead of silently ignoring it.
+            if matches!(run_args.kind.as_deref(), Some(k) if k != "job")
+                && run_args.backend.as_deref() != Some("local")
+            {
+                return Err(anyhow!(
+                    "--kind {} requires --backend local.",
+                    run_args.kind.as_deref().unwrap_or_default()
+                ));
+            }
             resolve_experiment(store, &run_args.exp_id)?
                 .launch(run_args)
                 .await
         }
         ExpCommand::Cancel { exp_id } => resolve_experiment(store, &exp_id)?.cancel().await,
+        ExpCommand::Verdict {
+            exp_id,
+            verdict,
+            message,
+        } => verdict_cmd(store, &exp_id, &verdict, message.as_deref()),
         ExpCommand::Wait {
             exp_id,
             project,
@@ -94,6 +110,37 @@ async fn wait(
                 .await
         }
     }
+}
+
+/// `orx exp verdict <id> keep|kill|iterate|clear [-m notes]` — the standing
+/// human judgment on an experiment. Local mode only: verdicts are a
+/// game-design-ledger concept with no server-side counterpart.
+fn verdict_cmd(store: Store, exp_id: &str, verdict: &str, notes: Option<&str>) -> Result<()> {
+    let exp = store.get_local_experiment(exp_id)?.ok_or_else(|| {
+        anyhow!(
+            "Local experiment {} not found (verdicts are local-mode only).",
+            exp_id
+        )
+    })?;
+    let value = match verdict {
+        "keep" | "kill" | "iterate" => Some(verdict),
+        "clear" => None,
+        other => {
+            return Err(anyhow!(
+                "Unknown verdict '{other}'. Expected keep, kill, iterate, or clear."
+            ))
+        }
+    };
+    store.set_experiment_verdict(
+        &exp.id,
+        value,
+        notes.map(str::trim).filter(|n| !n.is_empty()),
+    )?;
+    match value {
+        Some(v) => println!("✓ {} — verdict: {v}", exp.display_name()),
+        None => println!("✓ {} — verdict cleared", exp.display_name()),
+    }
+    Ok(())
 }
 
 // --- job-launch helpers shared with the src/local/* backends -----------------

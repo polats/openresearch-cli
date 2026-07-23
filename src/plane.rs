@@ -333,6 +333,8 @@ pub struct CreateExperimentSpec {
     pub baseline: bool,
     pub description: Option<String>,
     pub run_command: Option<String>,
+    /// Merge this experiment's branch into the new node (local mode only).
+    pub merge: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +413,12 @@ mod tests {
             commit_sha: Some("abcdef1234567890".to_string()),
             result_markdown: result_markdown.map(str::to_string),
             cancel_requested: false,
+            supervisor_heartbeat_ms: None,
+            kind: "job".to_string(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
         }
     }
 

@@ -11,8 +11,23 @@ export interface Project {
   runCommand?: string | null;
   /** arXiv id the project starts from (versionless). */
   paperId?: string | null;
+  /** Agent persona wire id ("research" | "game-designer"); null = research. */
+  persona?: string | null;
+  /** Automatic [orx] prompt switches; null/absent = all off. */
+  autoPrompts?: AutoPrompts | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Per-project switches for the run-watcher's automatic chat prompts.
+ * All default off — unsolicited agent turns proved intrusive. */
+export interface AutoPrompts {
+  /** Play session ended → ask the user for a verdict. */
+  playSession?: boolean;
+  /** Play build failed → tell the agent to fix the branch. */
+  playBuildFailed?: boolean;
+  /** Job/sim run completed → reconcile and continue the loop. */
+  runCompleted?: boolean;
 }
 
 export interface Experiment {
@@ -27,15 +42,36 @@ export interface Experiment {
   agentStatus: string;
   createdAt: number;
   updatedAt: number;
+  /** Standing human verdict — set explicitly, never derived from runs. */
+  verdict?: Verdict | null;
+  verdictNotes?: string | null;
+  verdictAt?: number | null;
+  /** Second parent: experiment whose branch was merged in at creation. */
+  mergeParentExperimentId?: string | null;
+  /** Entry page under /play/<id>/ (path + optional query); null = index.html. */
+  playEntry?: string | null;
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
+
+/** What kind of evaluation a run is (see the Phase 1 spec). */
+export type RunKind = "job" | "play" | "sim" | "verify" | "ladder";
+
+/** Human judgment on a run or experiment. */
+export type Verdict = "keep" | "kill" | "iterate";
 
 export interface Run {
   id: string;
   experimentId: string;
   projectId: string;
   status: RunStatus;
+  kind: RunKind;
+  /** The `aggregate` slice of the run's ingested metrics (numbers, small);
+   *  the full document is `getRunMetrics`. */
+  metricsAggregate?: Record<string, unknown>;
+  verdict?: Verdict;
+  verdictNotes?: string;
+  verdictAt?: number;
   backend?: Record<string, unknown> | null;
   command?: string | null;
   commitSha?: string | null;
@@ -44,6 +80,10 @@ export interface Run {
   updatedAt: number;
   endedAt?: number | null;
   exitCode?: number | null;
+  /** Watcher (supervisor process) state, present only on live runs:
+   *  "alive" = its heartbeat is fresh; "lost" = it stopped beating
+   *  (reboot, kill) and the status can no longer update on its own. */
+  watcher?: "alive" | "lost";
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -122,8 +162,50 @@ export const resolvePaper = (id: string) =>
     (r) => r.paper,
   );
 
-export const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
-  patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
+export const updateProject = (
+  projectId: string,
+  body: {
+    runCommand?: string;
+    name?: string;
+    persona?: string;
+    autoPrompts?: AutoPrompts;
+    /** Branch new baselines fork from (must exist on origin). */
+    baselineBranch?: string;
+  },
+) => patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
+
+/** The repo's pickable fork-point branches (origin, minus orx/* experiment
+ * branches) plus the project's current baseline. */
+export const listProjectBranches = (projectId: string) =>
+  get<{ branches: string[]; baseline: string }>(`/api/projects/${projectId}/branches`);
+
+export interface GithubRepo {
+  fullName: string;
+  private: boolean;
+}
+
+/** The signed-in user's repos, most recently pushed first (empty without a
+ * GitHub token) — backs the New Project repo autocomplete. */
+export const listGithubRepos = () =>
+  get<{ repos: GithubRepo[] }>("/api/github/repos").then((r) => r.repos);
+
+export interface PersonaSkill {
+  name: string;
+  description: string;
+  content: string;
+}
+
+export interface PersonaInfo {
+  id: string;
+  label: string;
+  description: string;
+  /** The persona's system-prompt template ({token} placeholders visible). */
+  systemPrompt: string;
+  skills: PersonaSkill[];
+}
+
+export const getPersonas = () =>
+  get<{ personas: PersonaInfo[] }>("/api/personas").then((r) => r.personas);
 
 /** Record a visit: bumps the project's updatedAt, which drives the recency sort. */
 export const openProject = (projectId: string) =>
@@ -155,6 +237,11 @@ export interface Instance extends Run {
 export const listInstances = () =>
   get<{ instances: Instance[] }>("/api/instances").then((r) => r.instances);
 
+/** Respawn `orx supervise` for every live run whose watcher stopped beating;
+ *  returns the ids re-attached. No-op (empty list) when all watchers are alive. */
+export const reconcileInstances = () =>
+  post<{ reattached: string[] }>("/api/instances/reconcile").then((r) => r.reattached);
+
 export interface NewExperiment {
   /** Omit on an empty project to create the baseline root; once a root
    *  exists, an omitted parent attaches the node under the oldest root. */
@@ -165,6 +252,8 @@ export interface NewExperiment {
   title?: string;
   description?: string;
   runCommand?: string;
+  /** Merge this experiment's branch into the new node (second parent). */
+  mergeParentExperimentId?: string;
 }
 
 export const createExperiment = (projectId: string, body: NewExperiment) =>
@@ -189,6 +278,68 @@ export const startRun = (
 ) => post<{ run: Run }>(`/api/experiments/${experimentId}/run`, body).then((r) => r.run);
 
 export const cancelRun = (runId: string) => post<{ ok: boolean }>(`/api/runs/${runId}/cancel`);
+
+// --- verdicts, metrics, artifacts, play builds (game-design experiments) ----
+
+export const setRunVerdict = (runId: string, verdict: Verdict | null, notes?: string) =>
+  post<{ run: Run }>(`/api/runs/${runId}/verdict`, { verdict, notes }).then((r) => r.run);
+
+export const setExperimentVerdict = (expId: string, verdict: Verdict | null, notes?: string) =>
+  post<{ experiment: Experiment }>(`/api/experiments/${expId}/verdict`, { verdict, notes }).then(
+    (r) => r.experiment,
+  );
+
+export const getRunMetrics = (runId: string) =>
+  get<{ metrics: Record<string, unknown> | null }>(`/api/runs/${runId}/metrics`).then(
+    (r) => r.metrics,
+  );
+
+export interface RunArtifact {
+  path: string;
+  size: number;
+  contentType: string;
+}
+
+export const listRunArtifacts = (runId: string) =>
+  get<{ artifacts: RunArtifact[]; truncated: boolean }>(`/api/runs/${runId}/artifacts`).then(
+    (r) => r.artifacts,
+  );
+
+export const runArtifactUrl = (runId: string, path: string) =>
+  `/api/runs/${runId}/artifacts/file?path=${encodeURIComponent(path)}`;
+
+export interface PlayBuild {
+  /** "ready" = a fresh build is being served; "building" = a build run is in flight. */
+  state: "ready" | "building";
+  url: string;
+  runId?: string;
+}
+
+/** Build (or reuse) the experiment's playable; idempotent. */
+export const startPlayBuild = (expId: string) =>
+  post<PlayBuild>(`/api/experiments/${expId}/play-build`);
+
+/** The playable URL for an experiment (its entry page when one is set). */
+export const playUrl = (exp: Pick<Experiment, "id" | "playEntry">) =>
+  `/play/${exp.id}/${exp.playEntry ?? ""}`;
+
+export const setExperimentPlayEntry = (expId: string, playEntry: string | null) =>
+  patch<{ experiment: Experiment }>(`/api/experiments/${expId}`, { playEntry }).then(
+    (r) => r.experiment,
+  );
+
+/** Start-or-keep-alive the experiment's play session (the play tab calls it
+ *  every 10s while mounted). Errors while the build isn't ready yet. */
+export const beatPlaySession = (expId: string) =>
+  post<{ run: Run }>(`/api/experiments/${expId}/play-session/beat`).then((r) => r.run);
+
+/** End the open play session; the verdict (if any) lands on the session run.
+ *  No open session is a no-op. */
+export const endPlaySession = (expId: string, verdict?: Verdict | null, notes?: string) =>
+  post<{ run: Run | null }>(`/api/experiments/${expId}/play-session/end`, {
+    verdict: verdict ?? null,
+    notes,
+  }).then((r) => r.run);
 
 export interface LogChunk {
   dataBase64: string;

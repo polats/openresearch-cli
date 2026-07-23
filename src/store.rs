@@ -114,13 +114,65 @@ pub fn human_bytes(n: u64) -> String {
 }
 
 pub fn log_path(run_id: &str) -> PathBuf {
-    // Run ids are server-issued UUIDs; sanitize anyway so a hostile id can't
-    // escape the log dir.
-    let safe: String = run_id
+    data_dir()
+        .join("run-logs")
+        .join(format!("{}.log", safe_run_id(run_id)))
+}
+
+/// Run ids are server-issued UUIDs; sanitize anyway so a hostile id can't
+/// escape the dir it names.
+fn safe_run_id(run_id: &str) -> String {
+    run_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
+/// Media/output files a run leaves behind (`$ORX_ARTIFACTS_DIR`); shown as
+/// the run's gallery. Lives in the data dir so the data-dir move carries it.
+pub fn run_artifacts_dir(run_id: &str) -> PathBuf {
+    data_dir().join("run-artifacts").join(safe_run_id(run_id))
+}
+
+/// Where a run's command may leave its metrics JSON (`$ORX_METRICS_PATH`);
+/// ingested into `runs.metrics_json` by the supervisor on terminal status.
+pub fn run_metrics_path(run_id: &str) -> PathBuf {
+    run_artifacts_dir(run_id).join("metrics.json")
+}
+
+/// The small metrics slice list payloads carry as `metricsAggregate`.
+/// Prefers a top-level `aggregate`; falls back to hoisting per-run aggregates
+/// from sim-batch's native `{runs: [{id, aggregate}]}` shape — a single run
+/// keeps plain keys, several are prefixed `<id>:<key>` so scenarios stay
+/// distinguishable.
+pub fn metrics_aggregate(doc: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    if let Some(agg) = doc.get("aggregate") {
+        return Some(agg.clone());
+    }
+    let runs = doc.get("runs")?.as_array()?;
+    let with_agg: Vec<(&str, &serde_json::Map<String, Value>)> = runs
+        .iter()
+        .filter_map(|r| {
+            Some((
+                r.get("id").and_then(Value::as_str).unwrap_or("run"),
+                r.get("aggregate")?.as_object()?,
+            ))
+        })
         .collect();
-    data_dir().join("run-logs").join(format!("{safe}.log"))
+    match with_agg.as_slice() {
+        [] => None,
+        [(_, agg)] => Some(Value::Object((*agg).clone())),
+        many => {
+            let mut out = serde_json::Map::new();
+            for (id, agg) in many {
+                for (k, v) in agg.iter() {
+                    out.insert(format!("{id}:{k}"), v.clone());
+                }
+            }
+            Some(Value::Object(out))
+        }
+    }
 }
 
 /// A locally-tracked external run. `status` uses the server vocabulary
@@ -144,6 +196,21 @@ pub struct StoredRun {
     pub result_markdown: Option<String>,
     /// Local-mode cancel intent (the supervisor polls it; server runs ignore it).
     pub cancel_requested: bool,
+    /// Unix millis of the last `orx supervise` heartbeat for this run — how
+    /// the Instances page tells a live watcher from one lost to a reboot or
+    /// kill. Null until the first supervisor stamp.
+    pub supervisor_heartbeat_ms: Option<i64>,
+    /// What kind of evaluation this run is: 'job' (classic script run),
+    /// 'play' (build-and-serve a playable), 'sim' (batch sim producing
+    /// metrics). Later: 'verify', 'ladder'.
+    pub kind: String,
+    /// Ingested metrics document (JSON object). Written by the supervisor on
+    /// terminal status from `$ORX_METRICS_PATH` (or a JSON-only log).
+    pub metrics_json: Option<String>,
+    /// Human verdict on this run: keep | kill | iterate. Null = unjudged.
+    pub verdict: Option<String>,
+    pub verdict_notes: Option<String>,
+    pub verdict_at: Option<i64>,
 }
 
 pub struct Store {
@@ -248,6 +315,21 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN reasoning_level TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
+            "ALTER TABLE runs ADD COLUMN supervisor_heartbeat_ms INTEGER",
+            "ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'job'",
+            "ALTER TABLE runs ADD COLUMN metrics_json TEXT",
+            "ALTER TABLE runs ADD COLUMN verdict TEXT",
+            "ALTER TABLE runs ADD COLUMN verdict_notes TEXT",
+            "ALTER TABLE runs ADD COLUMN verdict_at INTEGER",
+            "ALTER TABLE local_experiments ADD COLUMN verdict TEXT",
+            "ALTER TABLE local_experiments ADD COLUMN verdict_notes TEXT",
+            "ALTER TABLE local_experiments ADD COLUMN verdict_at INTEGER",
+            "ALTER TABLE local_projects ADD COLUMN play_command TEXT",
+            "ALTER TABLE local_projects ADD COLUMN play_dir TEXT",
+            "ALTER TABLE local_experiments ADD COLUMN play_entry TEXT",
+            "ALTER TABLE local_projects ADD COLUMN persona TEXT",
+            "ALTER TABLE local_experiments ADD COLUMN merge_parent_experiment_id TEXT",
+            "ALTER TABLE local_projects ADD COLUMN auto_prompts TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -329,8 +411,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command,
                                created_at, updated_at, ended_at, exit_code,
-                               commit_sha, result_markdown, cancel_requested)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                               commit_sha, result_markdown, cancel_requested, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                status = excluded.status,
                backend_json = excluded.backend_json,
@@ -353,7 +435,71 @@ impl Store {
                 run.commit_sha,
                 run.result_markdown,
                 run.cancel_requested,
+                run.kind,
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Ingested metrics for a run. Bumps updated_at (unlike the watcher
+    /// heartbeat) — new metrics ARE a change the UI must see.
+    pub fn set_run_metrics(&self, run_id: &str, metrics_json: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET metrics_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![run_id, metrics_json, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Human verdict on a run (None clears). Bumps updated_at so the SSE diff
+    /// pushes the change.
+    pub fn set_run_verdict(
+        &self,
+        run_id: &str,
+        verdict: Option<&str>,
+        notes: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET verdict = ?2, verdict_notes = ?3,
+                             verdict_at = CASE WHEN ?2 IS NULL THEN NULL ELSE ?4 END,
+                             updated_at = ?4
+             WHERE id = ?1",
+            params![run_id, verdict, notes, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// End play-session runs whose UI heartbeat went stale — the browser
+    /// vanished without a clean end. Each is closed at its last heartbeat
+    /// (created_at when it never beat), not at reap time, so durations stay
+    /// honest. Returns how many were ended.
+    pub fn reap_stale_play_sessions(&self, stale_before_ms: i64) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE runs SET status = 'done',
+                             ended_at = COALESCE(supervisor_heartbeat_ms, created_at),
+                             updated_at = ?2
+             WHERE kind = 'play-session'
+               AND status NOT IN ('done', 'failed', 'cancelled')
+               AND COALESCE(supervisor_heartbeat_ms, created_at) < ?1",
+            params![stale_before_ms, now_ms()],
+        )?;
+        Ok(n)
+    }
+
+    /// Standing verdict on an experiment (None clears). Bumps updated_at so
+    /// the SSE experiment diff pushes the change.
+    pub fn set_experiment_verdict(
+        &self,
+        exp_id: &str,
+        verdict: Option<&str>,
+        notes: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE local_experiments SET verdict = ?2, verdict_notes = ?3,
+                    verdict_at = CASE WHEN ?2 IS NULL THEN NULL ELSE ?4 END,
+                    updated_at = ?4
+             WHERE id = ?1",
+            params![exp_id, verdict, notes, now_ms()],
         )?;
         Ok(())
     }
@@ -437,6 +583,18 @@ impl Store {
         Ok(run)
     }
 
+    /// Watcher heartbeat, stamped every poll by the run's `orx supervise`
+    /// process. Deliberately does NOT bump `updated_at`: a heartbeat is not a
+    /// change, and the SSE diff keys on (status, updated_at) — bumping it
+    /// would push a `run.updated` event to every subscriber every 5s per run.
+    pub fn touch_supervisor(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET supervisor_heartbeat_ms = ?2 WHERE id = ?1",
+            params![run_id, now_ms()],
+        )?;
+        Ok(())
+    }
+
     pub fn set_cancel_requested(&self, run_id: &str, requested: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE runs SET cancel_requested = ?2, updated_at = ?3 WHERE id = ?1",
@@ -468,10 +626,12 @@ impl Store {
 
     pub fn create_local_project(&self, p: &LocalProject) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
+            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"),
             params![
                 p.id, p.name, p.slug, p.github_owner, p.github_repo,
                 p.baseline_branch, p.repo_path, p.run_command, p.paper_id, p.created_at, p.updated_at,
+                p.play_command, p.play_dir, p.persona,
+                p.auto_prompts.as_ref().and_then(|a| serde_json::to_string(a).ok()),
             ],
         )?;
         Ok(())
@@ -550,7 +710,8 @@ impl Store {
         self.conn.execute(
             "UPDATE local_projects SET name = ?2, slug = ?3, github_owner = ?4, github_repo = ?5,
                     baseline_branch = ?6, repo_path = ?7, run_command = ?8, paper_id = ?9,
-                    updated_at = ?10
+                    updated_at = ?10, play_command = ?11, play_dir = ?12, persona = ?13,
+                    auto_prompts = ?14
              WHERE id = ?1",
             params![
                 p.id,
@@ -563,6 +724,12 @@ impl Store {
                 p.run_command,
                 p.paper_id,
                 now_ms(),
+                p.play_command,
+                p.play_dir,
+                p.persona,
+                p.auto_prompts
+                    .as_ref()
+                    .and_then(|a| serde_json::to_string(a).ok()),
             ],
         )?;
         Ok(())
@@ -572,10 +739,12 @@ impl Store {
 
     pub fn create_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
+            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"),
             params![
                 e.id, e.project_id, e.parent_experiment_id, e.slug, e.branch_name,
                 e.title, e.description, e.run_command, e.agent_status, e.created_at, e.updated_at,
+                e.verdict, e.verdict_notes, e.verdict_at, e.play_entry,
+                e.merge_parent_experiment_id,
             ],
         )?;
         Ok(())
@@ -605,11 +774,13 @@ impl Store {
     pub fn update_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
             "UPDATE local_experiments SET parent_experiment_id = ?2, slug = ?3, branch_name = ?4,
-                    title = ?5, description = ?6, run_command = ?7, agent_status = ?8, updated_at = ?9
+                    title = ?5, description = ?6, run_command = ?7, agent_status = ?8, updated_at = ?9,
+                    play_entry = ?10
              WHERE id = ?1",
             params![
                 e.id, e.parent_experiment_id, e.slug, e.branch_name,
                 e.title, e.description, e.run_command, e.agent_status, now_ms(),
+                e.play_entry,
             ],
         )?;
         Ok(())
@@ -892,13 +1063,18 @@ fn row_to_chat_session(
 
 const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_json, command,
                                  created_at, updated_at, ended_at, exit_code,
-                                 commit_sha, result_markdown, cancel_requested FROM runs";
+                                 commit_sha, result_markdown, cancel_requested,
+                                 supervisor_heartbeat_ms, kind, metrics_json,
+                                 verdict, verdict_notes, verdict_at FROM runs";
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, baseline_branch, \
-                            repo_path, run_command, paper_id, created_at, updated_at";
+                            repo_path, run_command, paper_id, created_at, updated_at, \
+                            play_command, play_dir, persona, auto_prompts";
 
 const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branch_name, \
-                               title, description, run_command, agent_status, created_at, updated_at";
+                               title, description, run_command, agent_status, created_at, updated_at, \
+                               verdict, verdict_notes, verdict_at, play_entry, \
+                               merge_parent_experiment_id";
 
 fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlite::Error> {
     Ok(StoredRun {
@@ -915,6 +1091,12 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlit
         commit_sha: row.get(10)?,
         result_markdown: row.get(11)?,
         cancel_requested: row.get(12)?,
+        supervisor_heartbeat_ms: row.get(13)?,
+        kind: row.get(14)?,
+        metrics_json: row.get(15)?,
+        verdict: row.get(16)?,
+        verdict_notes: row.get(17)?,
+        verdict_at: row.get(18)?,
     })
 }
 
@@ -927,12 +1109,115 @@ pub fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::human_bytes;
+    use super::*;
 
     #[test]
     fn human_bytes_scales() {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(2048), "2.0 KB");
         assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    fn temp_store(name: &str) -> (Store, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        (Store::open_at(dir.clone()).unwrap(), dir)
+    }
+
+    fn test_run(id: &str, kind: &str) -> StoredRun {
+        StoredRun {
+            id: id.into(),
+            experiment_id: "e1".into(),
+            project_id: "p1".into(),
+            status: "starting".into(),
+            backend_json: "{}".into(),
+            command: "true".into(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            supervisor_heartbeat_ms: None,
+            kind: kind.into(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
+        }
+    }
+
+    /// kind survives the upsert, metrics/verdict setters round-trip, and both
+    /// bump updated_at (the SSE diff keys on it); clearing a verdict nulls
+    /// verdict_at.
+    #[test]
+    fn run_kind_metrics_verdict_roundtrip() {
+        let (store, dir) = temp_store("run-kmv");
+        store.upsert_run(&test_run("r1", "sim")).unwrap();
+
+        let run = store.get_run("r1").unwrap().unwrap();
+        assert_eq!(run.kind, "sim");
+        assert!(run.metrics_json.is_none() && run.verdict.is_none());
+
+        store
+            .set_run_metrics("r1", r#"{"aggregate":{"winRate":0.54}}"#)
+            .unwrap();
+        store
+            .set_run_verdict("r1", Some("keep"), Some("felt tactical"))
+            .unwrap();
+        let run = store.get_run("r1").unwrap().unwrap();
+        assert_eq!(
+            run.metrics_json.as_deref(),
+            Some(r#"{"aggregate":{"winRate":0.54}}"#)
+        );
+        assert_eq!(run.verdict.as_deref(), Some("keep"));
+        assert_eq!(run.verdict_notes.as_deref(), Some("felt tactical"));
+        assert!(run.verdict_at.is_some());
+        assert!(
+            run.updated_at > 1,
+            "verdict/metrics writes must bump updated_at"
+        );
+
+        store.set_run_verdict("r1", None, None).unwrap();
+        let run = store.get_run("r1").unwrap().unwrap();
+        assert!(run.verdict.is_none() && run.verdict_at.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Experiment verdicts round-trip through create + setter.
+    #[test]
+    fn experiment_verdict_roundtrip() {
+        let (store, dir) = temp_store("exp-verdict");
+        let exp = crate::local::model::LocalExperiment {
+            id: "e1".into(),
+            project_id: "p1".into(),
+            parent_experiment_id: None,
+            slug: "wave-mode".into(),
+            branch_name: "orx/wave-mode".into(),
+            title: None,
+            description: None,
+            run_command: "npm test".into(),
+            agent_status: "idle".into(),
+            created_at: 1,
+            updated_at: 1,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
+            play_entry: None,
+            merge_parent_experiment_id: None,
+        };
+        store.create_local_experiment(&exp).unwrap();
+        store
+            .set_experiment_verdict("e1", Some("iterate"), Some("downtime is dead air"))
+            .unwrap();
+        let exp = store.get_local_experiment("e1").unwrap().unwrap();
+        assert_eq!(exp.verdict.as_deref(), Some("iterate"));
+        assert_eq!(exp.verdict_notes.as_deref(), Some("downtime is dead air"));
+        assert!(exp.updated_at > 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -41,6 +41,7 @@ pub async fn run(mut args: crate::CreateExperimentArgs) -> Result<()> {
             baseline: args.baseline,
             description: args.description,
             run_command: args.run_command,
+            merge: args.merge,
         })
         .await?;
     // Key event, fired only on success. Coarse props only — no ids/names.

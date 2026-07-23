@@ -69,6 +69,7 @@ pub fn legacy_root_warning(project: &LocalProject, experiment: &LocalExperiment)
 /// node — it stays mutable (README, notebooks, publication surface) while
 /// `orx/*` branches hold the frozen experiment code. Matches the server path,
 /// which also branches baselines to `orx/<slug>`.
+#[allow(clippy::too_many_arguments)]
 pub fn create_experiment(
     store: &Store,
     project: &LocalProject,
@@ -77,12 +78,26 @@ pub fn create_experiment(
     title: Option<String>,
     description: Option<String>,
     run_command: Option<String>,
-) -> Result<LocalExperiment> {
+    merge_parent: Option<&LocalExperiment>,
+) -> Result<(LocalExperiment, Option<String>)> {
     if let Some(p) = parent {
         if p.project_id != project.id {
             return Err(anyhow!(
                 "Parent experiment {} belongs to a different project.",
                 p.id
+            ));
+        }
+    }
+    if let Some(m) = merge_parent {
+        if m.project_id != project.id {
+            return Err(anyhow!(
+                "Merge experiment {} belongs to a different project.",
+                m.id
+            ));
+        }
+        if parent.is_some_and(|p| p.id == m.id) {
+            return Err(anyhow!(
+                "--merge names the parent itself; pick a different experiment to merge in."
             ));
         }
     }
@@ -102,6 +117,35 @@ pub fn create_experiment(
         .unwrap_or(&project.baseline_branch);
     let branch_name = format!("orx/{slug}");
     git::create_experiment_branch(Path::new(&repo), fork_point, &branch_name)?;
+
+    // Merge node: land the merge commit on the fresh branch, checkout-free.
+    // Conflicts (or an old git) leave the branch at the fork point with the
+    // lineage still recorded — the warning tells the agent what to finish.
+    let merge_warning = match merge_parent {
+        None => None,
+        Some(m) => {
+            let parent_tip = git::resolve_branch_commit(Path::new(&repo), &branch_name)?
+                .ok_or_else(|| anyhow!("new branch {branch_name} has no tip"))?;
+            match git::merge_branch_tips(
+                Path::new(&repo),
+                &branch_name,
+                &parent_tip,
+                &m.branch_name,
+            )? {
+                git::MergeOutcome::Merged => None,
+                git::MergeOutcome::Conflicts(paths) => Some(format!(
+                    "merge of {} has conflicts ({paths}) — branch left at the fork point; \
+                     run `git merge {}` in your worktree, resolve, and push",
+                    m.branch_name, m.branch_name
+                )),
+                git::MergeOutcome::Unsupported => Some(format!(
+                    "this machine's git lacks `merge-tree --write-tree` (need ≥ 2.38) — \
+                     branch left at the fork point; run `git merge {}` in your worktree and push",
+                    m.branch_name
+                )),
+            }
+        }
+    };
 
     // Inherit: explicit > parent's command > project default > "".
     let run_command = run_command
@@ -125,11 +169,19 @@ pub fn create_experiment(
         description,
         run_command,
         agent_status: "idle".to_string(),
+        verdict: None,
+        verdict_notes: None,
+        verdict_at: None,
+        // A child stays playable the way its parent was: repos without an
+        // index.html (entry pages like gambit-slots.html) would otherwise
+        // serve a blank page on every new variant.
+        play_entry: parent.and_then(|p| p.play_entry.clone()),
+        merge_parent_experiment_id: merge_parent.map(|m| m.id.clone()),
         created_at: now,
         updated_at: now,
     };
     store.create_local_experiment(&experiment)?;
-    Ok(experiment)
+    Ok((experiment, merge_warning))
 }
 
 #[cfg(test)]
@@ -147,6 +199,10 @@ mod tests {
             repo_path: "/tmp/r".into(),
             run_command: None,
             paper_id: None,
+            play_command: None,
+            play_dir: None,
+            persona: None,
+            auto_prompts: None,
             created_at: 0,
             updated_at: 0,
         }
@@ -163,6 +219,11 @@ mod tests {
             description: None,
             run_command: String::new(),
             agent_status: "idle".into(),
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
+            play_entry: None,
+            merge_parent_experiment_id: None,
             created_at: 0,
             updated_at: 0,
         }

@@ -37,6 +37,26 @@ pub fn session_worktree_path(owner: &str, repo: &str, session_id: &str) -> PathB
     worktrees_root(owner, repo).join(session_id)
 }
 
+/// Detached worktree a playable experiment build runs in
+/// (`~/.cache/openresearch/play-builds/<owner>/<repo>/<experiment-id>`).
+/// Its own root — never the chat session's worktree, so builds can't race
+/// the agent's edits.
+pub fn play_worktree_path(owner: &str, repo: &str, experiment_id: &str) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cache")
+        .join("openresearch")
+        .join("play-builds")
+        .join(owner)
+        .join(repo)
+        .join(experiment_id)
+}
+
+/// Default ssh for headless git: never prompt, and give up on an unreachable
+/// host in bounded time — a filtered port 22 must fail the ssh leg, not park
+/// a server worker for minutes.
+const SSH_BATCH: &str = "ssh -oBatchMode=yes -oConnectTimeout=10";
+
 /// Run git with `args`, returning trimmed stdout; failures carry git's stderr.
 /// Headless: git must fail fast rather than prompt on /dev/tty (these calls
 /// run under a server, where a prompt would hang a worker forever).
@@ -47,7 +67,7 @@ fn git(dir: Option<&Path>, args: &[&str]) -> Result<String> {
     }
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
-        cmd.env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
+        cmd.env("GIT_SSH_COMMAND", SSH_BATCH);
     }
     let out = cmd
         .args(args)
@@ -95,10 +115,196 @@ fn assert_branch_exists(dir: &Path, owner: &str, repo: &str, branch: &str) -> Re
     Ok(())
 }
 
+/// One tick of clone progress: git's phase line ("Receiving objects", …) and
+/// the parsed percent when the line carries one. Serialized camelCase — the
+/// SSE `project.clone.progress` payload is this struct plus owner/repo.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneProgress {
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+}
+
+/// Parse one stderr record from `git clone --progress` into a progress tick.
+/// Records look like `Receiving objects:  47% (1234/2620), 5.2 MiB | 3.4 MiB/s`
+/// (rewrites are `\r`-separated); phase-only records ("Enumerating objects:
+/// 262, done.") yield no percent. Anything else returns `None`.
+fn parse_clone_progress(record: &str) -> Option<CloneProgress> {
+    let (phase, rest) = record.trim().split_once(':')?;
+    let phase = phase.trim();
+    if !matches!(
+        phase,
+        "Enumerating objects"
+            | "Counting objects"
+            | "Compressing objects"
+            | "Receiving objects"
+            | "Resolving deltas"
+            | "Updating files"
+    ) {
+        return None;
+    }
+    let percent = rest
+        .split('%')
+        .next()
+        .and_then(|n| n.trim().parse::<u8>().ok());
+    Some(CloneProgress {
+        phase: phase.to_string(),
+        percent,
+    })
+}
+
+/// How long the clone's stderr may go silent before the child is killed. A
+/// healthy clone chatters (progress rewrites many times a second); sustained
+/// silence means a dead network, and the caller must get an error instead of
+/// a worker parked forever.
+const CLONE_STALL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// `git clone --progress` with parsed progress callbacks (throttled to phase
+/// edges / ~150 ms) and the stall watchdog above. `extra` carries additional
+/// clone flags (`--depth=1`, `--branch`, …). On failure the error carries
+/// the tail of git's non-progress stderr. Does NOT clean up a partial target
+/// dir — the caller owns that (a killed clone leaves one behind).
+fn clone_with_progress(
+    url: &str,
+    target: &str,
+    extra: &[&str],
+    on_progress: &(dyn Fn(CloneProgress) + Send + Sync),
+) -> Result<()> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let mut cmd = Command::new("git");
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
+        cmd.env("GIT_SSH_COMMAND", SSH_BATCH);
+    }
+    let mut child = cmd
+        .args(["clone", "--progress"])
+        .args(extra)
+        .args([url, target])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow!("Could not run git: {}", e))?;
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+
+    // Reader thread chunks stderr into records split on BOTH `\r` and `\n`
+    // (git rewrites progress lines with carriage returns). The main thread
+    // keeps ownership of the child so the watchdog can kill it; the child's
+    // death closes stderr, which unblocks and ends the reader.
+    let (tx, rx) = mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        let mut pending = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    for &b in &chunk[..n] {
+                        if b == b'\r' || b == b'\n' {
+                            if !pending.is_empty() {
+                                let rec = String::from_utf8_lossy(&pending).into_owned();
+                                pending.clear();
+                                if tx.send(rec).is_err() {
+                                    return;
+                                }
+                            }
+                        } else {
+                            pending.push(b);
+                        }
+                    }
+                }
+            }
+        }
+        if !pending.is_empty() {
+            let _ = tx.send(String::from_utf8_lossy(&pending).into_owned());
+        }
+    });
+
+    let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut last_record = Instant::now();
+    let mut last_emit: Option<(String, Instant)> = None;
+    let mut stalled = false;
+    loop {
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(rec) => {
+                last_record = Instant::now();
+                if tail.len() >= 20 {
+                    tail.pop_front();
+                }
+                tail.push_back(rec.clone());
+                if let Some(p) = parse_clone_progress(&rec) {
+                    let emit = match &last_emit {
+                        Some((phase, at)) => {
+                            *phase != p.phase
+                                || p.percent == Some(100)
+                                || at.elapsed() >= Duration::from_millis(150)
+                        }
+                        None => true,
+                    };
+                    if emit {
+                        last_emit = Some((p.phase.clone(), Instant::now()));
+                        on_progress(p);
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if last_record.elapsed() >= CLONE_STALL {
+                    let _ = child.kill();
+                    stalled = true;
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let status = child.wait().map_err(|e| anyhow!("git clone: {}", e))?;
+    let _ = reader.join();
+    if stalled {
+        return Err(anyhow!(
+            "git clone {url} stalled (no output for {}s) and was killed — check the network",
+            CLONE_STALL.as_secs()
+        ));
+    }
+    if !status.success() {
+        // The interesting lines are the non-progress ones (fatal:, auth
+        // errors); progress rewrites are noise in an error message.
+        let msg = tail
+            .iter()
+            .filter(|l| parse_clone_progress(l).is_none() && !l.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        let msg = if msg.is_empty() {
+            format!("exit {status}")
+        } else {
+            msg
+        };
+        return Err(anyhow!("git clone {url} failed: {msg}"));
+    }
+    Ok(())
+}
+
 /// Clone `owner/repo` into the cache (ssh first, then https) or, when the
 /// clone already exists, fetch. Validates that `baseline_branch` exists on
 /// the remote. Returns the clone path.
 pub fn ensure_clone(owner: &str, repo: &str, baseline_branch: &str) -> Result<PathBuf> {
+    ensure_clone_with_progress(owner, repo, baseline_branch, &|_| {})
+}
+
+/// [`ensure_clone`] with clone progress fed to `on_progress` — the New
+/// Project flow forwards these over SSE. A failed or killed leg's partial
+/// clone dir is removed before the next attempt (git cleans up after its own
+/// failures, but not after a watchdog kill).
+pub fn ensure_clone_with_progress(
+    owner: &str,
+    repo: &str,
+    baseline_branch: &str,
+    on_progress: &(dyn Fn(CloneProgress) + Send + Sync),
+) -> Result<PathBuf> {
     let dir = clone_path(owner, repo);
     if dir.join(".git").is_dir() {
         git(Some(&dir), &["fetch", "origin"])?;
@@ -110,19 +316,30 @@ pub fn ensure_clone(owner: &str, repo: &str, baseline_branch: &str) -> Result<Pa
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
     let target = dir.to_string_lossy().to_string();
+    let cleanup = || {
+        if !dir.join(".git").is_dir() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    };
     // Test seam: ORX_GIT_REMOTE_BASE=file:///some/root clones <base>/<owner>/<repo>.
     if let Ok(base) = std::env::var("ORX_GIT_REMOTE_BASE") {
         let url = format!("{}/{owner}/{repo}", base.trim_end_matches('/'));
-        git(None, &["clone", &url, &target])?;
+        clone_with_progress(&url, &target, &[], on_progress).inspect_err(|_| cleanup())?;
         assert_branch_exists(&dir, owner, repo, baseline_branch)?;
         return Ok(dir);
     }
     let ssh = format!("git@github.com:{owner}/{repo}.git");
     let https = format!("https://github.com/{owner}/{repo}.git");
+    on_progress(CloneProgress {
+        phase: "Connecting".to_string(),
+        percent: None,
+    });
     // ssh covers private repos with keys; https covers public repos and
     // credential-helper setups. Surface the https error (the common path).
-    if git(None, &["clone", &ssh, &target]).is_err() {
-        if let Err(err) = git(None, &["clone", &https, &target]) {
+    if clone_with_progress(&ssh, &target, &[], on_progress).is_err() {
+        cleanup();
+        if let Err(err) = clone_with_progress(&https, &target, &[], on_progress) {
+            cleanup();
             return Err(anyhow!(
                 "Could not clone {owner}/{repo} (tried ssh and https): {err}"
             ));
@@ -203,13 +420,23 @@ pub fn seed_copy(
     src_branch: Option<&str>,
     dst_owner: &str,
     dst_repo: &str,
+    on_progress: &(dyn Fn(CloneProgress) + Send + Sync),
 ) -> Result<()> {
     let tmp = std::env::temp_dir().join(format!("orx-seed-{}", uuid::Uuid::new_v4()));
-    let result = seed_copy_in(&tmp, src_owner, src_repo, src_branch, dst_owner, dst_repo);
+    let result = seed_copy_in(
+        &tmp,
+        src_owner,
+        src_repo,
+        src_branch,
+        dst_owner,
+        dst_repo,
+        on_progress,
+    );
     let _ = std::fs::remove_dir_all(&tmp);
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn seed_copy_in(
     dir: &Path,
     src_owner: &str,
@@ -217,21 +444,24 @@ fn seed_copy_in(
     src_branch: Option<&str>,
     dst_owner: &str,
     dst_repo: &str,
+    on_progress: &(dyn Fn(CloneProgress) + Send + Sync),
 ) -> Result<()> {
     let target = dir.to_string_lossy().to_string();
-    let mut args = vec!["clone", "--depth=1", "--single-branch"];
+    let mut extra = vec!["--depth=1", "--single-branch"];
     if let Some(branch) = src_branch {
-        args.extend(["--branch", branch]);
+        extra.extend(["--branch", branch]);
     }
     // ssh first, https fallback — same auth order as ensure_clone.
     let ssh = format!("git@github.com:{src_owner}/{src_repo}.git");
     let https = format!("https://github.com/{src_owner}/{src_repo}.git");
-    let mut ssh_args = args.clone();
-    ssh_args.extend([ssh.as_str(), target.as_str()]);
-    if git(None, &ssh_args).is_err() {
-        let mut https_args = args;
-        https_args.extend([https.as_str(), target.as_str()]);
-        if let Err(err) = git(None, &https_args) {
+    on_progress(CloneProgress {
+        phase: "Connecting".to_string(),
+        percent: None,
+    });
+    if clone_with_progress(&ssh, &target, &extra, on_progress).is_err() {
+        let _ = std::fs::remove_dir_all(dir);
+        if let Err(err) = clone_with_progress(&https, &target, &extra, on_progress) {
+            let _ = std::fs::remove_dir_all(dir);
             return Err(anyhow!(
                 "Could not clone {src_owner}/{src_repo} (tried ssh and https): {err}"
             ));
@@ -259,6 +489,10 @@ fn seed_copy_in(
     )?;
     let dst_ssh = format!("git@github.com:{dst_owner}/{dst_repo}.git");
     let dst_https = format!("https://github.com/{dst_owner}/{dst_repo}.git");
+    on_progress(CloneProgress {
+        phase: "Pushing copy".to_string(),
+        percent: None,
+    });
     if git(Some(dir), &["push", &dst_ssh, "HEAD:main"]).is_err() {
         git(Some(dir), &["push", &dst_https, "HEAD:main"])?;
     }
@@ -292,6 +526,103 @@ pub fn create_experiment_branch(
         return Err(err);
     }
     Ok(())
+}
+
+/// Result of a checkout-free merge attempt (see [`merge_branch_tips`]).
+pub enum MergeOutcome {
+    /// The merge commit landed on `new_branch` and was pushed.
+    Merged,
+    /// Content conflicts — the branch is left at its fork point; the summary
+    /// names the conflicted paths for the agent to resolve in its worktree.
+    Conflicts(String),
+    /// This git lacks `merge-tree --write-tree` (< 2.38) — merge left to the
+    /// agent.
+    Unsupported,
+}
+
+/// Merge `merge_branch`'s tip into `new_branch` (currently at `parent_tip`)
+/// **without a checkout** — agent worktrees may hold any of these branches,
+/// so the hub clone's working tree must not be touched. Plumbing:
+/// `merge-tree --write-tree` builds the merged tree, `commit-tree` wraps it
+/// in a two-parent commit, `update-ref` moves the branch, `push` publishes.
+pub fn merge_branch_tips(
+    repo_path: &Path,
+    new_branch: &str,
+    parent_tip: &str,
+    merge_branch: &str,
+) -> Result<MergeOutcome> {
+    let merge_tip = resolve_branch_commit(repo_path, merge_branch)?
+        .ok_or_else(|| anyhow!("merge source '{merge_branch}' has no commits"))?;
+    // Direct invocation, not the `git()` helper: a conflicted merge exits 1
+    // with the report on STDOUT (tree OID first, then — with --name-only —
+    // the conflicted paths), which the helper would discard.
+    let out = Command::new("git")
+        .current_dir(repo_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args([
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            parent_tip,
+            &merge_tip,
+        ])
+        .output()
+        .map_err(|e| anyhow!("Could not run git: {}", e))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let tree = match out.status.code() {
+        Some(0) => stdout.lines().next().unwrap_or_default().trim().to_string(),
+        Some(1) => {
+            // Exit 1 = content conflicts. The first stdout block is the
+            // conflicted tree OID followed by the conflicted paths
+            // (--name-only); a blank line then informational messages we
+            // don't want in the summary.
+            let conflicted = stdout
+                .split("\n\n")
+                .next()
+                .unwrap_or("")
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .skip(1)
+                .take(10)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(MergeOutcome::Conflicts(conflicted));
+        }
+        _ => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("--write-tree") || stderr.contains("unknown option") {
+                return Ok(MergeOutcome::Unsupported);
+            }
+            return Err(anyhow!("git merge-tree failed: {}", stderr.trim()));
+        }
+    };
+    if tree.is_empty() {
+        return Err(anyhow!("merge-tree returned no tree id"));
+    }
+    let commit = git(
+        Some(repo_path),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            parent_tip,
+            "-p",
+            &merge_tip,
+            "-m",
+            &format!("orx: merge {merge_branch}"),
+        ],
+    )?;
+    git(
+        Some(repo_path),
+        &[
+            "update-ref",
+            &format!("refs/heads/{new_branch}"),
+            commit.trim(),
+        ],
+    )?;
+    git(Some(repo_path), &["push", "origin", new_branch])?;
+    Ok(MergeOutcome::Merged)
 }
 
 /// Head SHA of a branch — the *remote* tip when it exists (that's what a job
@@ -536,6 +867,31 @@ pub fn list_worktree_files(repo: &Path) -> Result<Vec<String>> {
     Ok(entries)
 }
 
+/// Refresh origin's refs in the hub clone (public wrapper for callers
+/// outside this module that need current remote branch state).
+pub fn fetch_origin(repo: &Path) -> Result<()> {
+    git(Some(repo), &["fetch", "origin"]).map(|_| ())
+}
+
+/// The repo's remote branches (origin), `HEAD` and `orx/*` experiment
+/// branches excluded — the pickable fork points for a project's baseline.
+pub fn list_remote_branches(repo: &Path) -> Result<Vec<String>> {
+    let out = git(
+        Some(repo),
+        &[
+            "for-each-ref",
+            "refs/remotes/origin",
+            "--format=%(refname:short)",
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("origin/"))
+        .filter(|b| *b != "HEAD" && !b.starts_with("orx/"))
+        .map(str::to_string)
+        .collect())
+}
+
 /// Resolve a branch name to its commit sha — the *local* ref first, then
 /// origin's: the code browser wants the agent's latest work, which lives
 /// locally before any push (the opposite preference of `branch_head_sha`,
@@ -641,4 +997,39 @@ pub fn file_at_capped(
         String::from_utf8_lossy(&buf).into_owned(),
         truncated,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clone_progress_parses_phase_and_percent() {
+        let p = parse_clone_progress("Receiving objects:  47% (1234/2620), 5.2 MiB | 3.4 MiB/s")
+            .unwrap();
+        assert_eq!(p.phase, "Receiving objects");
+        assert_eq!(p.percent, Some(47));
+
+        let p = parse_clone_progress("Resolving deltas: 100% (120/120), done.").unwrap();
+        assert_eq!(p.phase, "Resolving deltas");
+        assert_eq!(p.percent, Some(100));
+
+        // Phase line without a percent (count still running).
+        let p = parse_clone_progress("Enumerating objects: 262, done.").unwrap();
+        assert_eq!(p.phase, "Enumerating objects");
+        assert_eq!(p.percent, None);
+    }
+
+    #[test]
+    fn clone_progress_ignores_non_progress_records() {
+        for rec in [
+            "Cloning into '/tmp/x'...",
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "remote: Support for password authentication was removed.",
+            "",
+            "warning: You appear to have cloned an empty repository.",
+        ] {
+            assert!(parse_clone_progress(rec).is_none(), "parsed {rec:?}");
+        }
+    }
 }

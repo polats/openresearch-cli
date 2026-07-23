@@ -4,6 +4,7 @@ import {
   GitBranch,
   Maximize2,
   Minimize2,
+  Play,
   ScrollText,
   Terminal,
   X,
@@ -11,6 +12,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelRun,
+  endPlaySession,
   getFiles,
   listExperiments,
   listProjects,
@@ -305,6 +307,9 @@ export default function App() {
     (tab: ExpViewDef) => {
       const idx = expTabs.findIndex((t) => sameExpTab(t, tab));
       if (idx === -1) return;
+      // Closing a play tab ends its session (no-op when none is open —
+      // e.g. it already ended via a verdict or the stale reaper).
+      if (tab.view === "play") void endPlaySession(tab.id).catch(() => {});
       const next = expTabs.filter((_, i) => i !== idx);
       setExpTabs(next);
       // Closing the focused tab falls back to a neighbor, else the Log tab.
@@ -515,6 +520,8 @@ export default function App() {
           <ChatPanel
             projectId={projectId}
             paperId={projects.find((p) => p.id === projectId)?.paperId}
+            persona={projects.find((p) => p.id === projectId)?.persona}
+            baselineBranch={projects.find((p) => p.id === projectId)?.baselineBranch}
             railHeader={railHeader}
             railOpen={railOpen}
             onShowRail={() => setRailOpen(true)}
@@ -545,7 +552,11 @@ export default function App() {
                 ) : null;
               })()
             ) : mainView !== "chat" ? (
-              <SettingsView tab={mainView} />
+              <SettingsView
+                tab={mainView}
+                project={activeProject}
+                onProjectUpdated={(p) => setProjects((cur) => (cur ? upsert(cur, p) : [p]))}
+              />
             ) : null}
           </ChatPanel>
         )}
@@ -574,6 +585,8 @@ export default function App() {
                     icon={
                       t.view === "terminal" ? (
                         <Terminal size={12} style={{ flexShrink: 0 }} />
+                      ) : t.view === "play" ? (
+                        <Play size={12} style={{ flexShrink: 0 }} />
                       ) : (
                         <GitBranch size={12} style={{ flexShrink: 0 }} />
                       )
@@ -730,6 +743,12 @@ export default function App() {
                   runs={runs}
                   selectedRunId={selectedRunId}
                   onSelectRun={setSelectedRunId}
+                  mergeParent={
+                    tabExperiment.mergeParentExperimentId
+                      ? (experiments?.find((e) => e.id === tabExperiment.mergeParentExperimentId) ??
+                        null)
+                      : null
+                  }
                 />
               )}
             </div>

@@ -204,6 +204,10 @@ mod tests {
             repo_path: String::new(),
             run_command: None,
             paper_id: None,
+            play_command: None,
+            play_dir: None,
+            persona: None,
+            auto_prompts: None,
             created_at: 0,
             updated_at: 0,
         };

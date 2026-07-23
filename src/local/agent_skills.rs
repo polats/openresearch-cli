@@ -49,9 +49,65 @@ pub enum SkillSet {
     Full,
 }
 
+/// The agent persona a local project runs under. Selects the system-prompt
+/// template and the skill set injected into every chat session (see
+/// `opencode::ensure_playbook`). Stored on `local_projects.persona` as the
+/// wire string; `NULL`/absent means [`Persona::Research`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Persona {
+    /// The classic research agent: auto-research loop, literature, reports.
+    #[default]
+    Research,
+    /// Game-design agent: playable variants, playtests, verdicts, sims.
+    GameDesigner,
+}
+
+impl Persona {
+    pub const ALL: [Persona; 2] = [Persona::Research, Persona::GameDesigner];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Persona::Research => "research",
+            Persona::GameDesigner => "game-designer",
+        }
+    }
+
+    /// Parse the wire string; `None`/`NULL` is the research default. `Err` on
+    /// an unknown value so API writes can reject typos instead of storing them.
+    pub fn parse(value: Option<&str>) -> std::result::Result<Self, String> {
+        match value {
+            None | Some("research") => Ok(Persona::Research),
+            Some("game-designer") => Ok(Persona::GameDesigner),
+            Some(other) => Err(format!(
+                "unknown persona '{other}' (expected 'research' or 'game-designer')"
+            )),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Persona::Research => "Research agent",
+            Persona::GameDesigner => "Game designer",
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Persona::Research => {
+                "Runs the auto-research loop: literature search, baselines, \
+                 experiment branches judged by logged metrics, written reports."
+            }
+            Persona::GameDesigner => {
+                "Treats the tree as a prototype gallery: playable variants per \
+                 branch, playtests via the Play button, verdicts and sim metrics."
+            }
+        }
+    }
+}
+
 // --- Module files (embedded verbatim from the repo `agent-skills/` dir; the
-// `SKILL.local.md` siblings are the local-mode body variants under the same
-// public skill name) ----------------------------------------------------------
+// `SKILL.local.md` / `SKILL.game.md` siblings are the local-mode and
+// game-persona body variants under the same public skill name) ----------------
 
 const COMPUTE_LOCAL: &str = include_str!("../../agent-skills/orx-compute/SKILL.local.md");
 const COMPUTE_CLOUD: &str = include_str!("../../agent-skills/orx-compute/SKILL.md");
@@ -59,6 +115,8 @@ const COMPUTE_K8S: &str = include_str!("../../agent-skills/orx-compute-k8s/SKILL
 const EXPERIMENT_TREE_LOCAL: &str =
     include_str!("../../agent-skills/orx-experiment-tree/SKILL.local.md");
 const EXPERIMENT_TREE_CLOUD: &str = include_str!("../../agent-skills/orx-experiment-tree/SKILL.md");
+const EXPERIMENT_TREE_GAME: &str =
+    include_str!("../../agent-skills/orx-experiment-tree/SKILL.game.md");
 const GIT_EDITING: &str = include_str!("../../agent-skills/orx-git/SKILL.md");
 const LIT: &str = include_str!("../../agent-skills/orx-lit/SKILL.md");
 const CREATE: &str = include_str!("../../agent-skills/orx-create/SKILL.md");
@@ -66,6 +124,8 @@ const REPORTS_LOCAL: &str = include_str!("../../agent-skills/orx-reports/SKILL.l
 const REPORTS_CLOUD: &str = include_str!("../../agent-skills/orx-reports/SKILL.md");
 const EVIDENCE_LOCAL: &str = include_str!("../../agent-skills/orx-evidence/SKILL.local.md");
 const EVIDENCE_CLOUD: &str = include_str!("../../agent-skills/orx-evidence/SKILL.md");
+const EVIDENCE_GAME: &str = include_str!("../../agent-skills/orx-evidence/SKILL.game.md");
+const PLAY: &str = include_str!("../../agent-skills/orx-play/SKILL.md");
 
 // Descriptions are the *trigger surface*: what the module covers plus explicit,
 // liberal "Use when …" cues (false positives beat false negatives — an agent
@@ -104,6 +164,11 @@ const S_EXPERIMENT_TREE_CLOUD: AgentSkill = AgentSkill {
     description: D_EXPERIMENT_TREE,
     content: EXPERIMENT_TREE_CLOUD,
 };
+const S_EXPERIMENT_TREE_GAME: AgentSkill = AgentSkill {
+    name: "orx-experiment-tree",
+    description: "The experiment-tree model and the design loop: shape the prototype tree (stacked bushes), branch/build/playtest/promote, and `orx exp desc` notes. Use before creating, planning, or reorganizing experiments, when deciding which design idea to try next, when a round of variants has been judged, or whenever you're unsure how work maps onto the tree.",
+    content: EXPERIMENT_TREE_GAME,
+};
 const S_GIT: AgentSkill = AgentSkill {
     name: "orx-git",
     description: "Read, edit, and diff a node's code with plain git: sync, commit, and push before running. Use whenever you touch experiment code — before editing any branch, when a checkout or push fails, when comparing two nodes' code, or when a run seems to have picked up stale code.",
@@ -139,6 +204,16 @@ const S_EVIDENCE_CLOUD: AgentSkill = AgentSkill {
     description: "Analyze run results: `orx logs`, `orx search-logs`, text artifacts, W&B charts (`orx chart wandb`), and the `orx query` evidence DB. Use after any run finishes, when comparing metrics across runs or experiments, when hunting a failure in logs, or when asked for numbers, tables, or charts.",
     content: EVIDENCE_CLOUD,
 };
+const S_EVIDENCE_GAME: AgentSkill = AgentSkill {
+    name: "orx-evidence",
+    description: "Judge a variant across every evidence channel: run logs (`orx logs`), ingested sim metrics ($ORX_METRICS_PATH), media artifacts ($ORX_ARTIFACTS_DIR), play sessions, and verdicts. Use after any run finishes, before declaring a variant better or worse, when metrics are missing from a sim, or when designing what a sim should print and save.",
+    content: EVIDENCE_GAME,
+};
+const S_PLAY: AgentSkill = AgentSkill {
+    name: "orx-play",
+    description: "Make an experiment branch playable and gather play evidence: the dashboard Play button, play command and play dir, /play/<expId>/ URLs, play-session runs, sim runs (--kind sim) with ingested metrics, and verdicts (orx exp verdict). Use before asking the user to playtest, when a Play build fails, when setting up a new game's build, or when recording keep/kill/iterate decisions.",
+    content: PLAY,
+};
 
 /// The modules for a given set, in a stable order. Local and Full share names;
 /// `experiment-tree`/`compute`/`reports`/`evidence` swap bodies, and `create`
@@ -167,29 +242,63 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
     }
 }
 
-/// Resolve a bundled Full-set skill by name, accepting both the public name
-/// (`orx-compute`) and the bare form (`compute`). `None` for an unknown name —
-/// the caller falls back to the live API fetch.
+/// The modules injected into a persona's `orx up` session, in a stable order.
+/// Research is exactly the classic [`SkillSet::Local`] set; GameDesigner swaps
+/// the research-only modules (lit, reports) for the play module.
+pub fn skills_for_persona(persona: Persona) -> Vec<&'static AgentSkill> {
+    match persona {
+        Persona::Research => skills(SkillSet::Local),
+        Persona::GameDesigner => vec![
+            &S_PLAY,
+            &S_EXPERIMENT_TREE_GAME,
+            &S_GIT,
+            &S_COMPUTE_LOCAL,
+            &S_COMPUTE_K8S,
+            &S_EVIDENCE_GAME,
+        ],
+    }
+}
+
+/// Resolve a bundled skill by name — the Full set plus the persona-only play
+/// module — accepting both the public name (`orx-compute`) and the bare form
+/// (`compute`). `None` for an unknown name — the caller falls back to the
+/// live API fetch.
 pub fn find(name: &str) -> Option<&'static AgentSkill> {
     let want = name.trim();
     skills(SkillSet::Full)
         .into_iter()
+        .chain(std::iter::once(&S_PLAY))
         .find(|s| s.name == want || s.name.strip_prefix("orx-") == Some(want))
 }
 
-/// Write the [`SkillSet::Local`] modules as `<worktree>/<skills_dir_rel>/<name>/SKILL.md`,
+/// Write the persona's modules as `<worktree>/<skills_dir_rel>/<name>/SKILL.md`,
 /// overwriting every file on every call (same freshness semantics as the
-/// playbook — zero drift). Returns `Err` on the first write failure; the caller
-/// treats it like a playbook-write error.
-pub fn ensure_session_skills(worktree: &Path, skills_dir_rel: &str) -> Result<()> {
+/// playbook — zero drift). Modules belonging only to *other* personas are
+/// removed, so a persona switch never leaves stale skills behind. Returns
+/// `Err` on the first write failure; the caller treats it like a
+/// playbook-write error.
+pub fn ensure_session_skills(
+    worktree: &Path,
+    skills_dir_rel: &str,
+    persona: Persona,
+) -> Result<()> {
     let base = worktree.join(skills_dir_rel);
-    for skill in skills(SkillSet::Local) {
+    let current = skills_for_persona(persona);
+    for skill in &current {
         let dir = base.join(skill.name);
         std::fs::create_dir_all(&dir)
             .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
         let path = dir.join("SKILL.md");
         std::fs::write(&path, skill.content)
             .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
+    }
+    let keep: std::collections::HashSet<&str> = current.iter().map(|s| s.name).collect();
+    for other in Persona::ALL {
+        for skill in skills_for_persona(other) {
+            if !keep.contains(skill.name) {
+                let _ = std::fs::remove_dir_all(base.join(skill.name));
+            }
+        }
     }
     Ok(())
 }
@@ -210,11 +319,24 @@ mod tests {
             })
     }
 
+    /// Every servable list: the two classic sets plus each persona's set, so
+    /// persona-only modules (orx-play) get the same validity guarantees.
+    fn all_lists() -> Vec<(&'static str, Vec<&'static AgentSkill>)> {
+        let mut lists = vec![
+            ("Local", skills(SkillSet::Local)),
+            ("Full", skills(SkillSet::Full)),
+        ];
+        for p in Persona::ALL {
+            lists.push((p.as_str(), skills_for_persona(p)));
+        }
+        lists
+    }
+
     #[test]
     fn names_are_valid_unique_and_prefixed() {
-        for set in [SkillSet::Local, SkillSet::Full] {
+        for (set, list) in all_lists() {
             let mut seen = HashSet::new();
-            for s in skills(set) {
+            for s in list {
                 assert!(
                     is_valid_name(s.name),
                     "{:?}: invalid name {:?}",
@@ -239,8 +361,8 @@ mod tests {
 
     #[test]
     fn descriptions_are_within_bounds() {
-        for set in [SkillSet::Local, SkillSet::Full] {
-            for s in skills(set) {
+        for (set, list) in all_lists() {
+            for s in list {
                 let len = s.description.chars().count();
                 assert!(
                     (1..=400).contains(&len),
@@ -259,8 +381,8 @@ mod tests {
         // artifacts (embedded verbatim), so their frontmatter must agree with
         // the code's name/description — this is the drift guard between the
         // GitHub-readable files and the indexes generated from the consts.
-        for set in [SkillSet::Local, SkillSet::Full] {
-            for s in skills(set) {
+        for (_, list) in all_lists() {
+            for s in list {
                 let mut lines = s.content.lines();
                 assert_eq!(lines.next(), Some("---"), "{} missing opening ---", s.name);
                 let name_line = lines.next().unwrap_or_default();
@@ -311,43 +433,70 @@ mod tests {
         assert_eq!(find("compute").map(|s| s.name), Some("orx-compute"));
         assert_eq!(find("orx-create").map(|s| s.name), Some("orx-create"));
         assert_eq!(find("create").map(|s| s.name), Some("orx-create"));
+        assert_eq!(find("orx-play").map(|s| s.name), Some("orx-play"));
+        assert_eq!(find("play").map(|s| s.name), Some("orx-play"));
         assert!(find("does-not-exist").is_none());
         assert!(find("project-query").is_none());
     }
 
+    fn installed_dirs(base: &Path) -> HashSet<String> {
+        std::fs::read_dir(base)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
     #[test]
-    fn ensure_session_skills_writes_local_set_idempotently() {
+    fn ensure_session_skills_writes_persona_set_idempotently() {
         let tmp = std::env::temp_dir().join(format!(
             "orx-agent-skills-test-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
         let rel = ".claude/skills";
-        ensure_session_skills(&tmp, rel).unwrap();
-
         let base = tmp.join(rel);
-        let expected: HashSet<&str> = skills(SkillSet::Local).iter().map(|s| s.name).collect();
-        let got: HashSet<String> = std::fs::read_dir(&base)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        let got_refs: HashSet<&str> = got.iter().map(String::as_str).collect();
-        assert_eq!(got_refs, expected, "wrote exactly the Local-set dirs");
 
-        for s in skills(SkillSet::Local) {
-            let path = base.join(s.name).join("SKILL.md");
-            let content = std::fs::read_to_string(&path).unwrap();
-            assert_eq!(content, s.content, "{} SKILL.md content", s.name);
+        for persona in Persona::ALL {
+            ensure_session_skills(&tmp, rel, persona).unwrap();
+
+            let expected: HashSet<String> = skills_for_persona(persona)
+                .iter()
+                .map(|s| s.name.to_string())
+                .collect();
+            // A persona switch replaces the previous persona's dirs — after
+            // every call exactly the current set is on disk.
+            assert_eq!(
+                installed_dirs(&base),
+                expected,
+                "{}: wrote exactly the persona's dirs",
+                persona.as_str()
+            );
+
+            for s in skills_for_persona(persona) {
+                let path = base.join(s.name).join("SKILL.md");
+                let content = std::fs::read_to_string(&path).unwrap();
+                assert_eq!(content, s.content, "{} SKILL.md content", s.name);
+            }
+
+            // Idempotent: a second call overwrites in place and changes nothing.
+            ensure_session_skills(&tmp, rel, persona).unwrap();
+            assert_eq!(
+                installed_dirs(&base),
+                expected,
+                "{}: second call is idempotent",
+                persona.as_str()
+            );
         }
 
-        // Idempotent: a second call overwrites in place and changes nothing.
-        ensure_session_skills(&tmp, rel).unwrap();
-        let got2: HashSet<String> = std::fs::read_dir(&base)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(got2, got, "second call is idempotent");
-
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn persona_parse_round_trips_and_rejects_unknown() {
+        for p in Persona::ALL {
+            assert_eq!(Persona::parse(Some(p.as_str())), Ok(p));
+        }
+        assert_eq!(Persona::parse(None), Ok(Persona::Research));
+        assert!(Persona::parse(Some("wizard")).is_err());
     }
 }

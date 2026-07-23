@@ -2,11 +2,13 @@ import {
   Blocks,
   ChevronDown,
   Cpu,
+  Drama,
   ExternalLink,
   GitBranch,
   HardDrive,
   Info,
   Plus,
+  RadioTower,
   RefreshCw,
   Server,
   SquareTerminal,
@@ -20,6 +22,8 @@ import {
   fmtDuration,
   getComputeSettings,
   getEnvVars,
+  getPersonas,
+  updateProject,
   getGitSettings,
   getHarnesses,
   getHfSettings,
@@ -30,6 +34,7 @@ import {
   getSlurmSettings,
   getSshHosts,
   listInstances,
+  reconcileInstances,
   setComputeDefault,
   provisionModal,
   removeGitToken,
@@ -61,7 +66,10 @@ import {
   type LocalMachine,
   type ModalSettings,
   type ModalTokenSource,
+  type AutoPrompts,
   type OpenResearchSettings,
+  type PersonaInfo,
+  type Project,
   type SlurmPreflight,
   type SlurmSettings,
   type SshHost,
@@ -70,10 +78,12 @@ import {
 } from "../api";
 import { onDataDirMove } from "../events";
 import { GitTokenForm } from "./GitTokenForm";
+import { Md } from "./Md";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { StatusBadge } from "./StatusBadge";
 
 export type SettingsTab =
+  | "persona"
   | "harnesses"
   | "compute"
   | "instances"
@@ -1970,8 +1980,25 @@ function runtimeLabel(inst: Instance): string {
   return "—";
 }
 
-/** One section's table: backend (logo + flavor), project, status, started, runtime. */
-function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; emptyLabel: string }) {
+/** The watcher (supervisor) badge for a live run. A lost watcher means the
+ *  status can no longer update on its own — Reattach watchers fixes it. */
+function WatcherBadge({ watcher }: { watcher?: "alive" | "lost" }) {
+  if (watcher === "alive") return <StatusBadge status="running" label="Watching" />;
+  if (watcher === "lost") return <StatusBadge status="failed" label="Lost" />;
+  return <>—</>;
+}
+
+/** One section's table: backend (logo + flavor), project, status, started,
+ *  runtime — plus the watcher column on the Running section. */
+function InstancesTable({
+  instances,
+  emptyLabel,
+  showWatcher,
+}: {
+  instances: Instance[];
+  emptyLabel: string;
+  showWatcher?: boolean;
+}) {
   if (instances.length === 0) {
     return <p className="instances-empty">{emptyLabel}</p>;
   }
@@ -1983,6 +2010,7 @@ function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; empt
             <th>Backend</th>
             <th>Project</th>
             <th>Status</th>
+            {showWatcher && <th>Watcher</th>}
             <th>Started</th>
             <th>Runtime</th>
           </tr>
@@ -2015,6 +2043,11 @@ function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; empt
                 <td>
                   <StatusBadge status={inst.status} />
                 </td>
+                {showWatcher && (
+                  <td>
+                    <WatcherBadge watcher={inst.watcher} />
+                  </td>
+                )}
                 <td>{timeAgo(inst.createdAt)}</td>
                 <td>{runtimeLabel(inst)}</td>
               </tr>
@@ -2030,6 +2063,8 @@ function InstancesTab() {
   const [instances, setInstances] = useState<Instance[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [reattaching, setReattaching] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   // Re-render every 30s so live rows' Runtime keeps counting (client-side
   // only — the minute-level display doesn't warrant a refetch).
@@ -2057,6 +2092,26 @@ function InstancesTab() {
   };
   useEffect(() => load(), []);
 
+  // Respawn watchers for live runs whose supervisor died (reboot, kill) —
+  // they re-inspect the backend and settle stuck statuses. The list is
+  // refetched right after so fresh heartbeats show up.
+  const reattach = () => {
+    setReattaching(true);
+    setNotice(null);
+    reconcileInstances()
+      .then((ids) => {
+        setNotice(
+          ids.length === 0
+            ? "All watchers are alive — nothing to reattach."
+            : `Reattached ${ids.length} watcher${ids.length === 1 ? "" : "s"} — statuses will settle shortly.`,
+        );
+        setError(null);
+        load();
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setReattaching(false));
+  };
+
   const byRecent = (a: Instance, b: Instance) => b.createdAt - a.createdAt;
   const running = instances?.filter((i) => isLive(i.status)).sort(byRecent);
   const past = instances?.filter((i) => !isLive(i.status)).sort(byRecent);
@@ -2068,11 +2123,20 @@ function InstancesTab() {
         <button className="btn sm" onClick={load} disabled={refreshing}>
           <RefreshCw size={12} className={refreshing ? "spin" : ""} /> Refresh
         </button>
+        <button
+          className="btn sm"
+          onClick={reattach}
+          disabled={reattaching}
+          title="Respawn watchers for live runs whose supervisor died, so stuck statuses settle"
+        >
+          <RadioTower size={12} className={reattaching ? "spin" : ""} /> Reattach watchers
+        </button>
       </div>
       <p className="settings-sub">
         Compute spun up across all projects — this machine, Modal, Hugging Face, SSH, Kubernetes,
         Slurm, and OpenResearch.
       </p>
+      {notice && <p className="settings-sub">{notice}</p>}
       {error && <div className="error">{error}</div>}
       {!running || !past ? (
         <div className="settings-loading">
@@ -2084,9 +2148,260 @@ function InstancesTab() {
             Running
             {running.length > 0 && <span className="count-badge">{running.length}</span>}
           </h2>
-          <InstancesTable instances={running} emptyLabel="Nothing running right now." />
+          <InstancesTable
+            instances={running}
+            emptyLabel="Nothing running right now."
+            showWatcher
+          />
           <h2 className="instances-section-title">Past</h2>
           <InstancesTable instances={past} emptyLabel="No past instances yet." />
+        </>
+      )}
+    </>
+  );
+}
+
+// --- persona -----------------------------------------------------------------
+
+/** One persona's card: pick it for the current project, and inspect exactly
+ * what it injects — the system prompt template and the skill set. */
+function PersonaRow({
+  persona,
+  isActive,
+  hasProject,
+  open,
+  saving,
+  onToggle,
+  onActivate,
+}: {
+  persona: PersonaInfo;
+  isActive: boolean;
+  hasProject: boolean;
+  open: boolean;
+  saving: boolean;
+  onToggle: () => void;
+  onActivate: () => void;
+}) {
+  const [openSkill, setOpenSkill] = useState<string | null>(null);
+  const [showPrompt, setShowPrompt] = useState(false);
+
+  return (
+    <div className={`compute-row persona-card persona-${persona.id}${open ? " open" : ""}`}>
+      {/* Same pattern as the Compute rows: a clickable head holding real
+          buttons, with the chevron as the keyboard-reachable control. */}
+      <div className="compute-row-head" onClick={onToggle}>
+        <span className={`persona-swatch persona-${persona.id}`} />
+        <span className="compute-row-name">{persona.label}</span>
+        <span className="compute-row-summary">{persona.description}</span>
+        {isActive ? (
+          <span className={`badge persona-active-pill persona-${persona.id}`}>Active</span>
+        ) : (
+          <button
+            type="button"
+            className="btn sm compute-make-default"
+            onClick={(e) => {
+              e.stopPropagation(); // the header click is expand/collapse
+              onActivate();
+            }}
+            disabled={saving || !hasProject}
+          >
+            Use for this project
+          </button>
+        )}
+        <button
+          type="button"
+          className="compute-chevron-btn"
+          aria-expanded={open}
+          aria-label={`${open ? "Collapse" : "Expand"} ${persona.label}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle();
+          }}
+        >
+          <ChevronDown size={16} className="compute-chevron" />
+        </button>
+      </div>
+      {open && (
+        <div className="compute-row-body">
+          <h3 className="persona-section-title">Skills</h3>
+          <p className="settings-note">
+            Installed fresh into every chat session&apos;s worktree — the agent auto-loads them.
+          </p>
+          <div className="persona-skill-list">
+            {persona.skills.map((s) => {
+              const skillOpen = openSkill === s.name;
+              return (
+                <div key={s.name} className="persona-skill">
+                  <button
+                    type="button"
+                    className="persona-skill-head"
+                    aria-expanded={skillOpen}
+                    onClick={() => setOpenSkill(skillOpen ? null : s.name)}
+                  >
+                    <ChevronDown
+                      size={14}
+                      className="compute-chevron"
+                      style={skillOpen ? { transform: "rotate(180deg)" } : undefined}
+                    />
+                    <span className="persona-skill-name">{s.name}</span>
+                    <span className="persona-skill-desc">{s.description}</span>
+                  </button>
+                  {skillOpen && (
+                    <div className="persona-doc">
+                      <Md text={s.content} />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <h3 className="persona-section-title">System prompt</h3>
+          <p className="settings-note">
+            Injected into every chat turn; <code>{"{token}"}</code> placeholders are filled with
+            project facts at render time.{" "}
+            <button type="button" className="btn sm" onClick={() => setShowPrompt(!showPrompt)}>
+              {showPrompt ? "Hide" : "Show"} system prompt
+            </button>
+          </p>
+          {showPrompt && (
+            <div className="persona-doc">
+              <Md text={persona.systemPrompt} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PersonaTab({
+  project,
+  onProjectUpdated,
+}: {
+  project: Project | null;
+  onProjectUpdated: (p: Project) => void;
+}) {
+  const [personas, setPersonas] = useState<PersonaInfo[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    getPersonas()
+      .then((p) => {
+        setPersonas(p);
+        setLoadError(null);
+      })
+      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  const active = project?.persona ?? "research";
+
+  async function activate(personaId: string) {
+    if (!project || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      onProjectUpdated(await updateProject(project.id, { persona: personaId }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const prompts = project?.autoPrompts ?? {};
+  async function setPrompt(key: keyof AutoPrompts, on: boolean) {
+    if (!project || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      onProjectUpdated(
+        await updateProject(project.id, { autoPrompts: { ...prompts, [key]: on } }),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const promptToggles: { key: keyof AutoPrompts; label: string; hint: string }[] = [
+    {
+      key: "playSession",
+      label: "Play session ended",
+      hint: "prompt the agent to ask how it felt and record your verdict",
+    },
+    {
+      key: "playBuildFailed",
+      label: "Play build failed",
+      hint: "prompt the agent to read the log and fix the branch",
+    },
+    {
+      key: "runCompleted",
+      label: "Job / sim run completed",
+      hint: "prompt the agent to analyze the result and continue the loop",
+    },
+  ];
+
+  return (
+    <>
+      <h1>Persona</h1>
+      <p className="settings-sub">
+        Who the agent is for{" "}
+        {project ? (
+          <strong>{project.name}</strong>
+        ) : (
+          "this project"
+        )}
+        : each persona sets the system prompt and the skills injected into every chat session.
+      </p>
+      {!project && (
+        <p className="settings-note">Open a project to switch its persona.</p>
+      )}
+      {loadError && <div className="error">{loadError}</div>}
+      {error && <div className="error">{error}</div>}
+      {personas && (
+        <div className="compute-list">
+          {personas.map((p) => (
+            <PersonaRow
+              key={p.id}
+              persona={p}
+              isActive={active === p.id}
+              hasProject={project !== null}
+              open={expanded === p.id}
+              saving={saving}
+              onToggle={() => setExpanded(expanded === p.id ? null : p.id)}
+              onActivate={() => void activate(p.id)}
+            />
+          ))}
+        </div>
+      )}
+      {project && (
+        <>
+          <h3 className="persona-section-title">Automatic agent prompts</h3>
+          <p className="settings-note">
+            When enabled, the dashboard sends the agent an <code>[orx]</code> message as these
+            events finish (only while it&apos;s idle). All off by default — the agent only acts
+            when you talk to it.
+          </p>
+          <div className="persona-prompt-toggles">
+            {promptToggles.map((t) => (
+              <label key={t.key} className="persona-prompt-toggle">
+                <input
+                  type="checkbox"
+                  checked={prompts[t.key] === true}
+                  disabled={saving}
+                  onChange={(e) => void setPrompt(t.key, e.target.checked)}
+                />
+                <span>
+                  <span className="persona-prompt-label">{t.label}</span>
+                  <span className="persona-prompt-hint"> — {t.hint}</span>
+                </span>
+              </label>
+            ))}
+          </div>
         </>
       )}
     </>
@@ -2097,6 +2412,7 @@ function InstancesTab() {
 
 /** Rail nav entries, one per settings section (rendered in the agents rail). */
 export const SETTINGS_NAV: { id: Tab; label: string; icon: React.ReactNode }[] = [
+  { id: "persona", label: "Persona", icon: <Drama size={15} /> },
   { id: "harnesses", label: "Harnesses", icon: <Blocks size={15} /> },
   { id: "compute", label: "Compute", icon: <Cpu size={15} /> },
   { id: "instances", label: "Instances", icon: <Server size={15} /> },
@@ -2105,10 +2421,21 @@ export const SETTINGS_NAV: { id: Tab; label: string; icon: React.ReactNode }[] =
   { id: "storage", label: "Storage", icon: <HardDrive size={15} /> },
 ];
 
-/** One settings section's content, shown in the middle pane in place of chat. */
-export function SettingsView({ tab }: { tab: Tab }) {
+/** One settings section's content, shown in the middle pane in place of chat.
+ * `project`/`onProjectUpdated` back the Persona section — the one per-project
+ * setting here; every other section is global. */
+export function SettingsView({
+  tab,
+  project = null,
+  onProjectUpdated = () => {},
+}: {
+  tab: Tab;
+  project?: Project | null;
+  onProjectUpdated?: (p: Project) => void;
+}) {
   return (
     <div className="settings-view">
+      {tab === "persona" && <PersonaTab project={project} onProjectUpdated={onProjectUpdated} />}
       {tab === "harnesses" && <HarnessesTab />}
       {tab === "compute" && <ComputeTab />}
       {tab === "environment" && (

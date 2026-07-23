@@ -148,8 +148,9 @@ enum Command {
     /// safe to re-run after a crash or box replacement.
     Supervise(SuperviseArgs),
 
-    /// Start the local autoresearch dashboard on 127.0.0.1: embedded UI,
-    /// JSON/SSE API over the local store, and the opencode agent proxy.
+    /// Start the local autoresearch dashboard (127.0.0.1 by default; --host
+    /// widens the bind): embedded UI, JSON/SSE API over the local store, and
+    /// the opencode agent proxy.
     Up(UpArgs),
 
     /// Turn anonymous usage analytics on or off, or show current status.
@@ -367,6 +368,11 @@ pub struct CreateExperimentArgs {
     /// inherit from the parent / project default.
     #[arg(long = "run-command")]
     pub run_command: Option<String>,
+    /// Merge this experiment's branch into the new node (a second parent —
+    /// the tree draws it as a merge edge). Local mode only. Conflicts are
+    /// reported and left for you to resolve in your worktree.
+    #[arg(long)]
+    pub merge: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -481,6 +487,17 @@ pub enum ExpCommand {
     /// Cancel the in-flight run.
     Cancel { exp_id: String },
 
+    /// Record the standing human verdict on an experiment (local mode):
+    /// keep, kill, or iterate — or `clear` to remove it.
+    Verdict {
+        exp_id: String,
+        /// keep | kill | iterate | clear
+        verdict: String,
+        /// Free-form notes on why (what felt off, what to try next).
+        #[arg(short = 'm', long)]
+        message: Option<String>,
+    },
+
     /// Wait for a run to finish: one experiment (`<expId>`) or the next completion in a project (`--project`).
     Wait {
         /// Experiment to watch; its latest run is polled until it reaches a
@@ -545,6 +562,11 @@ pub enum ReportCommand {
 #[derive(Args, Debug)]
 pub struct ExpRunArgs {
     pub exp_id: String,
+    /// What kind of evaluation this run is: `job` (default — a classic
+    /// script run) or `sim` (batch sim; its metrics JSON is ingested onto
+    /// the run). Local backend only.
+    #[arg(long)]
+    pub kind: Option<String>,
     /// Provision a new instance with this GPU id, e.g. `H100_SXM` — the exact
     /// id from `orx compute`, not a family name like `H100`.
     #[arg(long)]
@@ -645,8 +667,16 @@ pub struct SuperviseArgs {
 #[derive(Args, Debug)]
 pub struct UpArgs {
     /// Port to bind on 127.0.0.1. With `--remote`, the local port to forward.
-    #[arg(long, default_value_t = 4791)]
+    #[arg(long, default_value_t = 3333)]
     pub port: u16,
+    /// IP address to bind (default 127.0.0.1 — this machine only). Use
+    /// 0.0.0.0 to reach the dashboard from other devices on your local
+    /// network. The dashboard is unauthenticated: anyone who can reach the
+    /// port can run code and read files as you, so only widen the bind on a
+    /// network you trust. Ignored with `--remote` (the remote server stays
+    /// loopback-only behind the SSH tunnel).
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
     /// Run `orx up` on a remote box over SSH and forward it here. The value is
     /// an `~/.ssh/config` host alias, or `user@host` (append `:PORT` for a
     /// non-standard SSH port, e.g. `root@1.2.3.4:38455`). Only user@host + port

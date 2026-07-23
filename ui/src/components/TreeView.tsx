@@ -8,7 +8,7 @@ import {
   type Node,
   type NodeProps,
 } from "@xyflow/react";
-import { FolderTree, GitBranch, Terminal } from "lucide-react";
+import { FolderTree, GitBranch, Play, Terminal } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
 import { memo, useMemo } from "react";
 import { githubBranchUrl, timeAgo, type Experiment, type Project, type Run } from "../api";
@@ -75,14 +75,36 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   const { exp, latestRun, runs, isBaseline, githubOwner, githubRepo, onOpenView, onOpenCodeBranch } = data;
   const status = latestRun?.status;
   const live = status === "running" || status === "starting";
-  const kind = isBaseline ? "Baseline" : live ? "Running" : "Experiment";
+  const kind = isBaseline
+    ? "Baseline"
+    : live
+      ? "Running"
+      : exp.mergeParentExperimentId
+        ? "Merge"
+        : "Experiment";
   const squares = runs.slice(-MAX_SQUARES);
   return (
     <div className={`exp-node ${live ? "live" : ""}`}>
       <Handle type="target" position={Position.Top} />
       <div className="node-eyebrow">
-        <span>{kind}</span>
-        <StatusBadge status={status ?? "idle"} />
+        <span className="node-eyebrow-left">
+          {kind}
+          <a
+            className="icon-btn node-gh"
+            title={`Open ${exp.branchName} on GitHub`}
+            aria-label={`Open ${exp.branchName} on GitHub`}
+            href={githubBranchUrl(githubOwner, githubRepo, exp.branchName)}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <GitHubMark size={12} />
+          </a>
+        </span>
+        <span style={{ display: "inline-flex", gap: 6 }}>
+          {exp.verdict && <StatusBadge status={exp.verdict} />}
+          <StatusBadge status={status ?? "idle"} />
+        </span>
       </div>
       <div className="node-head">
         <span className="node-slug">{exp.slug}</span>
@@ -106,6 +128,14 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
       </div>
       {/* Direct view shortcuts — changes and code always, logs once there's a run. */}
       <div className="node-actions" onClick={(e) => e.stopPropagation()}>
+        <button
+          className="node-action"
+          title="Build & play this experiment"
+          onClick={() => onOpenView(exp.id, "play")}
+        >
+          <Play size={13} />
+          Play
+        </button>
         <button
           className="node-action"
           title="Open changes"
@@ -132,18 +162,6 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           <FolderTree size={13} />
           Code
         </button>
-        {/* Icon-only: labeled actions + the link overflow the card's fixed width. */}
-        <a
-          className="node-action node-action-ext"
-          title={`Open ${exp.branchName} on GitHub`}
-          aria-label={`Open ${exp.branchName} on GitHub`}
-          href={githubBranchUrl(githubOwner, githubRepo, exp.branchName)}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <GitHubMark size={13} />
-        </a>
       </div>
       <Handle type="source" position={Position.Bottom} />
     </div>
@@ -225,6 +243,19 @@ export function TreeView({
       const w = subtreeWidth(root);
       layout(root, rx + w / 2, 0);
       rx += w + GAP_X;
+    }
+    // Merge lineage: a dashed second edge from the merged-in experiment to
+    // the merge node, on top of the tree's parent edges.
+    const placed = new Set(nodes.map((n) => n.id));
+    for (const e of experiments) {
+      if (e.mergeParentExperimentId && placed.has(e.mergeParentExperimentId) && placed.has(e.id)) {
+        edges.push({
+          id: `m-${e.mergeParentExperimentId}-${e.id}`,
+          source: e.mergeParentExperimentId,
+          target: e.id,
+          style: { stroke: "var(--text)", strokeWidth: 1.5, opacity: 0.45, strokeDasharray: "5 4" },
+        });
+      }
     }
     return { nodes, edges };
   }, [experiments, runs, onOpenView, onOpenCodeBranch, project.githubOwner, project.githubRepo]);

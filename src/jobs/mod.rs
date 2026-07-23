@@ -42,7 +42,7 @@ pub fn default_unbuffered(env: &HashMap<String, String>) -> HashMap<String, Stri
 /// `kind` discriminates. This is a fixed field list — a key absent here does
 /// NOT survive a parse → to_json round-trip, so anything a backend must keep
 /// needs its own (optional) field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendDescriptor {
     pub kind: String,

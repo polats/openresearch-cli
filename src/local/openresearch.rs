@@ -220,6 +220,12 @@ pub async fn submit_local_openresearch(args: &crate::ExpRunArgs) -> Result<Store
         commit_sha: Some(commit_sha),
         result_markdown: None,
         cancel_requested: false,
+        supervisor_heartbeat_ms: None,
+        kind: "job".to_string(),
+        metrics_json: None,
+        verdict: None,
+        verdict_notes: None,
+        verdict_at: None,
     };
 
     // From here the box is billing: never leak it behind an error the store

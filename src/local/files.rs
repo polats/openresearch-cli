@@ -149,6 +149,20 @@ pub fn content_type_for_path(path: &str) -> &'static str {
         Some("csv") => "text/csv",
         Some("txt") => "text/plain; charset=utf-8",
         Some("html") => "text/html; charset=utf-8",
+        // Play builds serve whole web apps: module scripts REQUIRE a JS MIME
+        // (browsers refuse to execute octet-stream `type="module"` sources).
+        Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("mp3") => "audio/mpeg",
+        Some("ogg") => "audio/ogg",
+        Some("wav") => "audio/wav",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
         _ => "application/octet-stream",
     }
 }
