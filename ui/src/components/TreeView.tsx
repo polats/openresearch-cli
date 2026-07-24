@@ -112,6 +112,31 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
       {(exp.title || exp.description) && (
         <div className="node-title">{exp.title || exp.description}</div>
       )}
+      {(() => {
+        // Surface the latest run's ingested metrics (e.g. the eval sim's
+        // alignment/confidence) right on the card, not just in the run drawer.
+        const agg =
+          (latestRun?.metricsAggregate as Record<string, unknown> | undefined) ??
+          [...runs].reverse().find((r) => r.metricsAggregate)?.metricsAggregate;
+        const entries = agg
+          ? Object.entries(agg).filter(([, v]) => typeof v === "number")
+          : [];
+        if (!entries.length) return null;
+        return (
+          <div className="node-metrics">
+            {entries.slice(0, 5).map(([k, v]) => (
+              <span key={k} className="node-metric" title={k}>
+                <span className="node-metric-k">
+                  {k.replace(/_align$/, "").replace(/_/g, " ")}
+                </span>
+                <span className="node-metric-v">
+                  {(v as number).toFixed(2).replace(/\.?0+$/, "")}
+                </span>
+              </span>
+            ))}
+          </div>
+        );
+      })()}
       <div className="node-meta">
         <span>Runs</span>
         {squares.length > 0 ? (

@@ -207,6 +207,42 @@ export interface PersonaInfo {
 export const getPersonas = () =>
   get<{ personas: PersonaInfo[] }>("/api/personas").then((r) => r.personas);
 
+/** A subagent dispatch the orchestrator suggested, awaiting the human's OK. */
+export interface AgentProposal {
+  id: string;
+  projectId: string;
+  parentExperimentId?: string | null;
+  persona?: string | null;
+  harness?: string | null;
+  model?: string | null;
+  task: string;
+  why?: string | null;
+  /** "pending" | "approved" | "dismissed". */
+  status: string;
+  sessionId?: string | null;
+  /** The orchestrator session this suggestion belongs to (renders in its chat). */
+  parentSessionId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export const listProposals = (projectId: string) =>
+  get<{ proposals: AgentProposal[] }>(`/api/projects/${projectId}/proposals`).then(
+    (r) => r.proposals,
+  );
+
+/** Approve a proposal; the passed picks override the orchestrator's suggestion. */
+export const approveProposal = (
+  id: string,
+  choice: { persona?: string; harness?: string; model?: string },
+) =>
+  post<{ session: ChatSession }>(`/api/agent/proposals/${id}/approve`, choice).then(
+    (r) => r.session,
+  );
+
+export const dismissProposal = (id: string) =>
+  post<{ ok: boolean }>(`/api/agent/proposals/${id}/dismiss`, {});
+
 /** Record a visit: bumps the project's updatedAt, which drives the recency sort. */
 export const openProject = (projectId: string) =>
   post<{ project: Project }>(`/api/projects/${projectId}/open`).then((r) => r.project);
@@ -920,6 +956,10 @@ export interface ChatSession {
   model: string | null;
   permissionMode: string | null;
   reasoningLevel: string | null;
+  /** The session's own persona wire id; null = inherit the project's persona. */
+  persona?: string | null;
+  /** The orchestrator session that spawned this one; null = top-level. */
+  parentSessionId?: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
   createdAt: number;

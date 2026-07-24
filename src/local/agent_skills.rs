@@ -60,15 +60,28 @@ pub enum Persona {
     Research,
     /// Game-design agent: playable variants, playtests, verdicts, sims.
     GameDesigner,
+    /// Idea-foundry agent: interviews a game idea into a thesis document and
+    /// captures it as an experiment node (a flat idea gallery, no runs).
+    IdeaFoundry,
+    /// Analyst agent: evaluates an idea node — codes the 35 signals in its turn
+    /// (keyless), runs the evaluator sim, and writes the scored report.
+    Analyst,
 }
 
 impl Persona {
-    pub const ALL: [Persona; 2] = [Persona::Research, Persona::GameDesigner];
+    pub const ALL: [Persona; 4] = [
+        Persona::Research,
+        Persona::GameDesigner,
+        Persona::IdeaFoundry,
+        Persona::Analyst,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Persona::Research => "research",
             Persona::GameDesigner => "game-designer",
+            Persona::IdeaFoundry => "idea-foundry",
+            Persona::Analyst => "analyst",
         }
     }
 
@@ -78,8 +91,10 @@ impl Persona {
         match value {
             None | Some("research") => Ok(Persona::Research),
             Some("game-designer") => Ok(Persona::GameDesigner),
+            Some("idea-foundry") => Ok(Persona::IdeaFoundry),
+            Some("analyst") => Ok(Persona::Analyst),
             Some(other) => Err(format!(
-                "unknown persona '{other}' (expected 'research' or 'game-designer')"
+                "unknown persona '{other}' (expected 'research', 'game-designer', 'idea-foundry', or 'analyst')"
             )),
         }
     }
@@ -88,6 +103,8 @@ impl Persona {
         match self {
             Persona::Research => "Research agent",
             Persona::GameDesigner => "Game designer",
+            Persona::IdeaFoundry => "Idea foundry",
+            Persona::Analyst => "Analyst",
         }
     }
 
@@ -100,6 +117,16 @@ impl Persona {
             Persona::GameDesigner => {
                 "Treats the tree as a prototype gallery: playable variants per \
                  branch, playtests via the Play button, verdicts and sim metrics."
+            }
+            Persona::IdeaFoundry => {
+                "Interviews a game idea into a thesis: proposes design choices \
+                 against 12 canonical questions, then captures each idea as a \
+                 node in a flat idea gallery."
+            }
+            Persona::Analyst => {
+                "Evaluates an idea against the 35-signal market-fit rubric — \
+                 codes the signals itself (keyless), runs the scoring sim, and \
+                 writes the alignment report + comparables onto the node."
             }
         }
     }
@@ -126,6 +153,8 @@ const EVIDENCE_LOCAL: &str = include_str!("../../agent-skills/orx-evidence/SKILL
 const EVIDENCE_CLOUD: &str = include_str!("../../agent-skills/orx-evidence/SKILL.md");
 const EVIDENCE_GAME: &str = include_str!("../../agent-skills/orx-evidence/SKILL.game.md");
 const PLAY: &str = include_str!("../../agent-skills/orx-play/SKILL.md");
+const IDEATE: &str = include_str!("../../agent-skills/orx-ideate/SKILL.md");
+const EVALUATE: &str = include_str!("../../agent-skills/orx-evaluate/SKILL.md");
 
 // Descriptions are the *trigger surface*: what the module covers plus explicit,
 // liberal "Use when …" cues (false positives beat false negatives — an agent
@@ -214,6 +243,16 @@ const S_PLAY: AgentSkill = AgentSkill {
     description: "Make an experiment branch playable and gather play evidence: the dashboard Play button, play command and play dir, /play/<expId>/ URLs, play-session runs, sim runs (--kind sim) with ingested metrics, and verdicts (orx exp verdict). Use before asking the user to playtest, when a Play build fails, when setting up a new game's build, or when recording keep/kill/iterate decisions.",
     content: PLAY,
 };
+const S_IDEATE: AgentSkill = AgentSkill {
+    name: "orx-ideate",
+    description: "The FOUNDRY new-idea intake interview: the 12 canonical evaluation questions, the propose-don't-ask technique, the thesis document format, and how to capture a finished idea as an experiment node. Use at the start of every new-idea conversation, when deciding what to ask next, and when writing up or capturing the finished thesis.",
+    content: IDEATE,
+};
+const S_EVALUATE: AgentSkill = AgentSkill {
+    name: "orx-evaluate",
+    description: "Evaluate an idea against the FOUNDRY 35-signal market-fit rubric (keyless): code the signals in your own turn, commit the coding sidecar, run the evaluator sim (`orx exp run --kind sim`) for the alignment/comparables/confidence, then write the report + verdict rationale onto the node. Use when asked to analyze, score, or evaluate an idea node.",
+    content: EVALUATE,
+};
 
 /// The modules for a given set, in a stable order. Local and Full share names;
 /// `experiment-tree`/`compute`/`reports`/`evidence` swap bodies, and `create`
@@ -256,18 +295,25 @@ pub fn skills_for_persona(persona: Persona) -> Vec<&'static AgentSkill> {
             &S_COMPUTE_K8S,
             &S_EVIDENCE_GAME,
         ],
+        // The interview is self-contained: one skill carries the questions, the
+        // technique, the thesis format, and the capture mechanics. No compute,
+        // tree-shaping, or play skills — this persona launches nothing.
+        Persona::IdeaFoundry => vec![&S_IDEATE],
+        // Evaluate one idea node: code signals in-turn, run the scoring sim,
+        // write the report. Needs git to commit the coding sidecar the sim reads.
+        Persona::Analyst => vec![&S_EVALUATE, &S_GIT],
     }
 }
 
-/// Resolve a bundled skill by name — the Full set plus the persona-only play
-/// module — accepting both the public name (`orx-compute`) and the bare form
-/// (`compute`). `None` for an unknown name — the caller falls back to the
-/// live API fetch.
+/// Resolve a bundled skill by name — the Full set plus the persona-only
+/// modules (play, ideate) — accepting both the public name (`orx-compute`) and
+/// the bare form (`compute`). `None` for an unknown name — the caller falls
+/// back to the live API fetch.
 pub fn find(name: &str) -> Option<&'static AgentSkill> {
     let want = name.trim();
     skills(SkillSet::Full)
         .into_iter()
-        .chain(std::iter::once(&S_PLAY))
+        .chain([&S_PLAY, &S_IDEATE, &S_EVALUATE])
         .find(|s| s.name == want || s.name.strip_prefix("orx-") == Some(want))
 }
 

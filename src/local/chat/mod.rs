@@ -259,6 +259,8 @@ pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
         "model": s.model,
         "permissionMode": s.permission_mode,
         "reasoningLevel": s.reasoning_level,
+        "persona": s.persona,
+        "parentSessionId": s.parent_session_id,
         "archived": s.archived,
         "createdAt": s.created_at,
         "updatedAt": s.updated_at,
@@ -905,6 +907,15 @@ impl ChatHost {
         }
 
         let sid = session.id.clone();
+        // A session-level persona (set on a dispatched subagent) overrides the
+        // project default for this turn. `ensure_playbook` reads
+        // `project.persona()`, so resolving it onto the project clone here keeps
+        // every downstream render (playbook template + injected skills)
+        // consistent — no signature churn through the harness call sites.
+        let mut project = project;
+        if session.persona.is_some() {
+            project.persona = session.persona.clone();
+        }
         let mut ctx = TurnCtx {
             host: self.clone(),
             session_id: session.id.clone(),

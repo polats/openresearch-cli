@@ -113,6 +113,13 @@ const SYSTEM_PROMPT: &str = include_str!("../../SYSTEM_PROMPT.md");
 /// game-design loop (branch → build → play → verdict) instead of the
 /// auto-research loop. Selected via `local_projects.persona`.
 const SYSTEM_PROMPT_GAME: &str = include_str!("../../SYSTEM_PROMPT_GAME.md");
+/// The idea-foundry persona's playbook template — same token vocabulary, an
+/// interview loop (infer → propose → name → capture) instead of a run loop; it
+/// launches no compute. Selected via `local_projects.persona`.
+const SYSTEM_PROMPT_IDEA: &str = include_str!("../../SYSTEM_PROMPT_IDEA.md");
+/// The analyst persona's playbook template — evaluates an idea node against the
+/// 35-signal rubric (keyless: agent codes signals, sim does the math).
+const SYSTEM_PROMPT_ANALYST: &str = include_str!("../../SYSTEM_PROMPT_ANALYST.md");
 
 /// A persona's playbook template with the leading repo-reader HTML comment
 /// stripped — the text tokens are substituted into at render time, and what
@@ -121,6 +128,8 @@ pub fn persona_template(persona: Persona) -> &'static str {
     let raw = match persona {
         Persona::Research => SYSTEM_PROMPT,
         Persona::GameDesigner => SYSTEM_PROMPT_GAME,
+        Persona::IdeaFoundry => SYSTEM_PROMPT_IDEA,
+        Persona::Analyst => SYSTEM_PROMPT_ANALYST,
     };
     raw.split_once("-->\n\n")
         .map(|(_, rest)| rest)
@@ -721,23 +730,51 @@ mod tests {
             let title = match persona {
                 Persona::Research => "# OpenResearch local agent",
                 Persona::GameDesigner => "# OpenResearch game-design agent",
+                Persona::IdeaFoundry => "# OpenResearch idea agent",
+                Persona::Analyst => "# OpenResearch analyst agent",
             };
             assert!(md.starts_with(title), "template comment not stripped");
             assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
             // Sanity: the slimmed pointers to the modules survived, and each
             // persona points only at its own modules.
-            assert!(md.contains("orx-compute"));
-            assert!(md.contains("orx-evidence"));
             match persona {
                 Persona::Research => {
+                    assert!(md.contains("orx-compute"));
+                    assert!(md.contains("orx-evidence"));
                     assert!(md.contains("orx-reports"));
                     assert!(md.contains("orx-lit"));
                     assert!(!md.contains("orx-play"));
+                    assert!(!md.contains("orx-ideate"));
                 }
                 Persona::GameDesigner => {
+                    assert!(md.contains("orx-compute"));
+                    assert!(md.contains("orx-evidence"));
                     assert!(md.contains("orx-play"));
                     assert!(!md.contains("orx-reports"));
                     assert!(!md.contains("orx-lit"));
+                    assert!(!md.contains("orx-ideate"));
+                }
+                // The interview persona launches nothing — no compute, evidence,
+                // or play modules, just the single ideate skill.
+                Persona::IdeaFoundry => {
+                    assert!(md.contains("orx-ideate"));
+                    assert!(!md.contains("orx-compute"));
+                    assert!(!md.contains("orx-evidence"));
+                    assert!(!md.contains("orx-play"));
+                    assert!(!md.contains("orx-reports"));
+                    assert!(!md.contains("orx-lit"));
+                }
+                // The analyst evaluates: the evaluate skill + git (to commit the
+                // coding sidecar), nothing else.
+                Persona::Analyst => {
+                    assert!(md.contains("orx-evaluate"));
+                    assert!(md.contains("orx-git"));
+                    assert!(!md.contains("orx-compute"));
+                    assert!(!md.contains("orx-evidence"));
+                    assert!(!md.contains("orx-play"));
+                    assert!(!md.contains("orx-reports"));
+                    assert!(!md.contains("orx-lit"));
+                    assert!(!md.contains("orx-ideate"));
                 }
             }
             // The memory section rendered with both scopes present.

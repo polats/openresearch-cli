@@ -1566,6 +1566,31 @@ textarea::placeholder {
   font-size: var(--fs-2xs);
   color: var(--muted);
 }
+/* Ingested run metrics surfaced on the node card (eval alignment/confidence). */
+.exp-node .node-metrics {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.exp-node .node-metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: var(--fs-2xs);
+}
+.exp-node .node-metric-k {
+  color: var(--muted);
+}
+.exp-node .node-metric-v {
+  color: var(--text);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+}
 /* Direct view shortcuts (Changes / Logs) at the card's foot. */
 .exp-node .node-actions {
   margin-top: 8px;
@@ -3088,11 +3113,14 @@ a.files-pill:hover {
   color: var(--muted);
 }
 
-/* persona identity colors — blue = research agent, orange = game designer.
-   Used by the Persona tab cards and the session-header persona bar. */
+/* persona identity colors — blue = research agent, orange = game designer,
+   purple = idea foundry. Used by the Persona tab cards and the session-header
+   persona bar. */
 :root {
   --persona-research: var(--accent-blue);
   --persona-game-designer: var(--accent-orange);
+  --persona-idea-foundry: var(--accent-purple);
+  --persona-analyst: var(--accent-teal);
 }
 .persona-swatch {
   flex: none;
@@ -3106,11 +3134,17 @@ a.files-pill:hover {
 .persona-swatch.persona-game-designer {
   background: var(--persona-game-designer);
 }
+.persona-swatch.persona-idea-foundry {
+  background: var(--persona-idea-foundry);
+}
 .persona-card.persona-research {
   border-left: 3px solid var(--persona-research);
 }
 .persona-card.persona-game-designer {
   border-left: 3px solid var(--persona-game-designer);
+}
+.persona-card.persona-idea-foundry {
+  border-left: 3px solid var(--persona-idea-foundry);
 }
 .persona-active-pill.persona-research {
   color: var(--persona-research);
@@ -3119,6 +3153,10 @@ a.files-pill:hover {
 .persona-active-pill.persona-game-designer {
   color: var(--persona-game-designer);
   border-color: var(--persona-game-designer);
+}
+.persona-active-pill.persona-idea-foundry {
+  color: var(--persona-idea-foundry);
+  border-color: var(--persona-idea-foundry);
 }
 /* Vertical bar beside the session name — instant persona read. */
 .persona-bar {
@@ -3132,6 +3170,107 @@ a.files-pill:hover {
 }
 .persona-bar.persona-game-designer {
   background: var(--persona-game-designer);
+}
+.persona-bar.persona-idea-foundry {
+  background: var(--persona-idea-foundry);
+}
+/* analyst persona (teal) — swatch, card, pill, bar */
+.persona-swatch.persona-analyst,
+.persona-bar.persona-analyst {
+  background: var(--persona-analyst);
+}
+.persona-card.persona-analyst {
+  border-left: 3px solid var(--persona-analyst);
+}
+.persona-active-pill.persona-analyst {
+  color: var(--persona-analyst);
+  border-color: var(--persona-analyst);
+}
+/* Recents row: title + a muted provider·model subline (glanceable per-session). */
+.session-row .session-titlewrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  overflow: hidden;
+}
+.session-row .session-titlewrap .session-title {
+  flex: 0 0 auto;
+}
+.session-row .session-sub {
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Nested Recents thread: a dispatched subagent nests under its orchestrator. */
+.session-row.nested {
+  border-left: 2px solid var(--border);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  margin-left: 6px;
+}
+.session-row.nested.active {
+  border-left-color: var(--primary);
+}
+
+/* Subagent dispatch approval card — rendered inline in the orchestrator's chat,
+   sharing the plan/permission card chrome (.prompt-card). */
+.prompt-card.proposal {
+  border-left: 3px solid var(--accent-amber);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.proposal-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.proposal-fields label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.proposal-fields select {
+  flex: 1;
+  min-width: 0;
+  max-width: 62%;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+.proposal-why {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  font-style: italic;
+}
+.proposal-task {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.proposal-err {
+  font-size: var(--fs-sm);
+  color: var(--accent-red);
+}
+.proposal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 /* Compact variant for the Recents session rows — snugged up to the title
    (the row's 8px gap reads too airy for a 3px bar). */
@@ -3374,6 +3513,63 @@ a.files-pill:hover {
 }
 .harness-dot.warn {
   background: var(--accent-amber);
+}
+
+/* remaining-usage rows in the Harnesses tab — sans, not the .kv .v mono */
+.harness-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+}
+.usage-window {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.usage-win-label {
+  color: var(--subtext);
+  min-width: 60px;
+}
+.usage-bar {
+  flex: 0 0 88px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.usage-bar-fill {
+  /* Block, not the default inline — inline spans ignore width, which left
+     every bar rendering the same (empty) fill regardless of percentage. */
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent-green);
+  transition: width 0.3s ease;
+}
+.usage-bar-fill.low {
+  background: var(--accent-red);
+}
+.usage-pct {
+  font-variant-numeric: tabular-nums;
+}
+.usage-reset {
+  color: var(--subtext);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.usage-asof {
+  color: var(--subtext);
+  font-size: var(--fs-xs);
+}
+/* note-only usage (Zen / Codex-not-yet): sans, wrap on spaces not mid-word */
+.harness-usage-note {
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 
 /* env var table — fixed layout so buttons appearing never reflow columns */
