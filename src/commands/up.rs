@@ -3372,7 +3372,11 @@ async fn approve_proposal(
         native_session_id: None,
         title: None,
         model,
-        permission_mode: nonempty(req.permission_mode),
+        // An approved subagent runs autonomously in the background — there is no
+        // human at its keyboard to answer per-tool permission prompts, so it would
+        // hang on the first one. Default it to bypass (the human already approved
+        // spawning it); an explicit mode on the approve request still wins.
+        permission_mode: nonempty(req.permission_mode).or_else(|| Some("bypass".to_string())),
         reasoning_level: nonempty(req.reasoning_level),
         persona,
         // Nest the spawned subagent under the orchestrator that suggested it.
