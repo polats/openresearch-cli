@@ -2,7 +2,7 @@ import {
   Check,
   ChevronRight,
   CornerDownLeft,
-  FlaskConical,
+  Gamepad2,
   FolderOpen,
   HelpCircle,
   MoreHorizontal,
@@ -11,6 +11,7 @@ import {
   SlidersHorizontal,
   X,
 } from "lucide-react";
+import { personaMeta, PersonaBadge, DEFAULT_PERSONA } from "./personaMeta";
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Wordmark } from "./Wordmark";
 import {
@@ -942,7 +943,8 @@ function SessionRow({
       ) : (
         <span className="session-titlewrap">
           <span className="session-title">{title}</span>
-          <span className="session-sub" title={provider}>
+          <span className="session-sub" title={`${personaMeta(rowPersona).label} · ${provider}`}>
+            <PersonaBadge persona={rowPersona} compact size={12} />
             {provider}
           </span>
         </span>
@@ -1409,6 +1411,10 @@ export function ChatPanel({
           model: effective!.model,
           permissionMode: effective!.permissionMode,
           reasoningLevel: effective!.reasoningLevel,
+          // New sessions start as the producer — the orchestrator that leads the
+          // capture→evaluate→build pipeline and hands off to the other personas.
+          // You rarely pick a persona by hand; the pipeline routes you to them.
+          persona: DEFAULT_PERSONA,
         });
         loadedSessions.current.add(session.id);
         setSessions((cur) => [session, ...cur]);
@@ -1701,10 +1707,23 @@ export function ChatPanel({
           right, fading into the chat below (sessions live in the rail). */}
       <div className={headerClass}>
         {railReopen}
-        <span
-          className={`persona-bar persona-${persona ?? "research"}`}
-          title={personaTitle(persona)}
-        />
+        {(() => {
+          // active session shows its own persona (null → research); a fresh
+          // session shows the producer default it will start as.
+          const shownPersona = activeSession
+            ? activeSession.persona ?? "research"
+            : DEFAULT_PERSONA;
+          return (
+            <>
+              <span
+                className={`persona-bar persona-${shownPersona}`}
+                title={personaTitle(shownPersona)}
+                style={{ background: personaMeta(shownPersona).color }}
+              />
+              <PersonaBadge persona={shownPersona} />
+            </>
+          );
+        })()}
         <div
           className="title"
           title={activeSession ? activeSession.title?.trim() || "Untitled" : "New session"}
@@ -1723,11 +1742,11 @@ export function ChatPanel({
         )}
         <button
           className={`icon-btn ${panelOpen ? "active" : ""}`}
-          title="Experiments"
-          aria-label="Experiments"
+          title="Gallery"
+          aria-label="Gallery"
           onClick={onTogglePanel}
         >
-          <FlaskConical size={15} />
+          <Gamepad2 size={15} />
         </button>
       </div>
 

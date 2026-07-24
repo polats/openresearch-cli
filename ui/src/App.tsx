@@ -573,7 +573,7 @@ export default function App() {
                 className={`tab ${rightTab === "experiments" ? "active" : ""}`}
                 onClick={() => setRightTab("experiments")}
               >
-                Experiments
+                Gallery
               </button>
               {expTabs.map((t) => {
                 const exp = experiments.find((e) => e.id === t.id);

@@ -977,6 +977,7 @@ export interface TurnOptions {
   model?: string | null;
   permissionMode?: string | null;
   reasoningLevel?: string | null;
+  persona?: string | null;
 }
 
 export const createChatSession = (

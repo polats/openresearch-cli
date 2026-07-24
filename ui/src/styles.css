@@ -3129,6 +3129,29 @@ a.files-pill:hover {
   height: 10px;
   border-radius: var(--radius-full);
 }
+/* persona badge — colored symbol + label, the primary "who's working" cue */
+.persona-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 9px 3px 7px;
+  border-radius: var(--radius-full);
+  border: 1px solid color-mix(in srgb, currentColor 32%, transparent);
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  white-space: nowrap;
+}
+.persona-badge svg { flex: none; }
+.persona-badge.persona-research { color: var(--persona-research); }
+.persona-badge.persona-game-designer { color: var(--persona-game-designer); }
+.persona-badge.persona-idea-foundry { color: var(--persona-idea-foundry); }
+.persona-badge.persona-analyst { color: var(--persona-analyst); }
+.persona-badge.persona-producer { color: var(--persona-producer); }
+/* compact variant for dense rows (icon only, or tiny label) */
+.persona-badge.compact { padding: 2px; border-color: transparent; background: transparent; }
 .persona-swatch.persona-research {
   background: var(--persona-research);
 }

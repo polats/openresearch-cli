@@ -76,12 +76,12 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   const status = latestRun?.status;
   const live = status === "running" || status === "starting";
   const kind = isBaseline
-    ? "Baseline"
+    ? "Idea"
     : live
-      ? "Running"
+      ? "Building"
       : exp.mergeParentExperimentId
         ? "Merge"
-        : "Experiment";
+        : "Prototype";
   const squares = runs.slice(-MAX_SQUARES);
   return (
     <div className={`exp-node ${live ? "live" : ""}`}>
@@ -288,8 +288,8 @@ export function TreeView({
   if (experiments.length === 0) {
     return (
       <div className="empty-state empty-state-cta">
-        <p className="empty-state-title">No experiments yet</p>
-        <p className="empty-state-hint">Ask the agent in chat to create and run your first experiment.</p>
+        <p className="empty-state-title">No ideas yet</p>
+        <p className="empty-state-hint">Tell the producer in chat what kind of game you want to make — it'll capture your first idea.</p>
       </div>
     );
   }

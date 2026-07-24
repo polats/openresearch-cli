@@ -221,7 +221,7 @@ function HarnessesTab() {
     <>
       <h1>Harnesses</h1>
       <p className="settings-sub">
-        Coding-agent setups detected on this machine. The research agent chat is served by
+        Coding-agent setups detected on this machine. The agent chat is served by
         OpenCode; Claude Code and Codex accounts surface their models in the composer's model
         picker.
       </p>

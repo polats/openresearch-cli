@@ -255,7 +255,7 @@ export function NewProjectForm({
               setNameTouched(true);
               setName(e.target.value);
             }}
-            placeholder="my-research"
+            placeholder="my-game"
           />
         </label>
         <label>
@@ -406,7 +406,7 @@ export function NewProjectForm({
                     setNameTouched(true);
                     setName(e.target.value);
                   }}
-                  placeholder="my-research"
+                  placeholder="my-game"
                 />
                 <span className={`repo-hint mono ${name.trim() ? "ok" : ""}`}>
                   {name.trim()
@@ -427,7 +427,7 @@ export function NewProjectForm({
               setNameTouched(true);
               setName(e.target.value);
             }}
-            placeholder="my-research"
+            placeholder="my-game"
             autoFocus
           />
           <span className={`repo-hint mono ${name.trim() ? "ok" : ""}`}>
