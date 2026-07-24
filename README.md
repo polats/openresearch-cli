@@ -1,7 +1,14 @@
-# OpenResearch CLI (`orx`)
+# Crucible (`crux`)
+
+**From a game idea to a validated, playable prototype.** Crucible runs an
+AI-agent funnel — capture a one-line idea into a thesis, score it against a
+35-signal market-fit rubric, greenlight the strong ones, and build an actual
+playable — orchestrated across Claude Code, Codex, and OpenCode.
+
+> The `crux` command is the CLI; `orx` still works as an alias.
 
 > [!IMPORTANT]
-> If you are an OpenResearch user or someone who is interested in autoresearch,
+> If you are a Crucible user or interested in agent-driven game discovery,
 > we'd love to chat with you. Please email
 > [contact@alphaxiv.org](mailto:contact@alphaxiv.org) if interested.
 

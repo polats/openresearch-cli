@@ -1,4 +1,4 @@
-// OpenResearch wordmark: logo mark + name, sized by the parent's font-size.
+// Crucible wordmark: logo mark + name, sized by the parent's font-size.
 // Single source for the brand lockup (home, chat empty state, onboarding).
 export function Wordmark() {
   return (
@@ -10,7 +10,7 @@ export function Wordmark() {
           fill="#fff"
         />
       </svg>
-      OpenResearch
+      Crucible
     </span>
   );
 }

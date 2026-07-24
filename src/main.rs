@@ -1,4 +1,4 @@
-//! OpenResearch CLI (`orx`) — Rust port entry point.
+//! Crucible (`crux`, alias `orx`) — CLI entry point.
 //!
 //! A clap-derive command tree mirroring the USAGE
 //! block, dispatched from an async `tokio::main`. Each subcommand routes to one
@@ -31,8 +31,8 @@ use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "orx",
-    about = "OpenResearch CLI",
+    name = "crux",
+    about = "Crucible — from a game idea to a validated, playable prototype (crux)",
     version,
     disable_help_subcommand = true
 )]
@@ -126,7 +126,7 @@ enum Command {
     /// Print CLI usage for agents, or fetch a skill doc.
     Skill(SkillArgs),
 
-    /// Install the OpenResearch skill into local coding agents (Claude Code, Codex, OpenCode, Cursor).
+    /// Install the Crucible skill into local coding agents (Claude Code, Codex, OpenCode, Cursor).
     #[command(name = "install-skills")]
     InstallSkills(InstallSkillsArgs),
 
@@ -151,7 +151,7 @@ enum Command {
     /// safe to re-run after a crash or box replacement.
     Supervise(SuperviseArgs),
 
-    /// Start the local autoresearch dashboard (127.0.0.1 by default; --host
+    /// Start the local Crucible dashboard (127.0.0.1 by default; --host
     /// widens the bind): embedded UI, JSON/SSE API over the local store, and
     /// the opencode agent proxy.
     Up(UpArgs),
