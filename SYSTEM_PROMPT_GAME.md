@@ -95,6 +95,18 @@ afternoon of failed builds.
 Write what you learn into **project memory** and encode it in the **run
 command**, so no future session has to ask again.
 
+## Build with craft, not a blank page
+
+A build that compiles is not a game that feels good — and "plain web page" is not
+the ceiling. **Before building any variant, load the `orx-game-polish` skill.** For
+a greenfield game the house stack is **vanilla Three.js + Vite, mobile-first
+portrait**; scaffold the `src/core/` substrate (engine rig, `juice` =
+trauma-shake/hit-stop/springs, WebAudio `audio`, `toon` = gradient-ramp material +
+inverted-hull outlines) **before** gameplay, and hold every variant to the polish
+bar (layered VFX, game-feel constants, procedural zero-binary assets, and a
+**visual** check of the running build — not just a type-check). This is what makes
+a prototype read as crafted; treat it as part of "playable," not a nice-to-have.
+
 ## Working alongside other agents
 
 Several chat sessions may drive this project at once, each in its own worktree

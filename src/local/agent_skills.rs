@@ -155,6 +155,7 @@ const EVIDENCE_GAME: &str = include_str!("../../agent-skills/orx-evidence/SKILL.
 const PLAY: &str = include_str!("../../agent-skills/orx-play/SKILL.md");
 const IDEATE: &str = include_str!("../../agent-skills/orx-ideate/SKILL.md");
 const EVALUATE: &str = include_str!("../../agent-skills/orx-evaluate/SKILL.md");
+const GAME_POLISH: &str = include_str!("../../agent-skills/orx-game-polish/SKILL.md");
 
 // Descriptions are the *trigger surface*: what the module covers plus explicit,
 // liberal "Use when …" cues (false positives beat false negatives — an agent
@@ -253,6 +254,11 @@ const S_EVALUATE: AgentSkill = AgentSkill {
     description: "Evaluate an idea against the FOUNDRY 35-signal market-fit rubric (keyless): code the signals in your own turn, commit the coding sidecar, run the evaluator sim (`orx exp run --kind sim`) for the alignment/comparables/confidence, then write the report + verdict rationale onto the node. Use when asked to analyze, score, or evaluate an idea node.",
     content: EVALUATE,
 };
+const S_GAME_POLISH: AgentSkill = AgentSkill {
+    name: "orx-game-polish",
+    description: "The house craft standard for polished web games: the vanilla Three.js + Vite mobile-first stack, a copyable src/core toon+juice scaffold, the toon look recipe (gradient ramp + inverted-hull outlines), game-feel constants, the layered-VFX minimum bar, zero-binary procedural assets, and visual QA. Load before building any game variant so it reads as crafted, not basic.",
+    content: GAME_POLISH,
+};
 
 /// The modules for a given set, in a stable order. Local and Full share names;
 /// `experiment-tree`/`compute`/`reports`/`evidence` swap bodies, and `create`
@@ -288,6 +294,7 @@ pub fn skills_for_persona(persona: Persona) -> Vec<&'static AgentSkill> {
     match persona {
         Persona::Research => skills(SkillSet::Local),
         Persona::GameDesigner => vec![
+            &S_GAME_POLISH,
             &S_PLAY,
             &S_EXPERIMENT_TREE_GAME,
             &S_GIT,
@@ -313,7 +320,7 @@ pub fn find(name: &str) -> Option<&'static AgentSkill> {
     let want = name.trim();
     skills(SkillSet::Full)
         .into_iter()
-        .chain([&S_PLAY, &S_IDEATE, &S_EVALUATE])
+        .chain([&S_PLAY, &S_IDEATE, &S_EVALUATE, &S_GAME_POLISH])
         .find(|s| s.name == want || s.name.strip_prefix("orx-") == Some(want))
 }
 
