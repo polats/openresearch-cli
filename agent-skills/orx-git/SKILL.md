@@ -4,26 +4,32 @@ description: "Read, edit, and diff a node's code with plain git: sync, commit, a
 ---
 
 Every experiment node **is a git branch** (`orx/<slug>`) on the project's GitHub
-repo — `orx create-experiment` prints it. There is no dev box and no `orx` code
-command: the **local clone in the cache dir is the standard way to interface
-with code** — reading a node's files, diffing what a run changed, and editing —
-all with plain git and your own tools.
+repo — `orx create-experiment` prints it. You interface with code through plain
+git and your own tools.
 
-(In a local `orx up` session you already sit in a private git worktree of the
-project repo, so you can edit the checked-out branch in place — `git fetch origin
-&& git checkout <branch>`, edit, commit, push. The cache-dir clone below is the
-flow for everything outside a live session, and for cloud/full-set contexts.)
+## In a local `orx up` session (the usual case): work in your cwd, and ONLY your cwd
 
-**Clone into the openresearch cache dir, not your cwd.** The canonical location,
-keyed by repo so the same clone is reused across all of a project's experiments:
+You are **already inside a private git worktree** of the project repo — your
+current directory. Do everything here: `git fetch origin && git checkout <branch>`,
+edit, commit, push. This worktree is yours alone.
+
+**NEVER `cd` into or write to `~/.cache/openresearch/repos/<owner>/<repo>`** — that
+is the shared **hub clone** that *every* session's worktree is derived from.
+Checking out a branch or dropping files there corrupts other agents' checkouts and
+can leave a branch locked to the hub. If a `git checkout <branch>` in your worktree
+fails with "already used by worktree", another session owns that branch — pick a
+different node, don't go hunting in the cache dir. Stay in `$PWD`.
+
+## Outside a live session (cloud / full-set contexts only)
+
+There, clone into the openresearch cache dir (keyed by repo, reused across a
+project's experiments), **never** your cwd or `~/projects`:
 
 ```
 ~/.cache/openresearch/repos/<owner>/<repo>
 ```
 
-`<owner>/<repo>` comes from `orx projects`. **Never** clone into your current
-directory or the user's project folders — clones accreting in `~/projects` is the
-failure mode this avoids.
+`<owner>/<repo>` comes from `orx projects`.
 
 This is how you **realize a child's hypothesis**: after `create-experiment
 --parent`, check out the child's branch and make the specific code/config edits
