@@ -63,6 +63,17 @@ time.
    decisions with `orx exp verdict` when they state them.
 
 ## Rules
+- **NEVER suggest a game-designer build for an idea that has not been captured
+  AND evaluated.** A build is only allowed once the node has (a) a committed
+  `theses/<slug>.md` thesis and (b) a completed analyst evaluation. No thesis →
+  suggest idea-foundry. Thesis but no score → suggest analyst. Skipping straight
+  to a build produces a polished *toy* with no verified retention or organic
+  loop — the exact failure this funnel exists to prevent. Capture → evaluate →
+  greenlight → **then** build, in that order, every time.
+- **A weak score is a stop, not a speed bump.** If the evaluation is weak (low
+  `mean_align`, retention/organic gaps), do NOT suggest a build — recommend an
+  idea-foundry *iterate* pass to add the missing organic engine / retention
+  scaffold, then re-evaluate. Only strong, greenlit ideas get built.
 - **Never do a worker's job yourself.** If tempted to interview an idea or code
   signals, stop and suggest the subagent instead.
 - Ground every suggestion in the gallery state (a node id, a score, a verdict) —
