@@ -11,7 +11,7 @@ export interface Project {
   runCommand?: string | null;
   /** arXiv id the project starts from (versionless). */
   paperId?: string | null;
-  /** Agent persona wire id ("research" | "game-designer"); null = research. */
+  /** Agent persona wire id ("research" | "game-designer" | "idea-foundry"); null = research. */
   persona?: string | null;
   /** Automatic [orx] prompt switches; null/absent = all off. */
   autoPrompts?: AutoPrompts | null;
@@ -789,6 +789,25 @@ export interface HarnessOptions {
   defaultReasoningLevel?: string | null;
 }
 
+/** One plan-quota bucket, normalized to percent remaining across providers. */
+export interface UsageWindow {
+  label: string;
+  remainingPercent: number;
+  /** Epoch ms when the window resets, if known. */
+  resetsAtMs?: number;
+}
+
+/** Remaining-usage summary for a harness (Settings → Harnesses). */
+export interface HarnessUsage {
+  windows?: UsageWindow[];
+  /** Epoch ms the snapshot was observed — present for captured (Codex) data. */
+  observedAtMs?: number;
+  /** Shown when there are no windows (e.g. OpenCode Zen). */
+  note?: string;
+  /** External link to manage/top-up usage (Zen dashboard). */
+  manageUrl?: string;
+}
+
 export interface Harness {
   id: HarnessId;
   name: string;
@@ -804,6 +823,7 @@ export interface Harness {
   agentNote?: string;
   models: HarnessModel[];
   options: HarnessOptions;
+  usage?: HarnessUsage;
 }
 
 export const getHarnesses = (refresh = false) =>

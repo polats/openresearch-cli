@@ -35,7 +35,7 @@ use tokio::process::Command;
 
 use super::detect::{
     bin_version, find_on_path, jwt_payload, nonempty_str, read_json, resolve_symlinks, title_case,
-    HarnessInfo,
+    HarnessInfo, HarnessUsage, UsageWindow,
 };
 use super::options::{HarnessOptions, PermissionMode};
 use super::{should_synthesize_plan, synthesize_resume, Harness, ResumeAction};
@@ -138,6 +138,19 @@ impl Harness for Codex {
                     "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.".to_string(),
                 );
             }
+            // Codex has no passive usage endpoint — remaining quota only rides
+            // on turn response headers, which we capture and persist per turn
+            // (see `capture_codex_usage`). Until the first turn populates it,
+            // show a note-only row so the empty state is explained rather than
+            // silently absent next to Claude's live windows.
+            info.usage = Some(stored_usage().unwrap_or_else(|| HarnessUsage {
+                windows: Vec::new(),
+                observed_at_ms: None,
+                note: Some(
+                    "Remaining quota appears here after your first Codex chat turn.".to_string(),
+                ),
+                manage_url: None,
+            }));
         } else {
             info.agent_note =
                 Some("Install Codex and sign in (`codex login`) to chat with it here.".to_string());
@@ -468,6 +481,135 @@ enum TurnEnd {
 /// One app-server notification → transcript state. Pure (fixture-tested):
 /// touches only `ctx.assistant.parts` via the TurnCtx helpers. Returns the
 /// turn's terminal state when this event ends it.
+/// Store key for the last Codex rate-limit snapshot captured from a turn.
+const CODEX_USAGE_KEY: &str = "codex_usage";
+
+/// Scan a Codex app-server notification's params for a rate-limit snapshot and,
+/// if present, persist it as the Settings usage row's source. Codex exposes no
+/// passive usage endpoint — the percentages only arrive on `/responses`
+/// headers, which the app-server re-emits inside `token_count` / `rateLimits`
+/// notifications — so capturing on-turn is the only way to show remaining quota.
+/// Best-effort and cheap: touches the store only when a snapshot is actually
+/// found (about once per turn), and silently no-ops otherwise.
+fn capture_codex_usage(method: &str, params: &Value) {
+    codex_usage_debug(method, params);
+    // The snapshot may be the params themselves (a rateLimits notification) or
+    // nested under `rate_limits` / `rateLimits` (a token_count event), possibly
+    // one level deeper under an event/msg wrapper.
+    let snap = find_rate_limits(params).unwrap_or(params);
+    let windows = codex_windows(snap);
+    if windows.is_empty() {
+        return;
+    }
+    let usage = HarnessUsage {
+        windows,
+        observed_at_ms: Some(crate::store::now_ms()),
+        note: None,
+        manage_url: None,
+    };
+    if let Ok(json) = serde_json::to_string(&usage) {
+        if let Ok(store) = crate::store::Store::open() {
+            let _ = store.set_kv(CODEX_USAGE_KEY, &json);
+        }
+    }
+}
+
+/// Recursively locate a `rate_limits` / `rateLimits` object anywhere in a
+/// notification payload (the wrapper nesting varies by event kind). Returns the
+/// first non-null match.
+fn find_rate_limits(v: &Value) -> Option<&Value> {
+    if let Some(obj) = v.as_object() {
+        for (k, val) in obj {
+            if (k == "rate_limits" || k == "rateLimits") && !val.is_null() {
+                return Some(val);
+            }
+            if let Some(found) = find_rate_limits(val) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Debug tap (gated on `ORX_CODEX_USAGE_DEBUG`): append each notification's
+/// method, and the full params of any that mention rate/limit/usage/token, to
+/// `<data-dir>/codex-usage-debug.log` — for discovering the real wire shape.
+fn codex_usage_debug(method: &str, params: &Value) {
+    if std::env::var_os("ORX_CODEX_USAGE_DEBUG").is_none() {
+        return;
+    }
+    use std::io::Write;
+    let path = crate::store::data_dir().join("codex-usage-debug.log");
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(f, "NOTIF {method}");
+    let blob = params.to_string().to_lowercase();
+    if ["rate", "limit", "usage", "token", "credit", "percent", "window"]
+        .iter()
+        .any(|k| blob.contains(k))
+    {
+        let _ = writeln!(
+            f,
+            "  MATCH {method} {}",
+            serde_json::to_string(params).unwrap_or_default()
+        );
+    }
+}
+
+/// The last captured Codex usage snapshot, for `detect`. `None` until a turn has
+/// populated it (Codex has no cold usage read).
+pub(super) fn stored_usage() -> Option<HarnessUsage> {
+    let json = crate::store::Store::open()
+        .ok()?
+        .get_kv(CODEX_USAGE_KEY)
+        .ok()??;
+    serde_json::from_str(&json).ok()
+}
+
+/// Parse `primary`/`secondary` windows out of a Codex rate-limit snapshot into
+/// normalized [`UsageWindow`]s (percent remaining). The live app-server wire is
+/// camelCase — `{ usedPercent, windowDurationMins, resetsAt }` — with snake_case
+/// accepted as a fallback; `resetsAt` is unix *seconds* when present, else the
+/// reset is derived from the window length + now.
+fn codex_windows(snap: &Value) -> Vec<UsageWindow> {
+    [("primary", "Session"), ("secondary", "Weekly")]
+        .into_iter()
+        .filter_map(|(key, fallback)| {
+            let w = snap.get(key)?;
+            let used = num(w, &["usedPercent", "used_percent"])?;
+            let mins = num(
+                w,
+                &["windowDurationMins", "window_minutes", "window_duration_mins"],
+            );
+            let resets_at_ms = num(w, &["resetsAt", "resets_at"])
+                .map(|s| (s * 1000.0) as i64)
+                .or_else(|| mins.map(|m| crate::store::now_ms() + (m * 60_000.0) as i64));
+            Some(UsageWindow {
+                label: codex_window_label(mins, fallback),
+                remaining_percent: (100.0 - used).clamp(0.0, 100.0),
+                resets_at_ms,
+            })
+        })
+        .collect()
+}
+
+/// First present numeric field among `keys` (tolerates camel/snake spellings).
+fn num(v: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|k| v.get(*k).and_then(Value::as_f64))
+}
+
+/// A short human label for a Codex window from its length in minutes ("5h",
+/// "7d"), falling back to a generic name when the length is unknown.
+fn codex_window_label(minutes: Option<f64>, fallback: &str) -> String {
+    match minutes {
+        Some(m) if m >= 1440.0 => format!("{}d", (m / 1440.0).round() as i64),
+        Some(m) if m >= 60.0 => format!("{}h", (m / 60.0).round() as i64),
+        Some(m) if m > 0.0 => format!("{}m", m.round() as i64),
+        _ => fallback.to_string(),
+    }
+}
+
 fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option<TurnEnd> {
     match method {
         "item/started" | "item/completed" => {
@@ -1048,6 +1190,10 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         };
         match event {
             TurnEvent::Notification { method, params } => {
+                // Rate-limit info rides along on token-count / rateLimits
+                // notifications; persist the freshest snapshot for the Settings
+                // usage row before any turn-scoping short-circuits below.
+                capture_codex_usage(&method, &params);
                 if event_turn_mismatch(turn_id.as_deref(), &params) {
                     continue;
                 }
@@ -1909,6 +2055,47 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_windows_parses_primary_and_secondary() {
+        // The live app-server shape: camelCase fields, unix-seconds resetsAt.
+        let snap = serde_json::json!({
+            "primary":   { "usedPercent": 12, "windowDurationMins": 300, "resetsAt": 1_753_293_600u64 },
+            "secondary": { "usedPercent": 40, "windowDurationMins": 10080 },
+        });
+        let ws = codex_windows(&snap);
+        assert_eq!(ws.len(), 2);
+        // primary: 5h window, remaining = 100-12, reset from unix seconds.
+        assert_eq!(ws[0].label, "5h");
+        assert_eq!(ws[0].remaining_percent, 88.0);
+        assert_eq!(ws[0].resets_at_ms, Some(1_753_293_600_000));
+        // secondary: 7d window, remaining = 100-40, reset derived from length.
+        assert_eq!(ws[1].label, "7d");
+        assert_eq!(ws[1].remaining_percent, 60.0);
+        assert!(ws[1].resets_at_ms.unwrap() > crate::store::now_ms());
+        // snake_case is still accepted as a fallback.
+        let alt = serde_json::json!({ "primary": { "used_percent": 0.0, "window_minutes": 60 } });
+        assert_eq!(codex_windows(&alt)[0].label, "1h");
+        // A null window (codex sends secondary:null on some plans) is skipped.
+        let one = serde_json::json!({ "primary": { "usedPercent": 17, "windowDurationMins": 10080 }, "secondary": null });
+        assert_eq!(codex_windows(&one).len(), 1);
+        assert_eq!(codex_windows(&one)[0].remaining_percent, 83.0);
+        // Garbage / missing → no windows, never a panic.
+        assert!(codex_windows(&serde_json::json!({})).is_empty());
+        assert!(codex_windows(&serde_json::Value::Null).is_empty());
+    }
+
+    #[test]
+    fn find_rate_limits_locates_nested_snapshot() {
+        // The real `account/rateLimits/updated` params nest under `rateLimits`.
+        let params = serde_json::json!({
+            "rateLimits": { "planType": "plus", "primary": { "usedPercent": 5, "windowDurationMins": 300 } }
+        });
+        let snap = find_rate_limits(&params).unwrap();
+        assert_eq!(codex_windows(snap)[0].remaining_percent, 95.0);
+        // Absent → None, and the caller falls back to the params themselves.
+        assert!(find_rate_limits(&serde_json::json!({ "foo": 1 })).is_none());
+    }
 
     #[test]
     fn version_parses_cli_output_and_gates() {
