@@ -1,6 +1,10 @@
-// Demo wiring — DELETE/REPLACE the gameplay bits, KEEP the shell wiring. Shows:
-// engine + toon substrate, tap → score with popup + juice + audio + flash,
-// start overlay, boot loader, sketchify borders. Build your game on top.
+// Demo wiring — this is CHROME, not the game. The tap → score loop below is the
+// MINIMUM interactivity bar: your real mechanic must be at least this responsive
+// (real input → per-frame simulation that moves state → feedback → score → an end
+// state). REPLACE the demo mechanic with a richer real loop; do NOT replace it with
+// menus. A polished home screen wrapped around a thin/faked loop is a MOCKUP, not a
+// game — build the loop first, verify it plays, then theme and add a thin meta layer.
+// KEEP the shell wiring (engine, boot loader, overlay, hud helpers).
 
 import * as THREE from 'three';
 import { Engine } from './core/engine';

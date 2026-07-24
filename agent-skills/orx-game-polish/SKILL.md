@@ -1,6 +1,6 @@
 ---
 name: orx-game-polish
-description: "The house craft standard for polished web games: the vanilla Three.js + Vite mobile-first stack, a copyable src/core toon+juice scaffold, the toon look recipe (gradient ramp + inverted-hull outlines), game-feel constants, the layered-VFX minimum bar, zero-binary procedural assets, and visual QA. Load before building any game variant so it reads as crafted, not basic."
+description: "The house craft standard for web games that actually PLAY: vanilla Three.js + Vite mobile-first, the committed UI starter + toon/juice substrate, game-feel constants, layered VFX, zero-binary assets, a playable-loop-FIRST mandate (the kit is chrome, not the game — no faked meta), and a playability gate that DRIVES the loop, not just a screenshot. Load before any game build."
 ---
 
 A build that compiles is not a game that feels good. Polished web games share a
@@ -44,6 +44,37 @@ wiring. What you inherit (read the starter's `README.md`):
 
 Re-theming an existing prototype? Copy `src/style/*` + `src/core/*` + `src/ui/*`
 in and rewire the DOM to the kit's classes — that alone lifts a flat build.
+
+## Build the playable LOOP first — the kit is chrome, not the game
+
+The single most common failure is shipping a **mockup**: a gorgeous home screen
+with challenge cards, a festival banner, friend avatars, and a leaderboard — none
+of it functional — wrapped around a core mechanic that is thin, broken, or buried
+two taps deep. It looks like a game in a screenshot and is not one. Do not do this.
+
+**Order of work, non-negotiable:**
+
+1. **Gray-box the core loop first.** Before any theme, menu, or meta screen, build
+   the actual mechanic as ugly boxes: real input → simulation that updates state
+   every frame → visible feedback → a **score and an end state** (win/lose/round
+   over). It must be **playable for a full session on the first screen**, with no
+   menu in the way. Find the fun here. If the gray-box isn't fun, no amount of UI
+   saves it — change the mechanic, don't add screens.
+2. **Then juice and theme it** (toon look, feel constants, VFX below).
+3. **Then add a THIN meta layer.** Retention/organic UI (daily reward, a friend
+   challenge, a festival) sits *on top of a loop that already plays* and stays
+   small — one real hook, wired to real game state. It is never the bulk of the
+   build.
+
+**Honesty rule.** A prototype exists to prove the core loop is fun. **Never fake a
+system as if it were real** — no hardcoded "Maya just scored 8,420," no invented
+festival progress bar, no fabricated community feed dressed up as functionality.
+Faked meta is set-dressing, not a game, and it is the tell of a mockup. If a system
+isn't wired to real state, cut it or reduce it to an honest stub.
+
+The starter's `src/main.ts` demo (tap → score → juice) is the **minimum
+interactivity bar** — your real loop must be *at least* that responsive. Replace
+the demo mechanic with a richer real one; never replace it with menus.
 
 ## The UI look (why the starter reads as crafted)
 
@@ -120,9 +151,27 @@ Only reach for authored art when procedural genuinely can't carry it, and
 generate it from **text prompts** (never commit large binaries into an experiment
 branch).
 
-## Verify visually, not by types
+## The playability gate — DRIVE it, don't just screenshot it
 
-A variant isn't done because it type-checks. **Screenshot the running build in a
-390×844 portrait viewport** (the dashboard Play surface, or headless Chrome) and
-look at it before you call it ready — check the toon read, the outlines, that
-effects are layered and the feel constants land. Fix what looks flat.
+A screenshot of a pretty menu passes a screenshot check while the game underneath
+is a mockup. So a variant is **not done** until you have *exercised the core loop
+headlessly and proven state actually moves.* Type-checking and a nice screenshot
+are necessary, not sufficient.
+
+Script a headless run (puppeteer/Playwright, 390×844) that:
+
+1. **Reaches the loop** — start a round / get to the first playable screen (no
+   human needed). If you can't reach the mechanic in ≤1 automated action, the
+   loop is buried — fix that first.
+2. **Applies real input** — dispatch the actual gameplay input (pointer drag,
+   taps, key) the mechanic listens for, several times.
+3. **Asserts state changed** — read the game state before/after and assert it
+   *moved*: score increments, entities spawn/despawn, a meter fills, the round
+   timer ticks. **A loop where input doesn't change state is a mockup — fail.**
+4. **Reaches an end state** — drive it to win/lose/round-over and confirm the
+   result screen shows real numbers from play (not static props).
+5. **Screenshots MID-PLAY**, not the menu — capture the mechanic in action, and
+   check the toon read, outlines, layered VFX, and feel there.
+
+Log the before/after state values in your report so the loop is auditable. If any
+of 1–4 fails, it isn't a game yet — fix the mechanic before you touch more UI.

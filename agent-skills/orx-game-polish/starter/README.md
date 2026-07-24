@@ -16,6 +16,12 @@ Then **replace the demo gameplay in `src/main.ts`** with your game. Keep the
 shell wiring (engine, boot loader, overlay). The `dist/` build is subpath-portable
 for the orx play sandbox — do not change `base: './'` in `vite.config.ts`.
 
+> **This kit is chrome, not the game.** Build the playable core loop FIRST (real
+> input → simulation → feedback → score → end state), verify it actually plays,
+> *then* theme it and add a **thin** meta layer wired to real state. A gorgeous
+> home screen around a thin or faked loop is a mockup, not a game. The demo loop
+> here is the minimum interactivity bar — exceed it; never replace it with menus.
+
 ## What's here
 - `index.html` — mobile shell: `viewport-fit=cover`, canvas → vignette → HUD →
   overlay → loader layers, defined z-ladder.

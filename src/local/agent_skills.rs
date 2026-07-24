@@ -294,7 +294,7 @@ const S_EVALUATE: AgentSkill = AgentSkill {
 };
 const S_GAME_POLISH: AgentSkill = AgentSkill {
     name: "orx-game-polish",
-    description: "The house craft standard for polished web games: the vanilla Three.js + Vite mobile-first stack, a copyable src/core toon+juice scaffold, the toon look recipe (gradient ramp + inverted-hull outlines), game-feel constants, the layered-VFX minimum bar, zero-binary procedural assets, and visual QA. Load before building any game variant so it reads as crafted, not basic.",
+    description: "The house craft standard for web games that actually PLAY: vanilla Three.js + Vite mobile-first, the committed UI starter + toon/juice substrate, game-feel constants, layered VFX, zero-binary assets, a playable-loop-FIRST mandate (the kit is chrome, not the game — no faked meta), and a playability gate that DRIVES the loop, not just a screenshot. Load before any game build.",
     content: GAME_POLISH,
 };
 const S_PRODUCE: AgentSkill = AgentSkill {

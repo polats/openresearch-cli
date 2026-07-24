@@ -95,17 +95,37 @@ afternoon of failed builds.
 Write what you learn into **project memory** and encode it in the **run
 command**, so no future session has to ask again.
 
+## Build a game that PLAYS, not a mockup
+
+The most common failure is a **mockup**: a beautiful home screen — challenge cards,
+a festival banner, friend avatars, a leaderboard, all faked static props — wrapped
+around a core mechanic that is thin, broken, or buried. It photographs like a game
+and isn't one. **Do not do this.** Order of work is non-negotiable:
+
+1. **Gray-box the core loop first** — real input → per-frame simulation that moves
+   state → feedback → a score and a win/lose/round-over. Playable for a full session
+   **on the first screen**, no menu in the way. Find the fun in the boxes before you
+   theme anything. If the gray-box isn't fun, change the mechanic, don't add screens.
+2. **Then** juice + theme it. 3. **Then** a *thin* meta layer wired to real state —
+   never faked. No hardcoded "Maya scored 8,420," no invented progress bars.
+
+**Prove it plays before you call it done:** script a headless run that reaches the
+loop, applies the real input several times, and **asserts the game state actually
+moved** (score/entities/timer), then reaches an end state — and screenshot
+**mid-play**, not the menu. Input that doesn't change state = a mockup = not done.
+
 ## Build with craft, not a blank page
 
 A build that compiles is not a game that feels good — and "plain web page" is not
 the ceiling. **Before building any variant, load the `orx-game-polish` skill.** For
 a greenfield game the house stack is **vanilla Three.js + Vite, mobile-first
-portrait**; scaffold the `src/core/` substrate (engine rig, `juice` =
-trauma-shake/hit-stop/springs, WebAudio `audio`, `toon` = gradient-ramp material +
-inverted-hull outlines) **before** gameplay, and hold every variant to the polish
-bar (layered VFX, game-feel constants, procedural zero-binary assets, and a
-**visual** check of the running build — not just a type-check). This is what makes
-a prototype read as crafted; treat it as part of "playable," not a nice-to-have.
+portrait**; scaffold from the committed starter (the `src/core/` substrate — engine
+rig, `juice` = trauma-shake/hit-stop/springs, WebAudio `audio`, `toon` =
+gradient-ramp material + inverted-hull outlines — plus the UI kit) **before**
+gameplay, and hold every variant to the polish bar (layered VFX, game-feel
+constants, procedural zero-binary assets). The kit is chrome; the game is the loop.
+Craft is part of "playable," not a nice-to-have — but it dresses a working loop, it
+never substitutes for one.
 
 ## Working alongside other agents
 
@@ -287,10 +307,12 @@ environment.
 
 A shipped playable earns a verdict. As the **final step**, once the build is
 committed and its play build is up, suggest the next move (see "Spawning or
-handing off to another agent" below): a **playtest** (invite the user to play the
-`/play/<expId>/` build and record an `orx exp verdict`), or — if the idea is
-strong and wants a variant — a sibling build exploring one changed axis. Present
-the playable and your recommendation in one line, then the suggestion card.
+handing off to another agent" below): a **playtest focused on the core loop** —
+invite the user to actually play the `/play/<expId>/` build and answer "does the
+60-second loop play cleanly and feel good?", then record an `orx exp verdict` — or,
+if the loop is solid and wants a variant, a sibling build exploring one changed
+axis of the *mechanic* (not the menu). Present the playable and your recommendation
+in one line, then the suggestion card.
 
 **Plan mode:** always present your finished plan by calling the ExitPlanMode
 tool — never as plain chat text. The plan card is how the user approves the
