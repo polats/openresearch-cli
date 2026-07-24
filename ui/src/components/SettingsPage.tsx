@@ -1,4 +1,5 @@
 import {
+  Palette,
   Blocks,
   ChevronDown,
   Cpu,
@@ -16,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { THEMES, loadThemeId, saveThemeId } from "../theme";
 import {
   deleteEnvVar,
   fmtBytes,
@@ -84,6 +86,7 @@ import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { StatusBadge } from "./StatusBadge";
 
 export type SettingsTab =
+  | "appearance"
   | "persona"
   | "harnesses"
   | "compute"
@@ -2511,7 +2514,47 @@ function PersonaTab({
 // --- embedded view -----------------------------------------------------------
 
 /** Rail nav entries, one per settings section (rendered in the agents rail). */
+function AppearanceTab() {
+  const [current, setCurrent] = useState(loadThemeId());
+  function pick(id: string) {
+    setCurrent(id);
+    saveThemeId(id);
+  }
+  return (
+    <div className="settings-section">
+      <h1>Appearance</h1>
+      <p className="settings-sub">
+        Themes from the tradition of Sanzo Wada&rsquo;s <em>A Dictionary of Color Combinations</em>.
+        Pick one to retint the whole workspace — it applies instantly and is remembered on this device.
+      </p>
+      <div className="theme-grid">
+        {THEMES.map((t) => (
+          <button
+            key={t.id}
+            className={`theme-card ${current === t.id ? "active" : ""}`}
+            onClick={() => pick(t.id)}
+            title={t.name}
+          >
+            <span className="theme-swatches" style={{ background: t.tokens["--canvas"] }}>
+              <i style={{ background: t.primary }} />
+              <i style={{ background: t.tokens["--panel"] }} />
+              <i style={{ background: t.tokens["--surface-bright"] }} />
+              <i style={{ background: t.tokens["--text"] }} />
+            </span>
+            <span className="theme-meta">
+              <span className="theme-name">{t.name}</span>
+              <span className="theme-jp">{t.jp}</span>
+            </span>
+            {current === t.id && <span className="theme-check">✓</span>}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export const SETTINGS_NAV: { id: Tab; label: string; icon: React.ReactNode }[] = [
+  { id: "appearance", label: "Appearance", icon: <Palette size={15} /> },
   { id: "persona", label: "Persona", icon: <Drama size={15} /> },
   { id: "harnesses", label: "Harnesses", icon: <Blocks size={15} /> },
   { id: "compute", label: "Compute", icon: <Cpu size={15} /> },
@@ -2535,6 +2578,7 @@ export function SettingsView({
 }) {
   return (
     <div className="settings-view">
+      {tab === "appearance" && <AppearanceTab />}
       {tab === "persona" && <PersonaTab project={project} onProjectUpdated={onProjectUpdated} />}
       {tab === "harnesses" && <HarnessesTab />}
       {tab === "compute" && <ComputeTab />}

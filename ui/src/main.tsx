@@ -4,6 +4,10 @@ import App from "./App";
 import "./styles.css";
 import "@xyflow/react/dist/style.css";
 import "@xterm/xterm/css/xterm.css";
+import { initTheme } from "./theme";
+
+// Apply the saved theme before first paint (avoids a flash of the default).
+initTheme();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

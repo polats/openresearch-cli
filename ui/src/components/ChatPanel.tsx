@@ -8,6 +8,7 @@ import {
   MoreHorizontal,
   PanelLeft,
   Plus,
+  Settings,
   SlidersHorizontal,
   X,
 } from "lucide-react";
@@ -1574,10 +1575,16 @@ export function ChatPanel({
     sessionFilter === "all" ? true : sessionFilter === "archived" ? s.archived : !s.archived,
   );
 
+  // Settings sections collapse under one "Settings" item — the rail leads with
+  // the three things that matter: New session, Files, and Recents. Auto-open the
+  // group when one of its sections is the current view.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const inSettings = SETTINGS_NAV.some((s) => s.id === mainView);
+
   const rail = (
     <aside className="session-rail floating-panel">
       {railHeader}
-      {/* Top nav: new session + the settings sections (shown in the middle pane). */}
+      {/* Top nav: new session + files; settings sections fold into a submenu. */}
       <nav className="rail-nav">
         <button
           className="rail-nav-item"
@@ -1598,17 +1605,31 @@ export function ChatPanel({
           <FolderOpen size={15} />
           Files
         </button>
-        {SETTINGS_NAV.map((item) => (
-          <button
-            key={item.id}
-            className={`rail-nav-item ${mainView === item.id ? "active" : ""}`}
-            data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
-            onClick={() => onSelectMainView(item.id)}
-          >
-            {item.icon}
-            {item.label}
-          </button>
-        ))}
+        <button
+          className={`rail-nav-item settings-toggle ${inSettings ? "active" : ""}`}
+          aria-expanded={settingsOpen || inSettings}
+          onClick={() => setSettingsOpen((v) => !v)}
+        >
+          <Settings size={15} />
+          Settings
+          <ChevronRight
+            size={14}
+            className="settings-chev"
+            style={{ transform: settingsOpen || inSettings ? "rotate(90deg)" : "none" }}
+          />
+        </button>
+        {(settingsOpen || inSettings) &&
+          SETTINGS_NAV.map((item) => (
+            <button
+              key={item.id}
+              className={`rail-nav-item rail-nav-sub ${mainView === item.id ? "active" : ""}`}
+              data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
+              onClick={() => onSelectMainView(item.id)}
+            >
+              {item.icon}
+              {item.label}
+            </button>
+          ))}
       </nav>
       <div className="rail-body">
         <div className="rail-section-head">
