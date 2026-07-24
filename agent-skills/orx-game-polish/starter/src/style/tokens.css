@@ -1,0 +1,73 @@
+/* ============================================================================
+   Design tokens — the single source of truth for colour, radius, depth, motion.
+   Retheme a whole game by editing THIS file; components never hardcode values.
+   Palette below is the "warm gold-on-dark" house theme; swap the hues per game
+   but keep the STRUCTURE (a top/bottom gradient pair + a hard shadow edge for
+   every raised surface — that pair is what makes buttons read as physical).
+   ============================================================================ */
+:root {
+  color-scheme: dark;
+
+  /* surfaces */
+  --bg:        #0b0e13;   /* app background behind everything */
+  --bg-deep:   #05070a;   /* canvas well */
+  --ink:       #e9edf2;   /* body text */
+  --ink-hi:    #ffffff;   /* headings */
+  --ink-dim:   #93a0b4;   /* secondary / labels */
+
+  /* primary (raised) — a gradient pair + a hard bottom edge in the darker tone */
+  --p-top:     #ffe07a;
+  --p-bot:     #f1a52a;
+  --p-edge:    #b9781c;   /* the 3D "under-lip" of a primary button */
+  --p-ink:     #3a2006;   /* dark text ON the primary fill */
+
+  /* secondary slab */
+  --s-top:     #2a313d;
+  --s-bot:     #1a1f28;
+  --s-edge:    #0c0f14;
+  --s-ink:     #e9edf2;
+
+  /* accent / CTA (gradient sweep) */
+  --cta:       linear-gradient(135deg, #ffe08a 0%, #ffb44a 45%, #ff7a3c 100%);
+  --cta-glow:  rgba(255, 138, 60, 0.5);
+  --cta-ink:   #26160a;
+
+  /* semantic */
+  --good:      #5ac431; --good-edge: #3fa51a;
+  --bad:       #ef5d52; --bad-edge:  #c23b34;
+
+  /* hairlines / glass */
+  --edge:      rgba(233, 237, 242, 0.14);
+  --edge-hi:   rgba(255, 224, 122, 0.55);
+  --glass:     rgba(14, 18, 26, 0.55);
+
+  /* radii — a touch of asymmetry on cards reads as hand-drawn, not templated */
+  --r-btn:     16px;
+  --r-pill:    999px;
+  --r-panel:   20px;
+  --r-card:    18px 14px 20px 15px;
+
+  /* shadow tones (blur-less "hard edge" uses the *-edge colours above) */
+  --drop:      0 10px 26px rgba(0, 0, 0, 0.45);
+  --drop-soft: 0 6px 16px rgba(0, 0, 0, 0.35);
+
+  /* motion — the two workhorse curves */
+  --snappy:    cubic-bezier(0.16, 1, 0.3, 1);      /* fast-out settle, entrances/hover */
+  --overshoot: cubic-bezier(0.2, 1.4, 0.4, 1);     /* pop-past-100% for reveals */
+  --press:     transform 0.06s ease, box-shadow 0.06s ease;
+
+  /* safe-area insets (need viewport-fit=cover in the meta) */
+  --sat: env(safe-area-inset-top, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+
+  /* z-index ladder — keep every layer here so nothing fights */
+  --z-app:      0;
+  --z-vignette: 1;
+  --z-hud:      10;
+  --z-sheet-bd: 30;
+  --z-sheet:    31;
+  --z-overlay:  40;
+  --z-loading:  100;
+}

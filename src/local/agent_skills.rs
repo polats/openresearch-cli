@@ -171,6 +171,30 @@ const EVALUATE: &str = include_str!("../../agent-skills/orx-evaluate/SKILL.md");
 const GAME_POLISH: &str = include_str!("../../agent-skills/orx-game-polish/SKILL.md");
 const PRODUCE: &str = include_str!("../../agent-skills/orx-produce/SKILL.md");
 
+/// The committed game starter template, bundled with the `orx-game-polish`
+/// skill and written into the session worktree at
+/// `<skills_dir>/orx-game-polish/starter/<rel>` so a game-designer scaffolds a
+/// polished, mobile-first Three.js+Vite project from it instead of a blank src/.
+/// Each entry is (relative path under `starter/`, file contents). Keep in sync
+/// with the on-disk `agent-skills/orx-game-polish/starter/` tree.
+const GAME_STARTER_FILES: &[(&str, &str)] = &[
+    ("package.json", include_str!("../../agent-skills/orx-game-polish/starter/package.json")),
+    ("vite.config.ts", include_str!("../../agent-skills/orx-game-polish/starter/vite.config.ts")),
+    ("tsconfig.json", include_str!("../../agent-skills/orx-game-polish/starter/tsconfig.json")),
+    ("index.html", include_str!("../../agent-skills/orx-game-polish/starter/index.html")),
+    ("README.md", include_str!("../../agent-skills/orx-game-polish/starter/README.md")),
+    ("src/style/tokens.css", include_str!("../../agent-skills/orx-game-polish/starter/src/style/tokens.css")),
+    ("src/style/ui.css", include_str!("../../agent-skills/orx-game-polish/starter/src/style/ui.css")),
+    ("src/core/engine.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/engine.ts")),
+    ("src/core/juice.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/juice.ts")),
+    ("src/core/toon.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/toon.ts")),
+    ("src/core/audio.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/audio.ts")),
+    ("src/core/sketchify.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/sketchify.ts")),
+    ("src/core/icons.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/icons.ts")),
+    ("src/ui/hud.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/ui/hud.ts")),
+    ("src/main.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/main.ts")),
+];
+
 // Descriptions are the *trigger surface*: what the module covers plus explicit,
 // liberal "Use when …" cues (false positives beat false negatives — an agent
 // that loads a module needlessly wastes a little context; one that misses it
@@ -366,6 +390,19 @@ pub fn ensure_session_skills(
         let path = dir.join("SKILL.md");
         std::fs::write(&path, skill.content)
             .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
+        // orx-game-polish carries a bundled starter template the agent copies
+        // into its project; write the whole tree next to the skill.
+        if skill.name == "orx-game-polish" {
+            for (rel, content) in GAME_STARTER_FILES {
+                let fpath = dir.join("starter").join(rel);
+                if let Some(parent) = fpath.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
+                }
+                std::fs::write(&fpath, content)
+                    .map_err(|e| anyhow!("Could not write {}: {}", fpath.display(), e))?;
+            }
+        }
     }
     let keep: std::collections::HashSet<&str> = current.iter().map(|s| s.name).collect();
     for other in Persona::ALL {

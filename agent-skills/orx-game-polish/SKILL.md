@@ -4,30 +4,72 @@ description: "The house craft standard for polished web games: the vanilla Three
 ---
 
 A build that compiles is not a game that feels good. Polished web games share a
-specific substrate — this is it. Scaffold it **before** gameplay, then hold every
-variant to the bar below.
+specific substrate — and it is **already written for you**. Scaffold from the
+committed starter template **before** gameplay, then hold every variant to the
+bar below.
 
-## Default stack
+## Scaffold from the committed starter FIRST (do not hand-roll the shell)
 
-**Vanilla Three.js + TypeScript + Vite, mobile-first portrait.** (Not
-react-three-fiber — hand-build the scene.) Frame at **390×844**, a
-`PerspectiveCamera(70, 9/16)`, `renderer.setPixelRatio(Math.min(2, devicePixelRatio))`,
-touch controls (a thumb-zone joystick / tap). Vite `base: './'` so it serves under
-`/play/<expId>/`.
+A polished, mobile-first, vanilla Three.js + Vite starter ships **bundled with
+this skill**, in the `starter/` folder next to this `SKILL.md` (the harness writes
+it into your skills dir, e.g. `.claude/skills/orx-game-polish/starter/`). It is
+the house UI kit + `src/core` substrate, already built and visually verified.
+**Copy it into your project root and build on top of it** — do not re-derive the
+shell, tokens, buttons, or juice by hand (that is exactly the copy-paste drift
+this template exists to end).
 
-## Scaffold `src/core/` first (the copyable substrate)
+```sh
+# from your project worktree root:
+STARTER=$(find . ~/.claude ~/.config -type d -path '*orx-game-polish/starter' 2>/dev/null | head -1)
+cp -R "$STARTER"/. .          # brings index.html, vite.config.ts, tsconfig.json, src/, package.json
+npm install
+npm run build                 # tsc + vite → dist/  (base:'./' already set)
+```
 
-Build these four before any gameplay — they're what "juicy" is made of:
+Then **replace the demo gameplay in `src/main.ts`** with your game; keep the shell
+wiring. What you inherit (read the starter's `README.md`):
 
-- **`core/engine.ts`** — renderer (`outputColorSpace = SRGBColorSpace`, PCFSoft
-  shadows), a **camera rig with a shake sub-group**, a per-frame `updater`
-  registry, and hit-stop time scaling in the loop.
-- **`core/juice.ts`** — **trauma-based screen shake** (store `trauma`, apply
-  `shake = trauma²`, decay each frame), **hit-stop** (scale dt to ~0 for
-  0.05–0.12s on impact), a **`Spring`** class (critically-damped, for hits/pop —
-  never `lerp`), and haptics (`navigator.vibrate`).
-- **`core/audio.ts`** — WebAudio **synthesis**, zero audio files (osc + gain
-  envelopes for hits/pickups; a tiny noise burst for impacts).
+- **`src/style/tokens.css`** — retheme the whole game here (colour/radius/depth/
+  motion tokens, safe-area vars, z-ladder). Never hardcode a hex in a component.
+- **`src/style/ui.css`** — the component kit: chunky offset-shadow buttons that
+  sink on `:active`, panels/cards, meter, chip, overlay, boot loader, popups, and
+  the shared motion keyframes. `prefers-reduced-motion` respected.
+- **`src/core/`** — `engine.ts` (loop + resize + `preserveDrawingBuffer`),
+  `juice.ts` (`feel` trauma-shake/hitstop/FOV-kick + `Spring` + haptics + easings),
+  `toon.ts` (gradient ramp + inverted-hull outline + `toonLights`), `audio.ts`
+  (zero-file WebAudio), `sketchify.ts` (hand-drawn borders), `icons.ts` (tintable
+  icon masks — no emoji).
+- **`src/ui/hud.ts`** — `showOverlay`/`showSheet`, floating `popup()`,
+  `worldToScreen()`, `flash()`, `shakeEl()`.
+
+Re-theming an existing prototype? Copy `src/style/*` + `src/core/*` + `src/ui/*`
+in and rewire the DOM to the kit's classes — that alone lifts a flat build.
+
+## The UI look (why the starter reads as crafted)
+
+Match these when you add screens; they are already encoded in `ui.css`:
+
+- **Everything is bold** (700–900); uppercase labels get `letter-spacing`;
+  counters use `tabular-nums`.
+- **Every raised surface** = a top→bottom gradient fill + a **hard, blur-less
+  edge shadow** in the darker tone (`box-shadow: 0 6px 0 <edge>`), which
+  **collapses on `:active`** while the element `translateY`s down. That pair is
+  the entire "physical button" feel — never a flat filled rectangle.
+- HUD overlay is `pointer-events:none`; only `.clickable` children take input.
+- Anchor every edge element with `env(safe-area-inset-*)`; cap panels with `dvh`.
+- **No CDN fonts.** The kit uses a heavy system stack; for a display face,
+  self-host a `.woff2` + `@font-face` with a `system-ui` fallback.
+
+## The `src/core/` substrate (what the starter gives you)
+
+You get these already; understand them before extending:
+
+- **`core/engine.ts`** — renderer + camera + fixed-step loop with the `feel` bus
+  wired in and `preserveDrawingBuffer` for share-card snapshots.
+- **`core/juice.ts`** — **trauma-based screen shake** (`shake = trauma²`, decays),
+  **hit-stop** (dt→0 for 0.05–0.12s on impact), a critically-damped **`Spring`**
+  (never `lerp` for hits/pops), haptics, and the easing set.
+- **`core/audio.ts`** — WebAudio **synthesis**, zero audio files.
 - **`core/toon.ts`** — the look (below).
 
 ## The toon look recipe (this is the polish)
@@ -71,8 +113,9 @@ prototype; the layers read as production.
 Prefer **no binary assets** — models = merged primitives (box/cyl/sphere/cone),
 textures = **canvas painting**, audio = **WebAudio synthesis**. This is the house
 style, keeps builds instant, and sidesteps asset-path 404s under `/play/<expId>/`.
-Pin colours in a **`src/style/palette.ts`** (tokens only — no hex literals in
-builders). For characters, procedural primitive/SDF blobs beat hand-modelling.
+Pin CSS colours in **`src/style/tokens.css`** and 3D colours in a small
+`src/style/palette.ts` (tokens only — no hex literals in builders). For
+characters, procedural primitive/SDF blobs beat hand-modelling.
 Only reach for authored art when procedural genuinely can't carry it, and
 generate it from **text prompts** (never commit large binaries into an experiment
 branch).
