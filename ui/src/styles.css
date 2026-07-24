@@ -3121,6 +3121,7 @@ a.files-pill:hover {
   --persona-game-designer: var(--accent-orange);
   --persona-idea-foundry: var(--accent-purple);
   --persona-analyst: var(--accent-teal);
+  --persona-producer: var(--accent-pink);
 }
 .persona-swatch {
   flex: none;
@@ -3185,6 +3186,18 @@ a.files-pill:hover {
 .persona-active-pill.persona-analyst {
   color: var(--persona-analyst);
   border-color: var(--persona-analyst);
+}
+/* producer persona (pink) — the orchestrator */
+.persona-swatch.persona-producer,
+.persona-bar.persona-producer {
+  background: var(--persona-producer);
+}
+.persona-card.persona-producer {
+  border-left: 3px solid var(--persona-producer);
+}
+.persona-active-pill.persona-producer {
+  color: var(--persona-producer);
+  border-color: var(--persona-producer);
 }
 /* Recents row: title + a muted provider·model subline (glanceable per-session). */
 .session-row .session-titlewrap {

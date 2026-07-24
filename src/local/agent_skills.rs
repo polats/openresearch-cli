@@ -66,14 +66,19 @@ pub enum Persona {
     /// Analyst agent: evaluates an idea node — codes the 35 signals in its turn
     /// (keyless), runs the evaluator sim, and writes the scored report.
     Analyst,
+    /// Producer agent: the orchestrator. Runs the discovery funnel by
+    /// *suggesting* subagents (idea-foundry / analyst / game-designer) for a
+    /// human to approve — it never does the worker jobs itself.
+    Producer,
 }
 
 impl Persona {
-    pub const ALL: [Persona; 4] = [
+    pub const ALL: [Persona; 5] = [
         Persona::Research,
         Persona::GameDesigner,
         Persona::IdeaFoundry,
         Persona::Analyst,
+        Persona::Producer,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -82,6 +87,7 @@ impl Persona {
             Persona::GameDesigner => "game-designer",
             Persona::IdeaFoundry => "idea-foundry",
             Persona::Analyst => "analyst",
+            Persona::Producer => "producer",
         }
     }
 
@@ -93,8 +99,9 @@ impl Persona {
             Some("game-designer") => Ok(Persona::GameDesigner),
             Some("idea-foundry") => Ok(Persona::IdeaFoundry),
             Some("analyst") => Ok(Persona::Analyst),
+            Some("producer") => Ok(Persona::Producer),
             Some(other) => Err(format!(
-                "unknown persona '{other}' (expected 'research', 'game-designer', 'idea-foundry', or 'analyst')"
+                "unknown persona '{other}' (expected 'research', 'game-designer', 'idea-foundry', 'analyst', or 'producer')"
             )),
         }
     }
@@ -105,6 +112,7 @@ impl Persona {
             Persona::GameDesigner => "Game designer",
             Persona::IdeaFoundry => "Idea foundry",
             Persona::Analyst => "Analyst",
+            Persona::Producer => "Producer",
         }
     }
 
@@ -127,6 +135,11 @@ impl Persona {
                 "Evaluates an idea against the 35-signal market-fit rubric — \
                  codes the signals itself (keyless), runs the scoring sim, and \
                  writes the alignment report + comparables onto the node."
+            }
+            Persona::Producer => {
+                "Runs the discovery funnel: surveys the idea gallery and \
+                 suggests the next subagent (capture / evaluate / build) for you \
+                 to approve — an orchestrator, not a worker."
             }
         }
     }
@@ -156,6 +169,7 @@ const PLAY: &str = include_str!("../../agent-skills/orx-play/SKILL.md");
 const IDEATE: &str = include_str!("../../agent-skills/orx-ideate/SKILL.md");
 const EVALUATE: &str = include_str!("../../agent-skills/orx-evaluate/SKILL.md");
 const GAME_POLISH: &str = include_str!("../../agent-skills/orx-game-polish/SKILL.md");
+const PRODUCE: &str = include_str!("../../agent-skills/orx-produce/SKILL.md");
 
 // Descriptions are the *trigger surface*: what the module covers plus explicit,
 // liberal "Use when …" cues (false positives beat false negatives — an agent
@@ -259,6 +273,11 @@ const S_GAME_POLISH: AgentSkill = AgentSkill {
     description: "The house craft standard for polished web games: the vanilla Three.js + Vite mobile-first stack, a copyable src/core toon+juice scaffold, the toon look recipe (gradient ramp + inverted-hull outlines), game-feel constants, the layered-VFX minimum bar, zero-binary procedural assets, and visual QA. Load before building any game variant so it reads as crafted, not basic.",
     content: GAME_POLISH,
 };
+const S_PRODUCE: AgentSkill = AgentSkill {
+    name: "orx-produce",
+    description: "Orchestrate the game-discovery funnel: survey the idea gallery, decide the next move, and suggest a subagent (idea-foundry to capture, analyst to evaluate, game-designer to build) via `orx agent suggest` for the human to approve — including which provider/model fits the job. Use to run the pipeline over many ideas without doing the worker jobs yourself.",
+    content: PRODUCE,
+};
 
 /// The modules for a given set, in a stable order. Local and Full share names;
 /// `experiment-tree`/`compute`/`reports`/`evidence` swap bodies, and `create`
@@ -309,6 +328,9 @@ pub fn skills_for_persona(persona: Persona) -> Vec<&'static AgentSkill> {
         // Evaluate one idea node: code signals in-turn, run the scoring sim,
         // write the report. Needs git to commit the coding sidecar the sim reads.
         Persona::Analyst => vec![&S_EVALUATE, &S_GIT],
+        // The orchestrator: one skill (survey → suggest). It dispatches the
+        // worker personas rather than doing their jobs, so it needs nothing else.
+        Persona::Producer => vec![&S_PRODUCE],
     }
 }
 
@@ -320,7 +342,7 @@ pub fn find(name: &str) -> Option<&'static AgentSkill> {
     let want = name.trim();
     skills(SkillSet::Full)
         .into_iter()
-        .chain([&S_PLAY, &S_IDEATE, &S_EVALUATE, &S_GAME_POLISH])
+        .chain([&S_PLAY, &S_IDEATE, &S_EVALUATE, &S_GAME_POLISH, &S_PRODUCE])
         .find(|s| s.name == want || s.name.strip_prefix("orx-") == Some(want))
 }
 

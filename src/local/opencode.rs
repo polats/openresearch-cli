@@ -120,6 +120,10 @@ const SYSTEM_PROMPT_IDEA: &str = include_str!("../../SYSTEM_PROMPT_IDEA.md");
 /// The analyst persona's playbook template — evaluates an idea node against the
 /// 35-signal rubric (keyless: agent codes signals, sim does the math).
 const SYSTEM_PROMPT_ANALYST: &str = include_str!("../../SYSTEM_PROMPT_ANALYST.md");
+/// The producer persona's playbook template — the orchestrator that runs the
+/// discovery funnel by *suggesting* subagents (human approves), never doing the
+/// worker jobs itself.
+const SYSTEM_PROMPT_PRODUCER: &str = include_str!("../../SYSTEM_PROMPT_PRODUCER.md");
 
 /// A persona's playbook template with the leading repo-reader HTML comment
 /// stripped — the text tokens are substituted into at render time, and what
@@ -130,19 +134,20 @@ pub fn persona_template(persona: Persona) -> &'static str {
         Persona::GameDesigner => SYSTEM_PROMPT_GAME,
         Persona::IdeaFoundry => SYSTEM_PROMPT_IDEA,
         Persona::Analyst => SYSTEM_PROMPT_ANALYST,
+        Persona::Producer => SYSTEM_PROMPT_PRODUCER,
     };
     raw.split_once("-->\n\n")
         .map(|(_, rest)| rest)
         .unwrap_or(raw)
 }
 
-fn playbook_md(project: &LocalProject) -> String {
-    playbook_md_with_memory(project, &super::memory::memory_section(project))
+fn playbook_md(project: &LocalProject, session_id: &str) -> String {
+    playbook_md_with_memory(project, session_id, &super::memory::memory_section(project))
 }
 
 /// The render body, with the `{memory}` block passed in so tests can render
 /// the playbook without touching the developer's real memory files.
-fn playbook_md_with_memory(project: &LocalProject, memory: &str) -> String {
+fn playbook_md_with_memory(project: &LocalProject, session_id: &str, memory: &str) -> String {
     let id = &project.id;
     let name = &project.name;
     let repo = format!("{}/{}", project.github_owner, project.github_repo);
@@ -241,6 +246,7 @@ fn playbook_md_with_memory(project: &LocalProject, memory: &str) -> String {
     template
         .replace("{name}", name)
         .replace("{id}", id)
+        .replace("{session_id}", session_id)
         .replace("{repo}", &repo)
         .replace("{baseline}", baseline)
         .replace("{paper_line}", &paper_line)
@@ -319,7 +325,7 @@ pub fn ensure_playbook(
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
-    std::fs::write(&playbook, playbook_md(project))
+    std::fs::write(&playbook, playbook_md(project, session_id))
         .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
     // Modular skills, written fresh beside the playbook (same freshness
     // semantics) so this session's agent discovers them natively.
@@ -659,7 +665,7 @@ mod tests {
             None,
             None,
         );
-        playbook_md_with_memory(&sample_project(persona), &memory)
+        playbook_md_with_memory(&sample_project(persona), "chat_sample", &memory)
     }
 
     /// Each persona's playbook "## Skills" index must list exactly that
@@ -709,6 +715,7 @@ mod tests {
             for token in [
                 "{name}",
                 "{id}",
+                "{session_id}",
                 "{repo}",
                 "{baseline}",
                 "{paper_line}",
@@ -732,6 +739,7 @@ mod tests {
                 Persona::GameDesigner => "# OpenResearch game-design agent",
                 Persona::IdeaFoundry => "# OpenResearch idea agent",
                 Persona::Analyst => "# OpenResearch analyst agent",
+                Persona::Producer => "# OpenResearch producer agent",
             };
             assert!(md.starts_with(title), "template comment not stripped");
             assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
@@ -775,6 +783,16 @@ mod tests {
                     assert!(!md.contains("orx-reports"));
                     assert!(!md.contains("orx-lit"));
                     assert!(!md.contains("orx-ideate"));
+                }
+                // The producer orchestrates via one skill; it launches no runs
+                // and does no worker job itself.
+                Persona::Producer => {
+                    assert!(md.contains("orx-produce"));
+                    assert!(!md.contains("orx-compute"));
+                    assert!(!md.contains("orx-evidence"));
+                    assert!(!md.contains("orx-play"));
+                    assert!(!md.contains("orx-reports"));
+                    assert!(!md.contains("orx-lit"));
                 }
             }
             // The memory section rendered with both scopes present.
