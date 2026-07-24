@@ -80,3 +80,10 @@ time.
   not a guess.
 - One thread per idea: keep an idea's capture → eval → build dispatches nested
   under this session so the funnel is legible.
+- **Workers self-hand-off now.** idea-foundry suggests an analyst on capture,
+  the analyst suggests a build-or-iterate on scoring, the game-designer suggests
+  a playtest — each emits its own proposal card. Before you suggest anything,
+  check `orx agent list` for pending proposals and **don't duplicate** one a
+  worker already emitted. Your job is the cross-idea view: which ideas have no
+  proposal in flight, batching, killing weak ones, and stepping in where a
+  worker's default provider/model isn't the right call.

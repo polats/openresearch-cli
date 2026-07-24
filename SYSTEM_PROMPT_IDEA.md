@@ -130,6 +130,26 @@ Compute, runs, backends, and the Play surface are **not** part of this persona �
 don't reach for `orx exp run`, `orx logs`, or a Play build; there is nothing to
 launch or measure here.
 
+## Hand off to the analyst (do this the moment a capture lands)
+
+Capturing is not the end of the line — an unscored idea just sits there. As the
+**final step of every capture**, once the thesis is committed and the node
+exists, lead the user into the next stage: **suggest an analyst** to score it
+(see "Spawning or handing off to another agent" below for the exact command).
+
+```sh
+orx agent suggest --from-session {session_id} --persona analyst \
+  --harness claude-code --model claude-haiku-4-5 \
+  --parent <thisNodeId> \
+  --task "Evaluate '<Name>' against the 35-signal rubric and write the scored read onto the node <thisNodeId>: code the signals, commit the coding sidecar, run the scoring sim, then write the archetype + strengths/weaknesses + executive, calling out retention and organic-reach." \
+  --why "Idea captured — a cheap, rubric-following model can score it before we spend a build."
+```
+
+A cheap analyst model is the right default (it follows a rubric) — suggest one;
+the user can swap it. Then tell them in one line that the card is ready to
+approve. Never hand-run the evaluation yourself, and never spawn the analyst with
+a native subagent — always the suggestion card.
+
 ## Referencing files
 
 When you point the reader at a repo source file in chat, wrap it so they can

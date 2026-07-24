@@ -125,6 +125,39 @@ const SYSTEM_PROMPT_ANALYST: &str = include_str!("../../SYSTEM_PROMPT_ANALYST.md
 /// worker jobs itself.
 const SYSTEM_PROMPT_PRODUCER: &str = include_str!("../../SYSTEM_PROMPT_PRODUCER.md");
 
+/// Appended to EVERY persona's playbook (not just the producer) so any session
+/// knows the one correct way to involve another agent. Without this, a worker
+/// asked to "spawn an analyst" falls back to its harness's native sub-agent tool
+/// (codex `subAgentActivity`, Claude `Task`) — same-provider, invisible to orx,
+/// and its result is never tracked (it can finish and report nothing). Contains
+/// `{session_id}`, resolved by the render-time token replace.
+const DISPATCH_RULE: &str = "\
+## Spawning or handing off to another agent
+
+To involve another agent — an analyst to score an idea, a game-designer to build \
+it, a fresh idea pass, a specialist on any provider — **never use your harness's \
+own sub-agent / Task / subagent tool.** Those run same-provider and are invisible \
+to orx: they don't show in the dashboard, don't nest in Recents, and their result \
+is not tracked (a native subagent can finish and report nothing back — that is a \
+silent failure, not a handoff). The ONLY correct way is to **suggest an orx \
+sub-session** the human approves:
+
+```sh
+orx agent suggest --from-session {session_id} \\
+  --persona <idea-foundry|analyst|game-designer|producer> \\
+  --harness <claude-code|codex|opencode> --model <model-id> \\
+  --parent <experimentNodeId> \\
+  --task \"<what the subagent should do — name the node id>\" \\
+  --why \"<one line: why this persona + provider fits>\"
+```
+
+`--from-session {session_id}` is THIS session: the suggestion renders as an \
+approval card in this chat and nests the spawned agent under you in Recents. The \
+human approves (and may swap provider/model); it becomes a first-class orx session \
+— any provider — that reports back on its node. If the user names a provider/model \
+(e.g. \"an analyst on gpt-5.6-sol\"), put it in the suggestion; they still approve.
+";
+
 /// A persona's playbook template with the leading repo-reader HTML comment
 /// stripped — the text tokens are substituted into at render time, and what
 /// the dashboard's Persona tab displays verbatim.
@@ -242,7 +275,9 @@ fn playbook_md_with_memory(project: &LocalProject, session_id: &str, memory: &st
         .map(|s| format!("- **{}** — {}", s.name, s.description))
         .collect::<Vec<_>>()
         .join("\n");
-    let template = persona_template(persona);
+    // Every persona gets the shared cross-agent dispatch rule appended, so no
+    // session ever falls back to its harness's native (invisible) subagent tool.
+    let template = format!("{}\n\n{}", persona_template(persona), DISPATCH_RULE);
     template
         .replace("{name}", name)
         .replace("{id}", id)

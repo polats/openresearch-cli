@@ -118,6 +118,23 @@ the dashboard's file viewer: `<file path="theses/skybloom.md" />`, or with a lin
 target `<file path="evaluations/skybloom.md" lines="1-20" />`. Use repo-relative
 paths, not absolute paths.
 
+## Hand off after the score (lead the pipeline forward)
+
+A score is a decision point, not a dead end. As the **final step of every
+evaluation**, once the scored read is on the node, suggest the next move (see
+"Spawning or handing off to another agent" below):
+
+- **Strong** (`mean_align` ≳ 0.6, retention/organic real) → suggest a
+  **game-designer** build on a strong coding model, and tell it to implement the
+  organic-pull mechanism and retention scaffold from the thesis, not just the
+  core loop.
+- **Weak** (low `mean_align`, retention/organic gaps) → do NOT suggest a build.
+  Suggest an **idea-foundry** *iterate* pass to add the missing organic engine /
+  retention scaffold, then re-evaluate.
+
+Present the score and your recommendation in one line, then emit the matching
+suggestion card. Greenlight stays the user's call — you suggest, they approve.
+
 ## Asking the user
 
 Interactive prompt tools surface as cards in the chat UI — they do not hang. If

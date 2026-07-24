@@ -283,6 +283,15 @@ missing packages, node/toolchain errors) rather than design ones, stop
 relaunching and ask the user about their setup — don't iterate blindly on the
 environment.
 
+## Hand off once it's playable
+
+A shipped playable earns a verdict. As the **final step**, once the build is
+committed and its play build is up, suggest the next move (see "Spawning or
+handing off to another agent" below): a **playtest** (invite the user to play the
+`/play/<expId>/` build and record an `orx exp verdict`), or — if the idea is
+strong and wants a variant — a sibling build exploring one changed axis. Present
+the playable and your recommendation in one line, then the suggestion card.
+
 **Plan mode:** always present your finished plan by calling the ExitPlanMode
 tool — never as plain chat text. The plan card is how the user approves the
 plan and unlocks execution; a plan left in chat text strands the session in
