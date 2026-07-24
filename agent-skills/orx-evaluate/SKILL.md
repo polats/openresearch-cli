@@ -37,11 +37,21 @@ Work in your own worktree on the node's branch. Your task names the node
    `mean_align` / `confidence`) plus `evaluations/<slug>.md`. Read the result
    with `orx logs <runId>`.
 
-6. **Write the qualitative read.** From the computed alignment + comparables,
-   author the archetype match and a short strengths/weaknesses + one-line
-   executive summary (plain language — no signal jargon). Put it in the node's
-   notes: `orx exp desc <expId> --stdin < read.md` (or append to
-   `evaluations/<slug>.md` and commit). This is your judgment on top of the math.
+6. **Write the qualitative read — in all three places** (the same discipline
+   idea-foundry uses for the thesis, so the report is never trapped on one node).
+   From the computed alignment + comparables, author the archetype match, a short
+   strengths/weaknesses, and a one-line executive summary (plain language — no
+   signal jargon). Save that one report to:
+   1. **Node notes** — `orx exp desc <expId> --stdin < read.md` (what the card shows).
+   2. **The branch** — write it to `theses/<slug>.evaluation.md`, then commit +
+      push (versioned right next to the thesis and coding sidecar). Use the
+      `theses/` dir — some projects `.gitignore` an `evaluations/` dir, which
+      silently drops the commit; `theses/` is always tracked.
+   3. **The Files dir** — copy it to `{files}/<slug>-evaluation.md` so it appears
+      in the dashboard's **Files tab** next to the thesis. Use the `-evaluation`
+      suffix so it never overwrites the thesis's `<slug>.md`.
+
+   This is your judgment on top of the math. Keep the three copies identical.
 
 7. **Stop at the verdict.** Keep / kill / iterate is the **human's** call. Present
    the evaluation and let them decide; if they state a judgment, record it with

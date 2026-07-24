@@ -78,9 +78,14 @@ Carry one idea node from thesis to scored read (full technique: the
 3. **Score**: `orx exp run <expId> --kind sim --backend local` → `orx exp wait`.
    The sim ingests the alignment/comparables/confidence and writes
    `evaluations/<slug>.md`.
-4. **Read**: from the computed numbers, author the archetype match + a short
-   strengths/weaknesses + one-line executive (plain language, no jargon) and
-   write it onto the node (`orx exp desc <expId>`).
+4. **Read — save it in all three places** (like idea-foundry does the thesis):
+   author the archetype match + a short strengths/weaknesses + one-line executive
+   (plain language, no jargon), then save that one report to (a) the node notes
+   (`orx exp desc <expId>`), (b) a committed `theses/<slug>.evaluation.md` on the
+   branch (the `theses/` dir is always tracked; some projects `.gitignore`
+   `evaluations/`), and (c) `{files}/<slug>-evaluation.md` so it shows in the
+   dashboard Files tab (the `-evaluation` suffix avoids clobbering the thesis).
+   Keep the copies identical. A report that lives only on the node is half-filed.
 5. **Verdict is the human's** — present the evaluation, record their call with
    `orx exp verdict` if they state one; never kill an idea yourself.
 
