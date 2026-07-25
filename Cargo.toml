@@ -2,9 +2,16 @@
 name = "openresearch-cli"
 version = "0.1.69"
 edition = "2021"
-description = "OpenResearch CLI (orx) — Rust port"
+description = "Crux — from a game idea to a validated, playable prototype (crux)"
 repository = "https://github.com/alphaXiv/openresearch-cli"
 license = "MIT"
+default-run = "crux"
+
+# `crux` is the command; `orx` stays as an alias (same binary) so existing
+# scripts and the ~800 `orx …` references in agent playbooks keep working.
+[[bin]]
+name = "crux"
+path = "src/main.rs"
 
 [[bin]]
 name = "orx"

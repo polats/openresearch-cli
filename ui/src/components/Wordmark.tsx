@@ -1,16 +1,32 @@
-// OpenResearch wordmark: logo mark + name, sized by the parent's font-size.
-// Single source for the brand lockup (home, chat empty state, onboarding).
+// Crux wordmark: the Southern Cross (constellation Crux) as a clean geometric
+// mark + name, sized by the parent's font-size. The tile recolors with the active
+// theme (fill = --primary). Single source for the brand lockup.
+const STAR = "M0 -9 L2.4 -2.4 L9 0 L2.4 2.4 L0 9 L-2.4 2.4 L-9 0 L-2.4 -2.4 Z";
+// four stars of the cross: [x, y, scale]
+const STARS: [number, number, number][] = [
+  [52, 23, 0.82], // Gacrux (top)
+  [49, 79, 1.06], // Acrux (bottom, brightest)
+  [25, 49, 0.72], // Imai (left)
+  [77, 55, 0.78], // Mimosa (right)
+];
+
 export function Wordmark() {
   return (
     <span className="wordmark">
       <svg viewBox="0 0 100 100" aria-hidden="true">
-        <rect width="100" height="100" rx="8" fill="#9a2036" />
-        <path
-          d="M15.375 16.782v63.843a4 4 0 0 0 4 4h63.843c3.564 0 5.348-4.309 2.829-6.828L22.203 13.953c-2.52-2.52-6.828-.735-6.828 2.829"
-          fill="#fff"
-        />
+        <rect width="100" height="100" rx="24" fill="var(--primary)" />
+        {/* the cross, drawn faintly through the stars */}
+        <g stroke="#fff" strokeWidth="2.4" strokeLinecap="round" opacity="0.4">
+          <line x1="52" y1="23" x2="49" y2="79" />
+          <line x1="25" y1="49" x2="77" y2="55" />
+        </g>
+        <g fill="#fff">
+          {STARS.map(([x, y, s], i) => (
+            <path key={i} transform={`translate(${x} ${y}) scale(${s})`} d={STAR} />
+          ))}
+        </g>
       </svg>
-      OpenResearch
+      Crux
     </span>
   );
 }

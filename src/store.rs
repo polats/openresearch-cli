@@ -297,12 +297,32 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_chat_messages_session
                 ON chat_messages(session_id, created_at);
+            CREATE TABLE IF NOT EXISTS agent_proposals (
+                id                   TEXT PRIMARY KEY,
+                project_id           TEXT NOT NULL,
+                parent_experiment_id TEXT,
+                persona              TEXT,
+                harness              TEXT,
+                model                TEXT,
+                task                 TEXT NOT NULL,
+                why                  TEXT,
+                status               TEXT NOT NULL,
+                session_id           TEXT,
+                parent_session_id    TEXT,
+                created_at           INTEGER NOT NULL,
+                updated_at           INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS ssh_host_tests (
                 host      TEXT PRIMARY KEY,
                 reachable INTEGER NOT NULL,
                 git_found INTEGER NOT NULL,
                 error     TEXT,
                 tested_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS kv (
+                k          TEXT PRIMARY KEY,
+                v          TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
             );",
         )?;
         // Best-effort migrations for pre-existing dbs; re-runs fail with
@@ -314,6 +334,9 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN permission_mode TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN reasoning_level TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chat_sessions ADD COLUMN persona TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
+            "ALTER TABLE agent_proposals ADD COLUMN parent_session_id TEXT",
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
             "ALTER TABLE runs ADD COLUMN supervisor_heartbeat_ms INTEGER",
             "ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'job'",
@@ -791,8 +814,9 @@ impl Store {
     pub fn create_chat_session(&self, s: &StoredChatSession) -> Result<()> {
         self.conn.execute(
             "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, model,
-                                        permission_mode, reasoning_level, archived, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                        permission_mode, reasoning_level, archived, created_at, updated_at,
+                                        persona, parent_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 s.id,
                 s.project_id,
@@ -805,6 +829,8 @@ impl Store {
                 s.archived,
                 s.created_at,
                 s.updated_at,
+                s.persona,
+                s.parent_session_id,
             ],
         )?;
         Ok(())
@@ -910,6 +936,55 @@ impl Store {
         Ok(())
     }
 
+    // --- agent dispatch proposals (orchestrator suggests → human approves) ---
+
+    pub fn create_agent_proposal(&self, p: &StoredAgentProposal) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO agent_proposals (id, project_id, parent_experiment_id, persona, harness,
+                                          model, task, why, status, session_id, created_at, updated_at,
+                                          parent_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                p.id, p.project_id, p.parent_experiment_id, p.persona, p.harness, p.model,
+                p.task, p.why, p.status, p.session_id, p.created_at, p.updated_at,
+                p.parent_session_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_agent_proposal(&self, id: &str) -> Result<Option<StoredAgentProposal>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {AGENT_PROPOSAL_COLS} FROM agent_proposals WHERE id = ?1"
+        ))?;
+        let mut rows = stmt.query_map(params![id], row_to_agent_proposal)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn list_agent_proposals(&self, project_id: &str) -> Result<Vec<StoredAgentProposal>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {AGENT_PROPOSAL_COLS} FROM agent_proposals WHERE project_id = ?1
+             ORDER BY created_at DESC"
+        ))?;
+        let rows = stmt.query_map(params![project_id], row_to_agent_proposal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Move a proposal to `approved`/`dismissed`; `session_id` is the spawned
+    /// session on approval (None otherwise).
+    pub fn set_agent_proposal_status(
+        &self,
+        id: &str,
+        status: &str,
+        session_id: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE agent_proposals SET status = ?2, session_id = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, status, session_id, now_ms()],
+        )?;
+        Ok(())
+    }
+
     /// Insert or replace a message's parts — assistant messages are rewritten
     /// as their parts stream in.
     pub fn upsert_chat_message(&self, m: &StoredChatMessage) -> Result<()> {
@@ -991,6 +1066,25 @@ impl Store {
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
+
+    /// Generic string KV for small bits of state that outlive a single request
+    /// or process (e.g. the last Codex usage snapshot captured from a turn).
+    /// Values are opaque to the store — JSON by convention.
+    pub fn set_kv(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO kv (k, v, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at",
+            params![key, value, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_kv(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT v FROM kv WHERE k = ?1", params![key], |r| r.get(0))
+            .optional()?)
+    }
 }
 
 /// Most recent preflight result per ssh host alias (Settings → Compute → SSH).
@@ -1022,6 +1116,13 @@ pub struct StoredChatSession {
     pub permission_mode: Option<String>,
     /// Reasoning-level wire id (`"low"` / `"medium"` / `"high"`); None = default.
     pub reasoning_level: Option<String>,
+    /// Persona wire id (`"research"` / `"game-designer"` / `"idea-foundry"` / …);
+    /// None = fall back to the project's persona. Lets a dispatched subagent run
+    /// a different persona than the project default on the same project.
+    pub persona: Option<String>,
+    /// The session that spawned this one (a dispatched subagent's orchestrator).
+    /// None for a top-level session. Drives the nested Recents thread.
+    pub parent_session_id: Option<String>,
     /// Hidden from the default Recents list, but fully intact and resumable.
     pub archived: bool,
     pub created_at: i64,
@@ -1041,7 +1142,7 @@ pub struct StoredChatMessage {
 }
 
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, \
-     permission_mode, reasoning_level, archived, created_at, updated_at";
+     permission_mode, reasoning_level, archived, created_at, updated_at, persona, parent_session_id";
 
 fn row_to_chat_session(
     row: &rusqlite::Row<'_>,
@@ -1058,6 +1159,57 @@ fn row_to_chat_session(
         archived: row.get(8)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+        persona: row.get(11)?,
+        parent_session_id: row.get(12)?,
+    })
+}
+
+/// An orchestrator's dispatch suggestion, pending a human's approve/override.
+/// The agent writes it (`orx agent suggest`); the human approves in the UI,
+/// which spawns a chat session with the chosen persona/harness/model.
+#[derive(Debug, Clone)]
+pub struct StoredAgentProposal {
+    pub id: String,
+    pub project_id: String,
+    /// The node the dispatched agent should work on, if any.
+    pub parent_experiment_id: Option<String>,
+    pub persona: Option<String>,
+    pub harness: Option<String>,
+    pub model: Option<String>,
+    pub task: String,
+    /// The orchestrator's one-line rationale for this suggestion.
+    pub why: Option<String>,
+    /// `pending` | `approved` | `dismissed`.
+    pub status: String,
+    /// The spawned session, set on approval.
+    pub session_id: Option<String>,
+    /// The orchestrator session that made this suggestion — the spawned session
+    /// nests under it in Recents.
+    pub parent_session_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+const AGENT_PROPOSAL_COLS: &str = "id, project_id, parent_experiment_id, persona, harness, model, \
+     task, why, status, session_id, created_at, updated_at, parent_session_id";
+
+fn row_to_agent_proposal(
+    row: &rusqlite::Row<'_>,
+) -> std::result::Result<StoredAgentProposal, rusqlite::Error> {
+    Ok(StoredAgentProposal {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        parent_experiment_id: row.get(2)?,
+        persona: row.get(3)?,
+        harness: row.get(4)?,
+        model: row.get(5)?,
+        task: row.get(6)?,
+        why: row.get(7)?,
+        status: row.get(8)?,
+        session_id: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+        parent_session_id: row.get(12)?,
     })
 }
 
@@ -1217,6 +1369,89 @@ mod tests {
         assert_eq!(exp.verdict.as_deref(), Some("iterate"));
         assert_eq!(exp.verdict_notes.as_deref(), Some("downtime is dead air"));
         assert!(exp.updated_at > 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_chat_session(id: &str, persona: Option<&str>) -> StoredChatSession {
+        StoredChatSession {
+            id: id.into(),
+            project_id: "p1".into(),
+            harness: "claude-code".into(),
+            native_session_id: None,
+            title: None,
+            model: None,
+            permission_mode: None,
+            reasoning_level: None,
+            persona: persona.map(str::to_string),
+            parent_session_id: None,
+            archived: false,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    /// A session-level persona round-trips through the new column; absent
+    /// persona stays None (so the turn falls back to the project's persona).
+    #[test]
+    fn chat_session_persona_roundtrips() {
+        let (store, dir) = temp_store("chat-persona");
+        store
+            .create_chat_session(&test_chat_session("chat_g", Some("game-designer")))
+            .unwrap();
+        store
+            .create_chat_session(&test_chat_session("chat_none", None))
+            .unwrap();
+
+        assert_eq!(
+            store.get_chat_session("chat_g").unwrap().unwrap().persona.as_deref(),
+            Some("game-designer"),
+        );
+        assert_eq!(
+            store.get_chat_session("chat_none").unwrap().unwrap().persona,
+            None,
+        );
+        // Survives the list path (uses the same column list) too.
+        let listed = store.list_chat_sessions_by_project("p1").unwrap();
+        assert!(listed.iter().any(|s| s.id == "chat_g" && s.persona.as_deref() == Some("game-designer")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A proposal is created pending, then approved with a spawned session id.
+    #[test]
+    fn agent_proposal_lifecycle() {
+        let (store, dir) = temp_store("agent-proposal");
+        let p = StoredAgentProposal {
+            id: "prop1".into(),
+            project_id: "p1".into(),
+            parent_experiment_id: Some("e1".into()),
+            persona: Some("game-designer".into()),
+            harness: Some("codex".into()),
+            model: Some("gpt-5.1".into()),
+            task: "build a playable from theses/skybloom.md".into(),
+            why: Some("strong coding model".into()),
+            status: "pending".into(),
+            session_id: None,
+            parent_session_id: Some("chat_orch".into()),
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_agent_proposal(&p).unwrap();
+
+        let got = store.get_agent_proposal("prop1").unwrap().unwrap();
+        assert_eq!(got.status, "pending");
+        assert_eq!(got.persona.as_deref(), Some("game-designer"));
+        assert_eq!(got.session_id, None);
+        assert_eq!(store.list_agent_proposals("p1").unwrap().len(), 1);
+
+        store
+            .set_agent_proposal_status("prop1", "approved", Some("chat_x"))
+            .unwrap();
+        let got = store.get_agent_proposal("prop1").unwrap().unwrap();
+        assert_eq!(got.status, "approved");
+        assert_eq!(got.session_id.as_deref(), Some("chat_x"));
+        assert!(got.updated_at > 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

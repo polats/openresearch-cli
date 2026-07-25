@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use super::detect::{bin_version, read_json, HarnessInfo};
+use super::detect::{bin_version, read_json, HarnessInfo, HarnessUsage};
 use super::options::{HarnessOptions, PermissionMode};
 use super::{Harness, ResumeAction};
 use crate::error::{anyhow, Result};
@@ -67,6 +67,21 @@ impl Harness for OpenCode {
             info.authenticated = true;
             info.auth_method = Some("oauth");
             info.account = Some(providers.join(", "));
+        }
+        // OpenCode Zen (the `opencode` provider) is pay-as-you-go with a
+        // balance, but exposes no balance/usage API — it's dashboard-only (a
+        // `GET /zen/v1/balance` endpoint is an open, unimplemented request). So
+        // surface a manage link instead of a number, rather than leave it blank.
+        if providers.iter().any(|p| p == "opencode") {
+            info.usage = Some(HarnessUsage {
+                windows: Vec::new(),
+                observed_at_ms: None,
+                note: Some(
+                    "Zen balance is managed on the opencode.ai dashboard (no usage API yet)."
+                        .to_string(),
+                ),
+                manage_url: Some("https://opencode.ai/auth".to_string()),
+            });
         }
 
         info.agent_ready = info.installed;

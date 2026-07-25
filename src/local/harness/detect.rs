@@ -19,6 +19,43 @@ pub struct ModelInfo {
     pub id: String,
 }
 
+/// One quota bucket of a harness's plan (a rolling window like "5h" or
+/// "Weekly"), normalized across providers to **percent remaining** so the UI
+/// renders every harness the same way. Claude reports `utilization` (percent
+/// used); Codex reports `used_percent`; both become `100 - used` here.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageWindow {
+    /// Short human label, e.g. `"5h"`, `"Weekly"`, `"Weekly (Sonnet)"`.
+    pub label: String,
+    /// Percent of the window still available, 0–100.
+    pub remaining_percent: f64,
+    /// When the window resets (epoch ms), if the provider tells us.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resets_at_ms: Option<i64>,
+}
+
+/// Remaining-usage summary for one harness, shown in the Settings → Harnesses
+/// tab. `windows` carries the plan quota buckets (Claude/Codex); `note` +
+/// `manage_url` cover harnesses with no usage API (OpenCode Zen — balance is
+/// dashboard-only). Any subset may be empty; the UI renders whatever is present.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessUsage {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<UsageWindow>,
+    /// When this snapshot was observed (epoch ms) — drives the "as of" line for
+    /// captured (not live-fetched) data like Codex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at_ms: Option<i64>,
+    /// A short explanation shown when there are no windows (e.g. Zen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// External link to manage/top-up usage (Zen dashboard).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manage_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessInfo {
@@ -46,6 +83,9 @@ pub struct HarnessInfo {
     pub models: Vec<ModelInfo>,
     /// Composer toggle vocabulary (permission modes, reasoning levels).
     pub options: super::HarnessOptions,
+    /// Remaining plan quota, when the harness exposes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<HarnessUsage>,
 }
 
 impl HarnessInfo {
@@ -65,6 +105,7 @@ impl HarnessInfo {
             agent_note: None,
             models: Vec::new(),
             options: super::HarnessOptions::none(),
+            usage: None,
         }
     }
 
@@ -141,6 +182,88 @@ pub(super) fn jwt_payload(token: &str) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Best-effort authenticated GET returning the JSON body. Short timeout, no
+/// retries — a usage probe must never slow detection or fail it: any error
+/// (offline, 401, timeout, non-JSON) just yields `None` and the harness renders
+/// without a usage row. `headers` are `(name, value)` pairs.
+pub(super) async fn get_json_authed(url: &str, headers: &[(&str, String)]) -> Option<Value> {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_default()
+    });
+    let mut req = client.get(url);
+    for (k, v) in headers {
+        req = req.header(*k, v);
+    }
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json::<Value>().await.ok()
+}
+
+/// Parse an RFC-3339 / ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SS[.fff][Z]`)
+/// to epoch milliseconds, so a provider's ISO reset time normalizes to the same
+/// numeric `resetsAtMs` Codex's unix-seconds resets produce. Best-effort:
+/// fractional seconds and a trailing `Z` are ignored, a numeric `+HH:MM` offset
+/// is applied, and anything unparseable returns `None`. Not a general date
+/// library — just enough for the usage reset fields.
+pub(super) fn iso8601_to_epoch_ms(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (date, rest) = s.split_once('T').or_else(|| s.split_once(' '))?;
+    let mut dp = date.split('-');
+    let year: i64 = dp.next()?.parse().ok()?;
+    let month: i64 = dp.next()?.parse().ok()?;
+    let day: i64 = dp.next()?.parse().ok()?;
+
+    // Strip the zone suffix off the time, capturing any numeric offset.
+    let mut offset_min: i64 = 0;
+    let mut time = rest;
+    if let Some(t) = time.strip_suffix('Z').or_else(|| time.strip_suffix('z')) {
+        time = t;
+    } else if let Some(idx) = time.rfind(['+', '-']) {
+        // Only treat +/- as an offset if it follows the time (not the very
+        // first char) and looks like HH:MM / HHMM.
+        if idx > 0 {
+            let sign = if &time[idx..idx + 1] == "-" { -1 } else { 1 };
+            let off = &time[idx + 1..];
+            let (oh, om) = match off.split_once(':') {
+                Some((h, m)) => (h.parse::<i64>().ok()?, m.parse::<i64>().ok()?),
+                None if off.len() == 4 => {
+                    (off[..2].parse::<i64>().ok()?, off[2..].parse::<i64>().ok()?)
+                }
+                None => (off.parse::<i64>().ok()?, 0),
+            };
+            offset_min = sign * (oh * 60 + om);
+            time = &time[..idx];
+        }
+    }
+    let time = time.split('.').next().unwrap_or(time); // drop fractional seconds
+    let mut tp = time.split(':');
+    let hour: i64 = tp.next()?.parse().ok()?;
+    let minute: i64 = tp.next().unwrap_or("0").parse().ok()?;
+    let second: i64 = tp.next().unwrap_or("0").parse().ok()?;
+
+    let days = days_from_civil(year, month, day);
+    let secs = days * 86_400 + hour * 3_600 + minute * 60 + second - offset_min * 60;
+    Some(secs * 1_000)
+}
+
+/// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's
+/// `days_from_civil`). Valid for any date; used only by `iso8601_to_epoch_ms`.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 pub(super) fn title_case(word: &str) -> String {
     let mut chars = word.chars();
     match chars.next() {
@@ -169,6 +292,30 @@ mod tests {
         assert_eq!(resolve_symlinks(link), real.canonicalize().unwrap());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn iso8601_parses_utc_and_offsets() {
+        // Epoch.
+        assert_eq!(iso8601_to_epoch_ms("1970-01-01T00:00:00Z"), Some(0));
+        // A known instant: 2025-07-23T18:00:00Z == 1753293600 s.
+        assert_eq!(
+            iso8601_to_epoch_ms("2025-07-23T18:00:00Z"),
+            Some(1_753_293_600_000)
+        );
+        // Fractional seconds are dropped, not fatal.
+        assert_eq!(
+            iso8601_to_epoch_ms("2025-07-23T18:00:00.123Z"),
+            Some(1_753_293_600_000)
+        );
+        // A +02:00 offset shifts back to UTC (same wall time, 2h earlier epoch).
+        assert_eq!(
+            iso8601_to_epoch_ms("2025-07-23T20:00:00+02:00"),
+            Some(1_753_293_600_000)
+        );
+        // Junk is None, never a panic.
+        assert_eq!(iso8601_to_epoch_ms("not-a-date"), None);
+        assert_eq!(iso8601_to_epoch_ms(""), None);
     }
 
     #[test]

@@ -2,15 +2,18 @@ import {
   Check,
   ChevronRight,
   CornerDownLeft,
-  FlaskConical,
+  Gamepad2,
   FolderOpen,
   HelpCircle,
   MoreHorizontal,
   PanelLeft,
   Plus,
+  Settings,
   SlidersHorizontal,
   X,
 } from "lucide-react";
+import { personaMeta, PersonaBadge, PersonaPicker, DEFAULT_PERSONA } from "./personaMeta";
+import { UsagePill } from "./UsagePill";
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Wordmark } from "./Wordmark";
 import {
@@ -22,6 +25,12 @@ import {
   interruptChat,
   listChatSessions,
   listProjectBranches,
+  listProposals,
+  approveProposal,
+  dismissProposal,
+  getPersonas,
+  getHarnesses,
+  modelLabel,
   renameChatSession,
   respondChat,
   sendChatMessage,
@@ -33,6 +42,8 @@ import {
   type ChatPrompt,
   type ChatSession,
   type Harness,
+  type AgentProposal,
+  type PersonaInfo,
   type PromptAnswer,
   type SkillInfo,
 } from "../api";
@@ -51,6 +62,22 @@ import {
 } from "./ModelPicker";
 
 const SELECTION_STORAGE_KEY = "orx:agent-selection";
+
+/** Tooltip for the persona bar, keyed by the persona wire id (null = research). */
+function personaTitle(persona?: string | null): string {
+  switch (persona) {
+    case "game-designer":
+      return "Game designer persona";
+    case "idea-foundry":
+      return "Idea foundry persona";
+    case "analyst":
+      return "Analyst persona";
+    case "producer":
+      return "Producer persona";
+    default:
+      return "Research agent persona";
+  }
+}
 
 function loadSelection(): ModelSelection | null {
   try {
@@ -677,6 +704,136 @@ function SessionFilterMenu({
   );
 }
 
+/** A pending dispatch proposal, rendered as an approval card in the rail. The
+ * orchestrator's suggestion pre-fills persona/provider/model; the human can
+ * edit any of them before spawning (or dismiss). Provider list is limited to
+ * installed + authed harnesses. */
+function ProposalCard({
+  proposal,
+  personas,
+  harnesses,
+  onResolved,
+}: {
+  proposal: AgentProposal;
+  personas: PersonaInfo[];
+  harnesses: Harness[];
+  onResolved: () => void;
+}) {
+  const [persona, setPersona] = useState(proposal.persona ?? "");
+  const [harness, setHarness] = useState(proposal.harness ?? "");
+  const [model, setModel] = useState(proposal.model ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const pm = personaMeta(persona || "research");
+  const PIcon = pm.Icon;
+  const ready = harnesses.filter((h) => h.agentReady);
+  const models = ready.find((h) => h.id === harness)?.models ?? [];
+  // A suggested model that isn't valid for the chosen provider (e.g. gpt-5.1 on
+  // Codex) reads as — and is sent as — the harness default, so what's shown
+  // matches what spawns. Empty string = default.
+  const effectiveModel = models.some((m) => m.id === model) ? model : "";
+
+  async function act(fn: () => Promise<unknown>) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await fn();
+      onResolved();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "failed");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={`proposal-card ${pm.cls}`} style={{ ["--accent" as string]: pm.color }}>
+      <div className="proposal-eyebrow">
+        <PIcon size={14} style={{ color: pm.color }} />
+        Suggested next · <b>{pm.label}</b>
+      </div>
+      <div className="proposal-task" title={proposal.task}>
+        {proposal.task}
+      </div>
+      {proposal.why && <div className="proposal-why">{proposal.why}</div>}
+      {editing && (
+        <div className="proposal-fields">
+          <label>
+            Agent
+            <select value={persona} onChange={(e) => setPersona(e.target.value)} disabled={busy}>
+              {personas.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Provider
+            <select
+              value={harness}
+              onChange={(e) => {
+                setHarness(e.target.value);
+                setModel("");
+              }}
+              disabled={busy}
+            >
+              {ready.map((h) => (
+                <option key={h.id} value={h.id}>
+                  {h.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Model
+            <select
+              value={effectiveModel}
+              onChange={(e) => setModel(e.target.value)}
+              disabled={busy}
+            >
+              <option value="">(harness default)</option>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {modelLabel(m.id)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
+      {err && <div className="proposal-err">{err}</div>}
+      <div className="proposal-actions">
+        <button
+          className="proposal-approve"
+          disabled={busy || !harness}
+          onClick={() =>
+            act(() =>
+              approveProposal(proposal.id, {
+                persona: persona || undefined,
+                harness: harness || undefined,
+                model: effectiveModel || undefined,
+              }),
+            )
+          }
+        >
+          Approve →
+        </button>
+        <button className="proposal-secondary" disabled={busy} onClick={() => setEditing((v) => !v)}>
+          {editing ? "Done" : "Change agent"}
+        </button>
+        <button
+          className="proposal-secondary"
+          disabled={busy}
+          onClick={() => act(() => dismissProposal(proposal.id))}
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** One Recents row. Hover swaps the timestamp for a three-dot menu with
  * Rename, Archive/Unarchive, and Delete (Claude-desktop style). Rename turns
  * the title into an inline input. */
@@ -686,6 +843,7 @@ function SessionRow({
   busy,
   waiting,
   persona,
+  depth = 0,
   onOpen,
   onRename,
   onSetArchived,
@@ -696,8 +854,10 @@ function SessionRow({
   busy: boolean;
   /** Turn held on an unanswered card: steady dot, not the working pulse. */
   waiting: boolean;
-  /** The project's persona wire id — colors the row's persona bar. */
+  /** The project's persona wire id — the fallback when the session has none. */
   persona?: string | null;
+  /** Nesting depth in the Recents thread (0 = top-level orchestrator). */
+  depth?: number;
   onOpen: () => void;
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
@@ -705,6 +865,11 @@ function SessionRow({
 }) {
   const { open, setOpen, ref } = usePopover();
   const title = session.title?.trim() || "Untitled";
+  // The session's own persona wins; fall back to the project's.
+  const rowPersona = session.persona ?? persona ?? "research";
+  const provider = `${HARNESS_LABELS[session.harness] ?? session.harness}${
+    session.model ? ` · ${session.model}` : ""
+  }`;
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
   const [draft, setDraft] = useState("");
@@ -737,7 +902,8 @@ function SessionRow({
       tabIndex={0}
       className={`session-row ${active ? "active" : ""} ${open ? "menu-open" : ""} ${
         editing ? "editing" : ""
-      }`}
+      } ${depth > 0 ? "nested" : ""}`}
+      style={depth > 0 ? { paddingLeft: 10 + depth * 16 } : undefined}
       title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}`}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
@@ -765,8 +931,8 @@ function SessionRow({
         {busy && <span className={`busy-dot ${waiting ? "waiting" : ""}`} />}
       </span>
       <span
-        className={`persona-bar sm persona-${persona ?? "research"}`}
-        title={persona === "game-designer" ? "Game designer persona" : "Research agent persona"}
+        className={`persona-bar sm persona-${rowPersona}`}
+        title={personaTitle(rowPersona)}
       />
       {editing ? (
         <input
@@ -789,7 +955,13 @@ function SessionRow({
           }}
         />
       ) : (
-        <span className="session-title">{title}</span>
+        <span className="session-titlewrap">
+          <span className="session-title">{title}</span>
+          <span className="session-sub" title={`${personaMeta(rowPersona).label} · ${provider}`}>
+            <PersonaBadge persona={rowPersona} compact size={12} />
+            {provider}
+          </span>
+        </span>
       )}
       <span className="session-time">{relTime(session.updatedAt)}</span>
       <button
@@ -892,6 +1064,33 @@ export function ChatPanel({
 }) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  // Subagent dispatch proposals (orchestrator suggests → human approves).
+  // (Available harnesses come from the existing `harnesses` state below, which
+  // a child populates via onHarnesses.)
+  const [proposals, setProposals] = useState<AgentProposal[]>([]);
+  const [personas, setPersonas] = useState<PersonaInfo[]>([]);
+  const reloadProposals = () =>
+    listProposals(projectId).then(setProposals).catch(() => {});
+  useEffect(() => {
+    getPersonas().then(setPersonas).catch(() => {});
+  }, []);
+  // Poll proposals for this project — new suggestions surface without a reload.
+  useEffect(() => {
+    setProposals([]);
+    let live = true;
+    const load = () =>
+      listProposals(projectId)
+        .then((p) => {
+          if (live) setProposals(p);
+        })
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 4000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [projectId]);
   // Fork-point branches for the composer's baseline picker (origin branches,
   // orx/* excluded). Fetched once per project; the picker hides until loaded.
   const [branches, setBranches] = useState<string[]>([]);
@@ -910,6 +1109,12 @@ export function ChatPanel({
     busySessions: new Set<string>(),
   });
   const [harnesses, setHarnesses] = useState<Harness[]>([]);
+  // The composer's model picker also feeds this via onHarnesses, but the
+  // proposal approval cards render independently — fetch directly so their
+  // provider dropdown is populated even before a picker mounts.
+  useEffect(() => {
+    getHarnesses().then(setHarnesses).catch(() => {});
+  }, []);
   const [selection, setSelection] = useState<ModelSelection | null>(loadSelection);
   // Unsent composer tweaks (model/mode/reasoning) for the *open* session — the
   // session's harness is fixed, so these override only its mutable settings and
@@ -1220,6 +1425,9 @@ export function ChatPanel({
           model: effective!.model,
           permissionMode: effective!.permissionMode,
           reasoningLevel: effective!.reasoningLevel,
+          // Persona chosen in the header badge (defaults to producer — the
+          // orchestrator that leads the pipeline and hands off to the others).
+          persona: composerPersona,
         });
         loadedSessions.current.add(session.id);
         setSessions((cur) => [session, ...cur]);
@@ -1379,10 +1587,18 @@ export function ChatPanel({
     sessionFilter === "all" ? true : sessionFilter === "archived" ? s.archived : !s.archived,
   );
 
+  // Settings sections collapse under one "Settings" item — the rail leads with
+  // the three things that matter: New session, Files, and Recents. Auto-open the
+  // group when one of its sections is the current view.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const inSettings = SETTINGS_NAV.some((s) => s.id === mainView);
+  // Persona the next new session will start as (chosen via the header badge).
+  const [composerPersona, setComposerPersona] = useState<string>(DEFAULT_PERSONA);
+
   const rail = (
     <aside className="session-rail floating-panel">
       {railHeader}
-      {/* Top nav: new session + the settings sections (shown in the middle pane). */}
+      {/* Top nav: new session + files; settings sections fold into a submenu. */}
       <nav className="rail-nav">
         <button
           className="rail-nav-item"
@@ -1403,17 +1619,31 @@ export function ChatPanel({
           <FolderOpen size={15} />
           Files
         </button>
-        {SETTINGS_NAV.map((item) => (
-          <button
-            key={item.id}
-            className={`rail-nav-item ${mainView === item.id ? "active" : ""}`}
-            data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
-            onClick={() => onSelectMainView(item.id)}
-          >
-            {item.icon}
-            {item.label}
-          </button>
-        ))}
+        <button
+          className={`rail-nav-item settings-toggle ${inSettings ? "active" : ""}`}
+          aria-expanded={settingsOpen || inSettings}
+          onClick={() => setSettingsOpen((v) => !v)}
+        >
+          <Settings size={15} />
+          Settings
+          <ChevronRight
+            size={14}
+            className="settings-chev"
+            style={{ transform: settingsOpen || inSettings ? "rotate(90deg)" : "none" }}
+          />
+        </button>
+        {(settingsOpen || inSettings) &&
+          SETTINGS_NAV.map((item) => (
+            <button
+              key={item.id}
+              className={`rail-nav-item rail-nav-sub ${mainView === item.id ? "active" : ""}`}
+              data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
+              onClick={() => onSelectMainView(item.id)}
+            >
+              {item.icon}
+              {item.label}
+            </button>
+          ))}
       </nav>
       <div className="rail-body">
         <div className="rail-section-head">
@@ -1422,23 +1652,43 @@ export function ChatPanel({
           </div>
           <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} />
         </div>
-        {visibleSessions.map((s) => (
-          <SessionRow
-            key={s.id}
-            session={s}
-            active={s.id === activeId && mainView === "chat"}
-            busy={state.busySessions.has(s.id)}
-            waiting={sessionWaiting(s.id)}
-            persona={persona}
-            onOpen={() => {
-              setActiveId(s.id);
-              onSelectMainView("chat");
-            }}
-            onRename={(title) => rename(s, title)}
-            onSetArchived={(archived) => setArchived(s, archived)}
-            onDelete={() => void removeSession(s)}
-          />
-        ))}
+        {(() => {
+          // Group into a thread: each session followed by the subagents it
+          // spawned (parentSessionId), indented. A session whose parent isn't
+          // visible renders at the top level.
+          const byParent = new Map<string, ChatSession[]>();
+          for (const s of visibleSessions) {
+            const pid = s.parentSessionId ?? "";
+            (byParent.get(pid) ?? byParent.set(pid, []).get(pid)!).push(s);
+          }
+          const ids = new Set(visibleSessions.map((s) => s.id));
+          const roots = visibleSessions.filter(
+            (s) => !s.parentSessionId || !ids.has(s.parentSessionId),
+          );
+          const row = (s: ChatSession, depth: number) => (
+            <SessionRow
+              key={s.id}
+              session={s}
+              depth={depth}
+              active={s.id === activeId && mainView === "chat"}
+              busy={state.busySessions.has(s.id)}
+              waiting={sessionWaiting(s.id)}
+              persona={persona}
+              onOpen={() => {
+                setActiveId(s.id);
+                onSelectMainView("chat");
+              }}
+              onRename={(title) => rename(s, title)}
+              onSetArchived={(archived) => setArchived(s, archived)}
+              onDelete={() => void removeSession(s)}
+            />
+          );
+          const tree = (s: ChatSession, depth: number): React.ReactNode[] => [
+            row(s, depth),
+            ...(byParent.get(s.id) ?? []).flatMap((c) => tree(c, depth + 1)),
+          ];
+          return roots.flatMap((r) => tree(r, 0));
+        })()}
         {visibleSessions.length === 0 && (
           <div className="rail-empty">
             {sessionFilter === "archived"
@@ -1492,10 +1742,27 @@ export function ChatPanel({
           right, fading into the chat below (sessions live in the rail). */}
       <div className={headerClass}>
         {railReopen}
-        <span
-          className={`persona-bar persona-${persona ?? "research"}`}
-          title={persona === "game-designer" ? "Game designer persona" : "Research agent persona"}
-        />
+        {(() => {
+          // active session shows its own persona (null → research), locked; a
+          // fresh session shows an editable picker defaulting to the producer.
+          const shownPersona = activeSession
+            ? activeSession.persona ?? "research"
+            : composerPersona;
+          return (
+            <>
+              <span
+                className={`persona-bar persona-${shownPersona}`}
+                title={personaTitle(shownPersona)}
+                style={{ background: personaMeta(shownPersona).color }}
+              />
+              <PersonaPicker
+                value={shownPersona}
+                onChange={setComposerPersona}
+                locked={!!activeSession}
+              />
+            </>
+          );
+        })()}
         <div
           className="title"
           title={activeSession ? activeSession.title?.trim() || "Untitled" : "New session"}
@@ -1514,11 +1781,11 @@ export function ChatPanel({
         )}
         <button
           className={`icon-btn ${panelOpen ? "active" : ""}`}
-          title="Experiments"
-          aria-label="Experiments"
+          title="Gallery"
+          aria-label="Gallery"
           onClick={onTogglePanel}
         >
-          <FlaskConical size={15} />
+          <Gamepad2 size={15} />
         </button>
       </div>
 
@@ -1528,8 +1795,8 @@ export function ChatPanel({
             <Wordmark />
           </h2>
           <p>
-            Ask the agent to explore your codebase, create and run your baseline experiment, and
-            branch variants off it.
+            Pitch a game idea — even one vague line. The Producer captures it into a thesis, gets it
+            scored, and leads you to a playable, handing off to the other agents as it goes.
           </p>
           <EmptyStateAgentHint
             harnesses={harnesses}
@@ -1570,6 +1837,19 @@ export function ChatPanel({
                 onOpenPlan={openPlan}
               />
             ))}
+            {/* Subagent-dispatch suggestions from THIS session render inline as
+                approval cards, like plan/permission cards. */}
+            {proposals
+              .filter((p) => p.status === "pending" && p.parentSessionId === activeId)
+              .map((p) => (
+                <ProposalCard
+                  key={p.id}
+                  proposal={p}
+                  personas={personas}
+                  harnesses={harnesses}
+                  onResolved={reloadProposals}
+                />
+              ))}
             {busy &&
               (awaitingInput ? (
                 <div className="working awaiting">Waiting for your input…</div>
@@ -1724,6 +2004,8 @@ export function ChatPanel({
               }}
             />
             <div style={{ flex: 1 }} />
+            {/* Usage window for the active harness — percent left + reset time. */}
+            <UsagePill harness={harnesses.find((h) => h.id === composerSelection?.harness)} />
             {/* Bottom-right: model, then reasoning level. The picker reflects the
                 open session (harness locked once it exists); the global default
                 only applies before the first message. */}

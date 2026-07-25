@@ -113,6 +113,50 @@ const SYSTEM_PROMPT: &str = include_str!("../../SYSTEM_PROMPT.md");
 /// game-design loop (branch → build → play → verdict) instead of the
 /// auto-research loop. Selected via `local_projects.persona`.
 const SYSTEM_PROMPT_GAME: &str = include_str!("../../SYSTEM_PROMPT_GAME.md");
+/// The idea-foundry persona's playbook template — same token vocabulary, an
+/// interview loop (infer → propose → name → capture) instead of a run loop; it
+/// launches no compute. Selected via `local_projects.persona`.
+const SYSTEM_PROMPT_IDEA: &str = include_str!("../../SYSTEM_PROMPT_IDEA.md");
+/// The analyst persona's playbook template — evaluates an idea node against the
+/// 35-signal rubric (keyless: agent codes signals, sim does the math).
+const SYSTEM_PROMPT_ANALYST: &str = include_str!("../../SYSTEM_PROMPT_ANALYST.md");
+/// The producer persona's playbook template — the orchestrator that runs the
+/// discovery funnel by *suggesting* subagents (human approves), never doing the
+/// worker jobs itself.
+const SYSTEM_PROMPT_PRODUCER: &str = include_str!("../../SYSTEM_PROMPT_PRODUCER.md");
+
+/// Appended to EVERY persona's playbook (not just the producer) so any session
+/// knows the one correct way to involve another agent. Without this, a worker
+/// asked to "spawn an analyst" falls back to its harness's native sub-agent tool
+/// (codex `subAgentActivity`, Claude `Task`) — same-provider, invisible to orx,
+/// and its result is never tracked (it can finish and report nothing). Contains
+/// `{session_id}`, resolved by the render-time token replace.
+const DISPATCH_RULE: &str = "\
+## Spawning or handing off to another agent
+
+To involve another agent — an analyst to score an idea, a game-designer to build \
+it, a fresh idea pass, a specialist on any provider — **never use your harness's \
+own sub-agent / Task / subagent tool.** Those run same-provider and are invisible \
+to orx: they don't show in the dashboard, don't nest in Recents, and their result \
+is not tracked (a native subagent can finish and report nothing back — that is a \
+silent failure, not a handoff). The ONLY correct way is to **suggest an orx \
+sub-session** the human approves:
+
+```sh
+orx agent suggest --from-session {session_id} \\
+  --persona <idea-foundry|analyst|game-designer|producer> \\
+  --harness <claude-code|codex|opencode> --model <model-id> \\
+  --parent <experimentNodeId> \\
+  --task \"<what the subagent should do — name the node id>\" \\
+  --why \"<one line: why this persona + provider fits>\"
+```
+
+`--from-session {session_id}` is THIS session: the suggestion renders as an \
+approval card in this chat and nests the spawned agent under you in Recents. The \
+human approves (and may swap provider/model); it becomes a first-class orx session \
+— any provider — that reports back on its node. If the user names a provider/model \
+(e.g. \"an analyst on gpt-5.6-sol\"), put it in the suggestion; they still approve.
+";
 
 /// A persona's playbook template with the leading repo-reader HTML comment
 /// stripped — the text tokens are substituted into at render time, and what
@@ -121,19 +165,22 @@ pub fn persona_template(persona: Persona) -> &'static str {
     let raw = match persona {
         Persona::Research => SYSTEM_PROMPT,
         Persona::GameDesigner => SYSTEM_PROMPT_GAME,
+        Persona::IdeaFoundry => SYSTEM_PROMPT_IDEA,
+        Persona::Analyst => SYSTEM_PROMPT_ANALYST,
+        Persona::Producer => SYSTEM_PROMPT_PRODUCER,
     };
     raw.split_once("-->\n\n")
         .map(|(_, rest)| rest)
         .unwrap_or(raw)
 }
 
-fn playbook_md(project: &LocalProject) -> String {
-    playbook_md_with_memory(project, &super::memory::memory_section(project))
+fn playbook_md(project: &LocalProject, session_id: &str) -> String {
+    playbook_md_with_memory(project, session_id, &super::memory::memory_section(project))
 }
 
 /// The render body, with the `{memory}` block passed in so tests can render
 /// the playbook without touching the developer's real memory files.
-fn playbook_md_with_memory(project: &LocalProject, memory: &str) -> String {
+fn playbook_md_with_memory(project: &LocalProject, session_id: &str, memory: &str) -> String {
     let id = &project.id;
     let name = &project.name;
     let repo = format!("{}/{}", project.github_owner, project.github_repo);
@@ -228,10 +275,13 @@ fn playbook_md_with_memory(project: &LocalProject, memory: &str) -> String {
         .map(|s| format!("- **{}** — {}", s.name, s.description))
         .collect::<Vec<_>>()
         .join("\n");
-    let template = persona_template(persona);
+    // Every persona gets the shared cross-agent dispatch rule appended, so no
+    // session ever falls back to its harness's native (invisible) subagent tool.
+    let template = format!("{}\n\n{}", persona_template(persona), DISPATCH_RULE);
     template
         .replace("{name}", name)
         .replace("{id}", id)
+        .replace("{session_id}", session_id)
         .replace("{repo}", &repo)
         .replace("{baseline}", baseline)
         .replace("{paper_line}", &paper_line)
@@ -310,7 +360,7 @@ pub fn ensure_playbook(
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
-    std::fs::write(&playbook, playbook_md(project))
+    std::fs::write(&playbook, playbook_md(project, session_id))
         .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
     // Modular skills, written fresh beside the playbook (same freshness
     // semantics) so this session's agent discovers them natively.
@@ -650,7 +700,7 @@ mod tests {
             None,
             None,
         );
-        playbook_md_with_memory(&sample_project(persona), &memory)
+        playbook_md_with_memory(&sample_project(persona), "chat_sample", &memory)
     }
 
     /// Each persona's playbook "## Skills" index must list exactly that
@@ -700,6 +750,7 @@ mod tests {
             for token in [
                 "{name}",
                 "{id}",
+                "{session_id}",
                 "{repo}",
                 "{baseline}",
                 "{paper_line}",
@@ -721,21 +772,60 @@ mod tests {
             let title = match persona {
                 Persona::Research => "# OpenResearch local agent",
                 Persona::GameDesigner => "# OpenResearch game-design agent",
+                Persona::IdeaFoundry => "# OpenResearch idea agent",
+                Persona::Analyst => "# OpenResearch analyst agent",
+                Persona::Producer => "# OpenResearch producer agent",
             };
             assert!(md.starts_with(title), "template comment not stripped");
             assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
             // Sanity: the slimmed pointers to the modules survived, and each
             // persona points only at its own modules.
-            assert!(md.contains("orx-compute"));
-            assert!(md.contains("orx-evidence"));
             match persona {
                 Persona::Research => {
+                    assert!(md.contains("orx-compute"));
+                    assert!(md.contains("orx-evidence"));
                     assert!(md.contains("orx-reports"));
                     assert!(md.contains("orx-lit"));
                     assert!(!md.contains("orx-play"));
+                    assert!(!md.contains("orx-ideate"));
                 }
                 Persona::GameDesigner => {
+                    assert!(md.contains("orx-compute"));
+                    assert!(md.contains("orx-evidence"));
                     assert!(md.contains("orx-play"));
+                    assert!(!md.contains("orx-reports"));
+                    assert!(!md.contains("orx-lit"));
+                    assert!(!md.contains("orx-ideate"));
+                }
+                // The interview persona launches nothing — no compute, evidence,
+                // or play modules, just the single ideate skill.
+                Persona::IdeaFoundry => {
+                    assert!(md.contains("orx-ideate"));
+                    assert!(!md.contains("orx-compute"));
+                    assert!(!md.contains("orx-evidence"));
+                    assert!(!md.contains("orx-play"));
+                    assert!(!md.contains("orx-reports"));
+                    assert!(!md.contains("orx-lit"));
+                }
+                // The analyst evaluates: the evaluate skill + git (to commit the
+                // coding sidecar), nothing else.
+                Persona::Analyst => {
+                    assert!(md.contains("orx-evaluate"));
+                    assert!(md.contains("orx-git"));
+                    assert!(!md.contains("orx-compute"));
+                    assert!(!md.contains("orx-evidence"));
+                    assert!(!md.contains("orx-play"));
+                    assert!(!md.contains("orx-reports"));
+                    assert!(!md.contains("orx-lit"));
+                    assert!(!md.contains("orx-ideate"));
+                }
+                // The producer orchestrates via one skill; it launches no runs
+                // and does no worker job itself.
+                Persona::Producer => {
+                    assert!(md.contains("orx-produce"));
+                    assert!(!md.contains("orx-compute"));
+                    assert!(!md.contains("orx-evidence"));
+                    assert!(!md.contains("orx-play"));
                     assert!(!md.contains("orx-reports"));
                     assert!(!md.contains("orx-lit"));
                 }

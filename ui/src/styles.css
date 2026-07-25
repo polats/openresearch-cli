@@ -576,6 +576,93 @@ textarea::placeholder {
   background: var(--panel);
   font-weight: var(--fw-semibold);
 }
+/* collapsible Settings group in the rail */
+.rail-nav-item.settings-toggle {
+  color: var(--subtext);
+}
+.rail-nav-item .settings-chev {
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 0.12s ease;
+}
+.rail-nav-item.rail-nav-sub {
+  margin-left: 12px;
+  padding-left: 12px;
+  font-size: var(--fs-sm);
+  color: var(--subtext);
+  border-left: 1px solid var(--border-variant);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+.rail-nav-item.rail-nav-sub.active {
+  color: var(--text);
+}
+
+/* Appearance / theme picker */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+  max-width: 560px;
+}
+.theme-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 12px);
+  background: var(--surface-bright);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, transform 0.06s ease;
+}
+.theme-card:hover {
+  border-color: var(--muted);
+}
+.theme-card.active {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+.theme-swatches {
+  display: flex;
+  height: 46px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-variant);
+  padding: 7px;
+  gap: 6px;
+  align-items: center;
+}
+.theme-swatches i {
+  flex: 1;
+  height: 100%;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
+}
+.theme-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.theme-name {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--text);
+}
+.theme-jp {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.theme-check {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  color: var(--primary);
+  font-weight: 800;
+  font-size: 13px;
+}
 
 .rail-section-label {
   padding: 10px 10px 6px;
@@ -1565,6 +1652,31 @@ textarea::placeholder {
   gap: 8px;
   font-size: var(--fs-2xs);
   color: var(--muted);
+}
+/* Ingested run metrics surfaced on the node card (eval alignment/confidence). */
+.exp-node .node-metrics {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.exp-node .node-metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: var(--fs-2xs);
+}
+.exp-node .node-metric-k {
+  color: var(--muted);
+}
+.exp-node .node-metric-v {
+  color: var(--text);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
 }
 /* Direct view shortcuts (Changes / Logs) at the card's foot. */
 .exp-node .node-actions {
@@ -3088,11 +3200,15 @@ a.files-pill:hover {
   color: var(--muted);
 }
 
-/* persona identity colors — blue = research agent, orange = game designer.
-   Used by the Persona tab cards and the session-header persona bar. */
+/* persona identity colors — blue = research agent, orange = game designer,
+   purple = idea foundry. Used by the Persona tab cards and the session-header
+   persona bar. */
 :root {
   --persona-research: var(--accent-blue);
   --persona-game-designer: var(--accent-orange);
+  --persona-idea-foundry: var(--accent-purple);
+  --persona-analyst: var(--accent-teal);
+  --persona-producer: var(--accent-pink);
 }
 .persona-swatch {
   flex: none;
@@ -3100,17 +3216,208 @@ a.files-pill:hover {
   height: 10px;
   border-radius: var(--radius-full);
 }
+/* persona badge — colored symbol + label, the primary "who's working" cue */
+.persona-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 9px 3px 7px;
+  border-radius: var(--radius-full);
+  border: 1px solid color-mix(in srgb, currentColor 32%, transparent);
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  white-space: nowrap;
+}
+.persona-badge svg { flex: none; }
+.persona-badge.persona-research { color: var(--persona-research); }
+.persona-badge.persona-game-designer { color: var(--persona-game-designer); }
+.persona-badge.persona-idea-foundry { color: var(--persona-idea-foundry); }
+.persona-badge.persona-analyst { color: var(--persona-analyst); }
+.persona-badge.persona-producer { color: var(--persona-producer); }
+/* compact variant for dense rows (icon only, or tiny label) */
+.persona-badge.compact { padding: 2px; border-color: transparent; background: transparent; }
+
+/* usage window pill in the composer */
+.usage-pill-wrap { position: relative; display: inline-flex; }
+.usage-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.usage-pill:hover { border-color: var(--muted); }
+.usage-pill b { color: var(--text); font-weight: var(--fw-semibold); font-variant-numeric: tabular-nums; }
+.usage-pill .usage-reset { color: var(--faint, var(--muted)); font-family: var(--mono); font-size: var(--fs-xs); }
+.usage-pill .usage-ghost { color: var(--muted); }
+.usage-ring { flex: none; display: block; }
+.usage-pill.warn { border-color: color-mix(in srgb, var(--accent-amber) 45%, var(--border)); background: color-mix(in srgb, var(--accent-amber) 9%, var(--surface)); }
+.usage-pill.warn b { color: var(--accent-amber); }
+.usage-pill.crit { border-color: color-mix(in srgb, var(--accent-red) 50%, var(--border)); background: color-mix(in srgb, var(--accent-red) 10%, var(--surface)); }
+.usage-pill.crit b { color: var(--accent-red); }
+
+.usage-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  width: 288px;
+  max-width: 84vw;
+  background: var(--surface-bright);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 12px);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.14);
+  overflow: hidden;
+}
+.usage-pop-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 13px 8px;
+  font-size: var(--fs-sm);
+}
+.usage-pop-h .who { font-weight: var(--fw-semibold); color: var(--text); }
+.usage-pop-h .obs { font-size: var(--fs-xs); color: var(--muted); font-family: var(--mono); }
+.usage-wrow { display: flex; align-items: center; gap: 11px; padding: 10px 13px; border-top: 1px solid var(--border-variant); }
+.usage-wt { flex: 1; min-width: 0; }
+.usage-wlabel { font-size: var(--fs-md); color: var(--text); font-weight: var(--fw-medium); }
+.usage-wsub { font-size: var(--fs-xs); color: var(--muted); font-family: var(--mono); margin-top: 2px; }
+.usage-bar { height: 6px; border-radius: 4px; background: var(--panel); overflow: hidden; margin-top: 6px; }
+.usage-bar i { display: block; height: 100%; border-radius: 4px; }
+.usage-pct { flex: none; width: 42px; text-align: right; font-size: var(--fs-base); font-weight: var(--fw-semibold); font-variant-numeric: tabular-nums; }
+.usage-empty { padding: 12px 13px; font-size: var(--fs-sm); color: var(--muted); border-top: 1px solid var(--border-variant); }
+.usage-pop-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 13px;
+  border-top: 1px solid var(--border-variant);
+  background: var(--surface);
+  font-size: var(--fs-sm);
+}
+.usage-refresh { display: inline-flex; align-items: center; gap: 5px; font: inherit; font-size: var(--fs-sm); color: var(--subtext); background: none; border: none; cursor: pointer; padding: 0; }
+.usage-refresh:hover:not(:disabled) { color: var(--text); }
+.usage-refresh:disabled { opacity: 0.6; cursor: default; }
+.usage-pop-foot a { color: var(--primary); text-decoration: none; }
+.usage-refresh .spin { animation: usage-spin 0.8s linear infinite; }
+@keyframes usage-spin { to { transform: rotate(360deg); } }
+
+/* clickable persona badge + dropdown (top of chat) */
+.persona-picker { position: relative; display: inline-flex; }
+.persona-badge-btn {
+  cursor: pointer;
+  font: inherit;
+  transition: filter 0.12s ease, box-shadow 0.12s ease;
+}
+.persona-badge-btn:hover { filter: brightness(1.04); box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 30%, transparent); }
+.persona-badge-chev { color: currentColor; opacity: 0.7; margin-left: 1px; }
+
+.persona-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  width: 320px;
+  max-width: 80vw;
+  background: var(--surface-bright);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 12px);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.14);
+  overflow: hidden;
+}
+.persona-menu-h {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 11px 14px 6px;
+}
+.persona-opt {
+  display: flex;
+  gap: 11px;
+  align-items: flex-start;
+  width: 100%;
+  padding: 9px 14px;
+  border: none;
+  border-top: 1px solid var(--border-variant);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.persona-opt:hover { background: var(--surface); }
+.persona-opt.sel { background: color-mix(in srgb, currentColor 8%, transparent); }
+.persona-opt-ic {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 28%, transparent);
+}
+.persona-opt-t { flex: 1; min-width: 0; }
+.persona-opt-n {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+.persona-opt-def {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: currentColor;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+.persona-opt-d {
+  display: block;
+  font-size: var(--fs-sm);
+  color: var(--subtext);
+  margin-top: 1px;
+}
+.persona-opt-check { color: currentColor; font-weight: 800; font-size: 13px; align-self: center; }
+.persona-menu-foot {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  padding: 9px 14px;
+  border-top: 1px solid var(--border-variant);
+  background: var(--surface);
+}
 .persona-swatch.persona-research {
   background: var(--persona-research);
 }
 .persona-swatch.persona-game-designer {
   background: var(--persona-game-designer);
 }
+.persona-swatch.persona-idea-foundry {
+  background: var(--persona-idea-foundry);
+}
 .persona-card.persona-research {
   border-left: 3px solid var(--persona-research);
 }
 .persona-card.persona-game-designer {
   border-left: 3px solid var(--persona-game-designer);
+}
+.persona-card.persona-idea-foundry {
+  border-left: 3px solid var(--persona-idea-foundry);
 }
 .persona-active-pill.persona-research {
   color: var(--persona-research);
@@ -3119,6 +3426,10 @@ a.files-pill:hover {
 .persona-active-pill.persona-game-designer {
   color: var(--persona-game-designer);
   border-color: var(--persona-game-designer);
+}
+.persona-active-pill.persona-idea-foundry {
+  color: var(--persona-idea-foundry);
+  border-color: var(--persona-idea-foundry);
 }
 /* Vertical bar beside the session name — instant persona read. */
 .persona-bar {
@@ -3133,6 +3444,165 @@ a.files-pill:hover {
 .persona-bar.persona-game-designer {
   background: var(--persona-game-designer);
 }
+.persona-bar.persona-idea-foundry {
+  background: var(--persona-idea-foundry);
+}
+/* analyst persona (teal) — swatch, card, pill, bar */
+.persona-swatch.persona-analyst,
+.persona-bar.persona-analyst {
+  background: var(--persona-analyst);
+}
+.persona-card.persona-analyst {
+  border-left: 3px solid var(--persona-analyst);
+}
+.persona-active-pill.persona-analyst {
+  color: var(--persona-analyst);
+  border-color: var(--persona-analyst);
+}
+/* producer persona (pink) — the orchestrator */
+.persona-swatch.persona-producer,
+.persona-bar.persona-producer {
+  background: var(--persona-producer);
+}
+.persona-card.persona-producer {
+  border-left: 3px solid var(--persona-producer);
+}
+.persona-active-pill.persona-producer {
+  color: var(--persona-producer);
+  border-color: var(--persona-producer);
+}
+/* Recents row: title + a muted provider·model subline (glanceable per-session). */
+.session-row .session-titlewrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  overflow: hidden;
+}
+.session-row .session-titlewrap .session-title {
+  flex: 0 0 auto;
+}
+.session-row .session-sub {
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Nested Recents thread: a dispatched subagent nests under its orchestrator. */
+.session-row.nested {
+  border-left: 2px solid var(--border);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  margin-left: 6px;
+}
+.session-row.nested.active {
+  border-left-color: var(--primary);
+}
+
+/* Subagent dispatch approval card — rendered inline in the orchestrator's chat,
+   sharing the plan/permission card chrome (.prompt-card). */
+/* Handoff suggestion card — accented with the suggested agent's persona color.
+   `--accent` is set inline to the persona's color var. */
+.proposal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 13px;
+  border: 1px solid color-mix(in srgb, var(--accent, var(--primary)) 34%, var(--border));
+  border-radius: var(--radius-lg, 12px);
+  background: color-mix(in srgb, var(--accent, var(--primary)) 6%, var(--surface-bright));
+}
+.proposal-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent, var(--primary));
+}
+.proposal-eyebrow b { font-weight: 700; }
+.proposal-task {
+  font-size: var(--fs-md);
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.proposal-why {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  font-style: italic;
+}
+.proposal-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+.proposal-fields label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.proposal-fields select {
+  flex: 1;
+  min-width: 0;
+  max-width: 62%;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-bright);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+.proposal-err {
+  font-size: var(--fs-sm);
+  color: var(--accent-red);
+}
+.proposal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.proposal-approve {
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: #fff;
+  background: var(--accent, var(--primary));
+  border: none;
+  border-radius: var(--radius-md);
+  padding: 7px 16px;
+  cursor: pointer;
+  transition: filter 0.12s ease;
+}
+.proposal-approve:hover:not(:disabled) { filter: brightness(1.06); }
+.proposal-approve:disabled { opacity: 0.55; cursor: default; }
+.proposal-secondary {
+  font: inherit;
+  font-size: var(--fs-md);
+  color: var(--subtext);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 7px 13px;
+  cursor: pointer;
+}
+.proposal-secondary:hover:not(:disabled) { background: var(--surface); color: var(--text); }
+.proposal-secondary:disabled { opacity: 0.55; cursor: default; }
 /* Compact variant for the Recents session rows — snugged up to the title
    (the row's 8px gap reads too airy for a 3px bar). */
 .persona-bar.sm {
@@ -3374,6 +3844,63 @@ a.files-pill:hover {
 }
 .harness-dot.warn {
   background: var(--accent-amber);
+}
+
+/* remaining-usage rows in the Harnesses tab — sans, not the .kv .v mono */
+.harness-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+}
+.usage-window {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.usage-win-label {
+  color: var(--subtext);
+  min-width: 60px;
+}
+.usage-bar {
+  flex: 0 0 88px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.usage-bar-fill {
+  /* Block, not the default inline — inline spans ignore width, which left
+     every bar rendering the same (empty) fill regardless of percentage. */
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent-green);
+  transition: width 0.3s ease;
+}
+.usage-bar-fill.low {
+  background: var(--accent-red);
+}
+.usage-pct {
+  font-variant-numeric: tabular-nums;
+}
+.usage-reset {
+  color: var(--subtext);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.usage-asof {
+  color: var(--subtext);
+  font-size: var(--fs-xs);
+}
+/* note-only usage (Zen / Codex-not-yet): sans, wrap on spaces not mid-word */
+.harness-usage-note {
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 
 /* env var table — fixed layout so buttons appearing never reflow columns */

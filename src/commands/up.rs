@@ -332,6 +332,11 @@ fn router(state: AppState) -> Router {
         // card is answered.
         .route("/api/internal/permissions", post(bridge_permission))
         .route("/api/chat/attachments/{name}", get(chat_attachment))
+        // Subagent dispatch: the orchestrator suggests (via `orx agent suggest`);
+        // the human approves here, which spawns a session with the chosen persona.
+        .route("/api/projects/{id}/proposals", get(list_proposals))
+        .route("/api/agent/proposals/{id}/approve", post(approve_proposal))
+        .route("/api/agent/proposals/{id}/dismiss", post(dismiss_proposal))
         .route("/api/agent/status", get(agent_status))
         .fallback(spa)
         .with_state(state)
@@ -3242,6 +3247,9 @@ struct CreateChatSessionReq {
     model: Option<String>,
     permission_mode: Option<String>,
     reasoning_level: Option<String>,
+    /// Persona wire id for this session; None = inherit the project's persona.
+    /// Lets a dispatched subagent run a different persona on the same project.
+    persona: Option<String>,
 }
 
 async fn create_chat_session(
@@ -3257,6 +3265,11 @@ async fn create_chat_session(
         .get_local_project(&req.project_id)?
         .ok_or_else(|| not_found("project"))?;
     let nonempty = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
+    // Validate the persona wire id up front so a typo is rejected, not stored.
+    let persona = nonempty(req.persona);
+    if let Some(p) = persona.as_deref() {
+        local::agent_skills::Persona::parse(Some(p)).map_err(bad_request)?;
+    }
     let session = StoredChatSession {
         id: format!("chat_{}", uuid::Uuid::new_v4()),
         project_id: req.project_id,
@@ -3266,6 +3279,8 @@ async fn create_chat_session(
         model: nonempty(req.model),
         permission_mode: nonempty(req.permission_mode),
         reasoning_level: nonempty(req.reasoning_level),
+        persona,
+        parent_session_id: None,
         archived: false,
         created_at: now_ms(),
         updated_at: now_ms(),
@@ -3274,6 +3289,140 @@ async fn create_chat_session(
     Ok(Json(
         json!({ "session": local::chat::session_json(&session, false) }),
     ))
+}
+
+// --- subagent dispatch proposals -----------------------------------------------
+
+fn proposal_json(p: &crate::store::StoredAgentProposal) -> serde_json::Value {
+    json!({
+        "id": p.id,
+        "projectId": p.project_id,
+        "parentExperimentId": p.parent_experiment_id,
+        "persona": p.persona,
+        "harness": p.harness,
+        "model": p.model,
+        "task": p.task,
+        "why": p.why,
+        "status": p.status,
+        "sessionId": p.session_id,
+        "parentSessionId": p.parent_session_id,
+        "createdAt": p.created_at,
+        "updatedAt": p.updated_at,
+    })
+}
+
+async fn list_proposals(Path(id): Path<String>) -> ApiResult {
+    let store = Store::open()?;
+    store.get_local_project(&id)?.ok_or_else(|| not_found("project"))?;
+    let props: Vec<serde_json::Value> = store
+        .list_agent_proposals(&id)?
+        .iter()
+        .map(proposal_json)
+        .collect();
+    Ok(Json(json!({ "proposals": props })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApproveProposalReq {
+    /// The human's final picks; each overrides the orchestrator's suggestion.
+    persona: Option<String>,
+    harness: Option<String>,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    reasoning_level: Option<String>,
+}
+
+/// Approve a proposal: spawn a chat session with the chosen persona/harness/
+/// model and run the proposed task as its first turn.
+async fn approve_proposal(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ApproveProposalReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    let prop = store
+        .get_agent_proposal(&id)?
+        .ok_or_else(|| not_found("proposal"))?;
+    if prop.status != "pending" {
+        return Err(bad_request(format!("proposal already {}", prop.status)));
+    }
+    let nonempty = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
+    // The human's choice wins over the orchestrator's suggestion.
+    let persona = nonempty(req.persona).or_else(|| prop.persona.clone());
+    let harness = nonempty(req.harness)
+        .or_else(|| prop.harness.clone())
+        .ok_or_else(|| bad_request("no harness — suggest one or pass it on approve"))?;
+    let model = nonempty(req.model).or_else(|| prop.model.clone());
+    if !local::harness::is_chat_harness(&harness) {
+        return Err(bad_request(format!("unknown harness: {harness}")));
+    }
+    if let Some(p) = persona.as_deref() {
+        local::agent_skills::Persona::parse(Some(p)).map_err(bad_request)?;
+    }
+    store
+        .get_local_project(&prop.project_id)?
+        .ok_or_else(|| not_found("project"))?;
+
+    let session = StoredChatSession {
+        id: format!("chat_{}", uuid::Uuid::new_v4()),
+        project_id: prop.project_id.clone(),
+        harness,
+        native_session_id: None,
+        title: None,
+        model,
+        // An approved subagent runs autonomously in the background — there is no
+        // human at its keyboard to answer per-tool permission prompts, so it would
+        // hang on the first one. Default it to bypass (the human already approved
+        // spawning it); an explicit mode on the approve request still wins.
+        permission_mode: nonempty(req.permission_mode).or_else(|| Some("bypass".to_string())),
+        reasoning_level: nonempty(req.reasoning_level),
+        persona,
+        // Nest the spawned subagent under the orchestrator that suggested it.
+        parent_session_id: prop.parent_session_id.clone(),
+        archived: false,
+        created_at: now_ms(),
+        updated_at: now_ms(),
+    };
+    store.create_chat_session(&session)?;
+    store.set_agent_proposal_status(&id, "approved", Some(&session.id))?;
+
+    // Run the dispatched task as the session's first turn (background; streams
+    // over /api/events like any other turn). Session values are already set, so
+    // no composer overrides needed. Prepend the target node id when the proposal
+    // names one, so the subagent works on the right experiment instead of
+    // guessing (a wrong id routes to the server and fails with "Not logged in").
+    let task = match &prop.parent_experiment_id {
+        Some(exp) => format!("{}\n\n(Target experiment node: `{exp}`.)", prop.task),
+        None => prop.task.clone(),
+    };
+    let overrides = local::chat::TurnOverrides {
+        model: None,
+        permission_mode: None,
+        reasoning_level: None,
+    };
+    state
+        .chat
+        .send_message(&session.id, task, overrides, Vec::new())
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, true) }),
+    ))
+}
+
+async fn dismiss_proposal(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    let prop = store
+        .get_agent_proposal(&id)?
+        .ok_or_else(|| not_found("proposal"))?;
+    if prop.status != "pending" {
+        return Err(bad_request(format!("proposal already {}", prop.status)));
+    }
+    store.set_agent_proposal_status(&id, "dismissed", None)?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {

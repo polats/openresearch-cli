@@ -1,4 +1,4 @@
-//! OpenResearch CLI (`orx`) — Rust port entry point.
+//! Crux (`crux`, alias `orx`) — CLI entry point.
 //!
 //! A clap-derive command tree mirroring the USAGE
 //! block, dispatched from an async `tokio::main`. Each subcommand routes to one
@@ -31,8 +31,8 @@ use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "orx",
-    about = "OpenResearch CLI",
+    name = "crux",
+    about = "Crux — from a game idea to a validated, playable prototype (crux)",
     version,
     disable_help_subcommand = true
 )]
@@ -117,13 +117,16 @@ enum Command {
     /// Operate on one experiment node (status / run command / run / cancel).
     Exp(ExpArgs),
 
+    /// Suggest / list subagent dispatch proposals (orchestrator → human approves).
+    Agent(AgentArgs),
+
     /// Upload, list, show, or download a project's research reports.
     Report(ReportArgs),
 
     /// Print CLI usage for agents, or fetch a skill doc.
     Skill(SkillArgs),
 
-    /// Install the OpenResearch skill into local coding agents (Claude Code, Codex, OpenCode, Cursor).
+    /// Install the Crux skill into local coding agents (Claude Code, Codex, OpenCode, Cursor).
     #[command(name = "install-skills")]
     InstallSkills(InstallSkillsArgs),
 
@@ -148,7 +151,7 @@ enum Command {
     /// safe to re-run after a crash or box replacement.
     Supervise(SuperviseArgs),
 
-    /// Start the local autoresearch dashboard (127.0.0.1 by default; --host
+    /// Start the local Crux dashboard (127.0.0.1 by default; --host
     /// widens the bind): embedded UI, JSON/SSE API over the local store, and
     /// the opencode agent proxy.
     Up(UpArgs),
@@ -455,6 +458,50 @@ pub struct InstanceDeleteArgs {
 pub struct ExpArgs {
     #[command(subcommand)]
     pub command: ExpCommand,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    pub command: AgentCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentCommand {
+    /// Suggest a subagent for the human to approve (does NOT spawn). The human
+    /// can override the persona/harness/model before approving in the dashboard.
+    Suggest {
+        /// The project the subagent runs in.
+        project_id: String,
+        /// What the subagent should do (its first message).
+        #[arg(long)]
+        task: String,
+        /// Suggested persona wire id (e.g. `analyst`, `game-designer`).
+        #[arg(long)]
+        persona: Option<String>,
+        /// Suggested harness (e.g. `claude-code`, `codex`, `opencode`).
+        #[arg(long)]
+        harness: Option<String>,
+        /// Suggested model id.
+        #[arg(long)]
+        model: Option<String>,
+        /// The experiment node the subagent should work on.
+        #[arg(long)]
+        parent: Option<String>,
+        /// The orchestrator session making the suggestion — the spawned subagent
+        /// nests under it in Recents.
+        #[arg(long)]
+        from_session: Option<String>,
+        /// One-line rationale for the suggestion (why this persona/provider).
+        #[arg(long)]
+        why: Option<String>,
+    },
+
+    /// List a project's dispatch proposals (pending + resolved).
+    List { project_id: String },
+
+    /// Show one proposal by id.
+    Status { proposal_id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -874,6 +921,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Compute(_) => "compute",
         Command::Instance(_) => "instance",
         Command::Exp(_) => "exp",
+        Command::Agent(_) => "agent",
         Command::Report(_) => "report",
         Command::Skill(_) => "skill",
         Command::InstallSkills(_) => "install-skills",
@@ -912,6 +960,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Compute(args) => commands::compute::run(args).await,
         Command::Instance(args) => commands::instance::run(args).await,
         Command::Exp(args) => commands::exp::run(args).await,
+        Command::Agent(args) => commands::agent::run(args).await,
         Command::Report(args) => commands::report::run(args).await,
         Command::Skill(args) => commands::skill::run(args).await,
         Command::InstallSkills(args) => commands::install_skills::run(args).await,

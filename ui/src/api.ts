@@ -11,7 +11,7 @@ export interface Project {
   runCommand?: string | null;
   /** arXiv id the project starts from (versionless). */
   paperId?: string | null;
-  /** Agent persona wire id ("research" | "game-designer"); null = research. */
+  /** Agent persona wire id ("research" | "game-designer" | "idea-foundry"); null = research. */
   persona?: string | null;
   /** Automatic [orx] prompt switches; null/absent = all off. */
   autoPrompts?: AutoPrompts | null;
@@ -206,6 +206,42 @@ export interface PersonaInfo {
 
 export const getPersonas = () =>
   get<{ personas: PersonaInfo[] }>("/api/personas").then((r) => r.personas);
+
+/** A subagent dispatch the orchestrator suggested, awaiting the human's OK. */
+export interface AgentProposal {
+  id: string;
+  projectId: string;
+  parentExperimentId?: string | null;
+  persona?: string | null;
+  harness?: string | null;
+  model?: string | null;
+  task: string;
+  why?: string | null;
+  /** "pending" | "approved" | "dismissed". */
+  status: string;
+  sessionId?: string | null;
+  /** The orchestrator session this suggestion belongs to (renders in its chat). */
+  parentSessionId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export const listProposals = (projectId: string) =>
+  get<{ proposals: AgentProposal[] }>(`/api/projects/${projectId}/proposals`).then(
+    (r) => r.proposals,
+  );
+
+/** Approve a proposal; the passed picks override the orchestrator's suggestion. */
+export const approveProposal = (
+  id: string,
+  choice: { persona?: string; harness?: string; model?: string },
+) =>
+  post<{ session: ChatSession }>(`/api/agent/proposals/${id}/approve`, choice).then(
+    (r) => r.session,
+  );
+
+export const dismissProposal = (id: string) =>
+  post<{ ok: boolean }>(`/api/agent/proposals/${id}/dismiss`, {});
 
 /** Record a visit: bumps the project's updatedAt, which drives the recency sort. */
 export const openProject = (projectId: string) =>
@@ -789,6 +825,25 @@ export interface HarnessOptions {
   defaultReasoningLevel?: string | null;
 }
 
+/** One plan-quota bucket, normalized to percent remaining across providers. */
+export interface UsageWindow {
+  label: string;
+  remainingPercent: number;
+  /** Epoch ms when the window resets, if known. */
+  resetsAtMs?: number;
+}
+
+/** Remaining-usage summary for a harness (Settings → Harnesses). */
+export interface HarnessUsage {
+  windows?: UsageWindow[];
+  /** Epoch ms the snapshot was observed — present for captured (Codex) data. */
+  observedAtMs?: number;
+  /** Shown when there are no windows (e.g. OpenCode Zen). */
+  note?: string;
+  /** External link to manage/top-up usage (Zen dashboard). */
+  manageUrl?: string;
+}
+
 export interface Harness {
   id: HarnessId;
   name: string;
@@ -804,6 +859,7 @@ export interface Harness {
   agentNote?: string;
   models: HarnessModel[];
   options: HarnessOptions;
+  usage?: HarnessUsage;
 }
 
 export const getHarnesses = (refresh = false) =>
@@ -900,6 +956,10 @@ export interface ChatSession {
   model: string | null;
   permissionMode: string | null;
   reasoningLevel: string | null;
+  /** The session's own persona wire id; null = inherit the project's persona. */
+  persona?: string | null;
+  /** The orchestrator session that spawned this one; null = top-level. */
+  parentSessionId?: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
   createdAt: number;
@@ -917,6 +977,7 @@ export interface TurnOptions {
   model?: string | null;
   permissionMode?: string | null;
   reasoningLevel?: string | null;
+  persona?: string | null;
 }
 
 export const createChatSession = (

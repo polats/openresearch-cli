@@ -20,7 +20,10 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-use super::detect::{bin_version, find_on_path, nonempty_str, read_json, HarnessInfo};
+use super::detect::{
+    bin_version, find_on_path, get_json_authed, iso8601_to_epoch_ms, nonempty_str, read_json,
+    HarnessInfo, HarnessUsage, UsageWindow,
+};
 use super::options::{HarnessOptions, PermissionMode};
 use super::{Harness, ResumeAction};
 use crate::error::{anyhow, Result};
@@ -105,6 +108,7 @@ impl Harness for ClaudeCode {
         info.agent_ready = info.installed && info.authenticated;
         if info.agent_ready {
             info = info.with_models(&CLAUDE_MODELS);
+            info.usage = fetch_usage(info.version.as_deref()).await;
         } else {
             info.agent_note = Some(
                 "Install Claude Code and sign in (`claude`) to chat with it here.".to_string(),
@@ -290,6 +294,83 @@ impl Harness for ClaudeCode {
     fn session_skills_dir(&self) -> Option<&'static str> {
         Some(".claude/skills")
     }
+}
+
+/// Live-fetch the signed-in account's remaining plan quota from Claude Code's
+/// own usage endpoint (the same `GET /api/oauth/usage` its `/usage` command
+/// hits). Best-effort: reads the OAuth access token from
+/// `~/.claude/.credentials.json`, skips a request it knows will 401 (expired
+/// token), and returns `None` on any error so detection is never blocked.
+/// `version` (from `claude --version`) feeds the User-Agent the endpoint expects.
+async fn fetch_usage(version: Option<&str>) -> Option<HarnessUsage> {
+    let creds =
+        dirs::home_dir().and_then(|h| read_json(h.join(".claude").join(".credentials.json")))?;
+    let oauth = creds.get("claudeAiOauth")?;
+    let token = nonempty_str(oauth, "accessToken")?;
+    // expiresAt is epoch milliseconds; skip the round-trip once it's past.
+    if let Some(exp) = oauth.get("expiresAt").and_then(Value::as_i64) {
+        if exp <= crate::store::now_ms() {
+            return None;
+        }
+    }
+    let ua = format!(
+        "claude-code/{}",
+        version
+            .and_then(|v| v.split_whitespace().next())
+            .unwrap_or("unknown")
+    );
+    let body = get_json_authed(
+        &format!("{}/api/oauth/usage", claude_api_base()),
+        &[
+            ("Authorization", format!("Bearer {token}")),
+            ("anthropic-beta", "oauth-2025-04-20".to_string()),
+            ("Content-Type", "application/json".to_string()),
+            ("User-Agent", ua),
+        ],
+    )
+    .await?;
+
+    // The three subscription windows, most-immediate first. Absent/null windows
+    // (e.g. an api-key or non-subscription account) just drop out.
+    let windows: Vec<UsageWindow> = [
+        ("five_hour", "5h"),
+        ("seven_day", "Weekly"),
+        ("seven_day_sonnet", "Weekly (Sonnet)"),
+    ]
+    .into_iter()
+    .filter_map(|(key, label)| usage_window(body.get(key)?, label))
+    .collect();
+
+    (!windows.is_empty()).then_some(HarnessUsage {
+        windows,
+        // Live-fetched: always current, so no "as of" line.
+        observed_at_ms: None,
+        note: None,
+        manage_url: None,
+    })
+}
+
+/// One `{utilization, resets_at}` window → a normalized [`UsageWindow`]. Claude's
+/// `utilization` is percent *used* (0–100); we store percent remaining.
+fn usage_window(w: &Value, label: &str) -> Option<UsageWindow> {
+    let used = w.get("utilization").and_then(Value::as_f64)?;
+    Some(UsageWindow {
+        label: label.to_string(),
+        remaining_percent: (100.0 - used).clamp(0.0, 100.0),
+        resets_at_ms: w
+            .get("resets_at")
+            .and_then(Value::as_str)
+            .and_then(iso8601_to_epoch_ms),
+    })
+}
+
+/// Base URL for the OAuth usage call, honoring the same `ANTHROPIC_BASE_URL`
+/// override the CLI itself reads so a proxied setup still resolves.
+fn claude_api_base() -> String {
+    std::env::var("ANTHROPIC_BASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://api.anthropic.com".to_string())
 }
 
 /// Session mode → Claude Code `--permission-mode` value. The shared wire ids are
@@ -870,6 +951,23 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_window_normalizes_utilization_to_remaining() {
+        let w = serde_json::json!({ "utilization": 30.0, "resets_at": "2025-07-23T18:00:00Z" });
+        let uw = usage_window(&w, "5h").unwrap();
+        assert_eq!(uw.label, "5h");
+        assert_eq!(uw.remaining_percent, 70.0);
+        assert_eq!(uw.resets_at_ms, Some(1_753_293_600_000));
+        // A window with no reset is fine — just no reset time.
+        let no_reset = serde_json::json!({ "utilization": 100.0 });
+        let uw = usage_window(&no_reset, "Weekly").unwrap();
+        assert_eq!(uw.remaining_percent, 0.0);
+        assert_eq!(uw.resets_at_ms, None);
+        // Null / absent utilization → not a window (filtered out).
+        assert!(usage_window(&serde_json::json!({}), "5h").is_none());
+        assert!(usage_window(&serde_json::Value::Null, "5h").is_none());
+    }
 
     #[test]
     fn plan_card_synthesized_only_for_cardless_texty_plan_turns() {

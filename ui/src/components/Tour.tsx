@@ -30,19 +30,18 @@ const STEPS: TourStep[] = [
   {
     focus: null,
     anchor: null,
-    title: "Welcome to OpenResearch",
+    title: "Welcome to Crux",
     description:
-      "OpenResearch is your home for autoresearch. Spawn and coordinate research agents " +
-      "in one workspace.",
+      "Crux turns a one-line game idea into a validated, playable prototype. A producer " +
+      "orchestrates a crew of AI agents — you approve the moves.",
   },
   {
     focus: ["composer"],
     anchor: "above",
-    title: "Talk to your research agent",
+    title: "Pitch a game idea",
     description:
-      "Prompt your research agents to replicate a paper, create a baseline experiment, " +
-      "run an eval, or investigate any research question. Type / for skills like " +
-      "/reproduce-paper.",
+      "Tell the producer what kind of game you want to make — even one vague line. It captures " +
+      "the idea into a thesis, gets it scored, and leads you to a playable. Type / for skills.",
   },
   {
     focus: ["model-picker"],
@@ -55,34 +54,34 @@ const STEPS: TourStep[] = [
   {
     focus: ["nav-files"],
     anchor: "right",
-    title: "Reports and outputs",
+    title: "Files and outputs",
     description:
-      "The agent writes its reports, figures, and other outputs here, and anything you drop " +
-      "in is visible to it too. Check Files after a run to see what came back.",
+      "Theses, evaluations, and build artifacts land here, and anything you drop in is visible " +
+      "to the agents too. Check Files after a build to see what came back.",
   },
   {
     focus: ["nav-compute"],
     anchor: "right",
-    title: "Configure compute",
+    title: "Where builds run",
     description:
-      "This is where compute is configured. Point runs at this machine, Modal, SSH boxes, " +
-      "Kubernetes, or Slurm. Set it up once and agents pick the right hardware per run.",
+      "Prototypes build on this machine by default. If you need heavier runs, point them at " +
+      "Modal, SSH boxes, Kubernetes, or Slurm — set it up once and agents pick per run.",
   },
   {
     focus: ["experiments"],
     anchor: "left",
-    title: "Follow every experiment",
+    title: "Your game gallery",
     description:
-      "Runs land here as a tree of experiments. Branch variants off a baseline, compare " +
-      "results, and open any run's terminal or code changes in a tab.",
+      "Every idea and prototype lands here. Capture ideas, evaluate them against the market-fit " +
+      "rubric, greenlight the strong ones, and open any prototype's play build, code, or logs.",
   },
   {
     focus: ["new-session"],
     anchor: "right",
     title: "Start a session",
     description:
-      "Each session is its own agent working in its own worktree, so you can run several " +
-      "agents in parallel. Ask for your first experiment whenever you're ready.",
+      "Each session is an agent in its own worktree, so a whole crew can work in parallel. " +
+      "Pitch your first game idea whenever you're ready.",
   },
 ];
 

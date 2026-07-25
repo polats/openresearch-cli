@@ -1,4 +1,5 @@
 import {
+  Palette,
   Blocks,
   ChevronDown,
   Cpu,
@@ -16,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { THEMES, loadThemeId, saveThemeId } from "../theme";
 import {
   deleteEnvVar,
   fmtBytes,
@@ -58,6 +60,7 @@ import {
   type EnvVar,
   type GitSettings,
   type Harness,
+  type HarnessUsage,
   type HarnessId,
   type HfSettings,
   type HfTokenSource,
@@ -83,6 +86,7 @@ import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { StatusBadge } from "./StatusBadge";
 
 export type SettingsTab =
+  | "appearance"
   | "persona"
   | "harnesses"
   | "compute"
@@ -109,19 +113,110 @@ function AuthLabel({ h }: { h: Harness }) {
   return <>{h.authMethod === "oauth" ? "OAuth (subscription login)" : "API key"}</>;
 }
 
+/** Countdown to a future epoch-ms instant. Days-scale ranges stay coarse
+ * ("3d 4h"); anything under a day shows seconds ("1h 36m 42s", "42s") so a
+ * watched window (like the 5h reset) visibly ticks down each second. */
+function formatCountdown(untilMs: number): string {
+  const s = Math.max(0, Math.floor(untilMs / 1000));
+  if (s === 0) return "now";
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m ${sec}s`;
+  if (m > 0) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
+/** Remaining plan quota: percent-left bars per window (Claude live, Codex
+ * captured from turns), each with a live countdown to when the window resets,
+ * or a note + manage link for harnesses with no usage API (OpenCode Zen).
+ * `now` is the shared 1s clock so the countdowns tick without their own timer. */
+function UsageValue({ u, now }: { u: HarnessUsage; now: number }) {
+  const windows = u.windows ?? [];
+  if (windows.length > 0) {
+    return (
+      <div className="harness-usage">
+        {windows.map((w) => {
+          const pct = Math.max(0, Math.min(100, w.remainingPercent));
+          const low = pct <= 10;
+          return (
+            <div key={w.label} className="usage-window">
+              <span className="usage-win-label">{w.label}</span>
+              <span className="usage-bar">
+                <span
+                  className={`usage-bar-fill${low ? " low" : ""}`}
+                  style={{ width: `${pct}%` }}
+                />
+              </span>
+              <span className="usage-pct">{Math.round(pct)}% left</span>
+              {w.resetsAtMs != null && (
+                <span className="usage-reset" title={new Date(w.resetsAtMs).toLocaleString()}>
+                  resets in {formatCountdown(w.resetsAtMs - now)}
+                </span>
+              )}
+            </div>
+          );
+        })}
+        {u.observedAtMs != null && (
+          <div className="usage-asof">as of {timeAgo(u.observedAtMs)}</div>
+        )}
+      </div>
+    );
+  }
+  // No windows — a note (+ optional manage link).
+  return (
+    <span className="harness-usage-note">
+      {u.note ?? "—"}
+      {u.manageUrl && (
+        <>
+          {" "}
+          <a href={u.manageUrl} target="_blank" rel="noreferrer">
+            Manage ↗
+          </a>
+        </>
+      )}
+    </span>
+  );
+}
+
+/** Usage figures are live-fetched per detect and cached ~60s server-side, so
+ * auto-refresh the tab on the same cadence to keep the numbers current. */
+const HARNESS_REFRESH_MS = 60_000;
+
 function HarnessesTab() {
   const [harnesses, setHarnesses] = useState<Harness[] | null>(null);
   const [active, setActive] = useState<HarnessId>("claude-code");
   const [refreshing, setRefreshing] = useState(false);
+  // When the next background refresh is due — pushed out on every load() so a
+  // manual refresh also resets the cadence. Not shown; it just keeps the
+  // percentages (and thus the reset countdowns' baseline) current while open.
+  const [nextRefreshAt, setNextRefreshAt] = useState(() => Date.now() + HARNESS_REFRESH_MS);
+  // Shared 1s clock that drives the per-window "resets in …" countdowns.
+  const [now, setNow] = useState(() => Date.now());
 
   const load = (refresh: boolean) => {
     setRefreshing(true);
+    setNextRefreshAt(Date.now() + HARNESS_REFRESH_MS);
     getHarnesses(refresh)
       .then(setHarnesses)
       .catch(() => {})
       .finally(() => setRefreshing(false));
   };
+  // Initial (cache-friendly) load.
   useEffect(() => load(false), []);
+  // Background auto-refresh: fetch fresh figures when the target arrives; load()
+  // sets a new target, re-running this effect for the next tick.
+  useEffect(() => {
+    const id = setTimeout(() => load(true), Math.max(0, nextRefreshAt - Date.now()));
+    return () => clearTimeout(id);
+  }, [nextRefreshAt]);
+  // 1s clock so the reset countdowns tick down without their own timers.
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const h = harnesses?.find((x) => x.id === active);
 
@@ -129,7 +224,7 @@ function HarnessesTab() {
     <>
       <h1>Harnesses</h1>
       <p className="settings-sub">
-        Coding-agent setups detected on this machine. The research agent chat is served by
+        Coding-agent setups detected on this machine. The agent chat is served by
         OpenCode; Claude Code and Codex accounts surface their models in the composer's model
         picker.
       </p>
@@ -183,6 +278,14 @@ function HarnessesTab() {
               <>
                 <span className="k">Plan</span>
                 <span className="v">{h.plan}</span>
+              </>
+            )}
+            {h.usage && (
+              <>
+                <span className="k">Usage</span>
+                <span className="v">
+                  <UsageValue u={h.usage} now={now} />
+                </span>
               </>
             )}
             <span className="k">Agent models</span>
@@ -2411,7 +2514,47 @@ function PersonaTab({
 // --- embedded view -----------------------------------------------------------
 
 /** Rail nav entries, one per settings section (rendered in the agents rail). */
+function AppearanceTab() {
+  const [current, setCurrent] = useState(loadThemeId());
+  function pick(id: string) {
+    setCurrent(id);
+    saveThemeId(id);
+  }
+  return (
+    <div className="settings-section">
+      <h1>Appearance</h1>
+      <p className="settings-sub">
+        Themes from the tradition of Sanzo Wada&rsquo;s <em>A Dictionary of Color Combinations</em>.
+        Pick one to retint the whole workspace — it applies instantly and is remembered on this device.
+      </p>
+      <div className="theme-grid">
+        {THEMES.map((t) => (
+          <button
+            key={t.id}
+            className={`theme-card ${current === t.id ? "active" : ""}`}
+            onClick={() => pick(t.id)}
+            title={t.name}
+          >
+            <span className="theme-swatches" style={{ background: t.tokens["--canvas"] }}>
+              <i style={{ background: t.primary }} />
+              <i style={{ background: t.tokens["--panel"] }} />
+              <i style={{ background: t.tokens["--surface-bright"] }} />
+              <i style={{ background: t.tokens["--text"] }} />
+            </span>
+            <span className="theme-meta">
+              <span className="theme-name">{t.name}</span>
+              <span className="theme-jp">{t.jp}</span>
+            </span>
+            {current === t.id && <span className="theme-check">✓</span>}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export const SETTINGS_NAV: { id: Tab; label: string; icon: React.ReactNode }[] = [
+  { id: "appearance", label: "Appearance", icon: <Palette size={15} /> },
   { id: "persona", label: "Persona", icon: <Drama size={15} /> },
   { id: "harnesses", label: "Harnesses", icon: <Blocks size={15} /> },
   { id: "compute", label: "Compute", icon: <Cpu size={15} /> },
@@ -2435,6 +2578,7 @@ export function SettingsView({
 }) {
   return (
     <div className="settings-view">
+      {tab === "appearance" && <AppearanceTab />}
       {tab === "persona" && <PersonaTab project={project} onProjectUpdated={onProjectUpdated} />}
       {tab === "harnesses" && <HarnessesTab />}
       {tab === "compute" && <ComputeTab />}

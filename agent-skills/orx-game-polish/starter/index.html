@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- viewport-fit=cover is what makes env(safe-area-inset-*) non-zero on notched phones -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0b0e13" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>orx game</title>
+    <link rel="stylesheet" href="./src/style/tokens.css" />
+    <link rel="stylesheet" href="./src/style/ui.css" />
+  </head>
+  <body>
+    <!-- z-ladder (see tokens.css): #app 0 · #vignette 1 · #hud 10 · #overlay 40 · #loading 100 -->
+    <div id="app"></div>
+    <div id="vignette"></div>
+
+    <!-- transparent HUD overlay: pointer-events:none; only .clickable children opt back in -->
+    <div id="hud">
+      <div class="hud-top">
+        <div class="stat"><span class="label">Score</span><span class="val" id="score">0</span></div>
+        <button id="muteBtn" class="clickable" aria-label="Mute">♪</button>
+      </div>
+      <!-- floating popups / world-anchored text get injected here by hud.ts -->
+      <div id="floaters"></div>
+      <div class="hud-bottom">
+        <button class="btn btn-primary clickable" id="actionBtn">TAP</button>
+      </div>
+    </div>
+
+    <!-- full-screen result / menu modal, hidden by default -->
+    <div id="overlay" class="hidden">
+      <h1 id="overlayTitle">orx game</h1>
+      <p id="overlaySub" class="overlay-sub">a polished starting point</p>
+      <button class="btn btn-primary clickable" id="startBtn">PLAY</button>
+    </div>
+
+    <!-- reusable bottom sheet + click-away backdrop, driven by hud.ts showSheet() -->
+    <div id="sheet-backdrop" class="hidden clickable"></div>
+    <div id="sheet" class="hidden clickable"></div>
+
+    <!-- branded boot loader: static in HTML so it paints on first parse; JS removes it -->
+    <div id="loading">
+      <div class="loading-logo">orx</div>
+      <div class="loading-bar"><div class="loading-bar-fill" id="loadFill"></div></div>
+      <div class="loading-label" aria-hidden="true">
+        <span>l</span><span>o</span><span>a</span><span>d</span><span>i</span><span>n</span><span>g</span>
+      </div>
+    </div>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
