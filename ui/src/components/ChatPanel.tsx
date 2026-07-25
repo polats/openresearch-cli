@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { personaMeta, PersonaBadge, PersonaPicker, DEFAULT_PERSONA } from "./personaMeta";
+import { UsagePill } from "./UsagePill";
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Wordmark } from "./Wordmark";
 import {
@@ -2003,6 +2004,8 @@ export function ChatPanel({
               }}
             />
             <div style={{ flex: 1 }} />
+            {/* Usage window for the active harness — percent left + reset time. */}
+            <UsagePill harness={harnesses.find((h) => h.id === composerSelection?.harness)} />
             {/* Bottom-right: model, then reasoning level. The picker reflects the
                 open session (harness locked once it exists); the global default
                 only applies before the first message. */}
