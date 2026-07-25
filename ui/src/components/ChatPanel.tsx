@@ -723,6 +723,9 @@ function ProposalCard({
   const [model, setModel] = useState(proposal.model ?? "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const pm = personaMeta(persona || "research");
+  const PIcon = pm.Icon;
   const ready = harnesses.filter((h) => h.agentReady);
   const models = ready.find((h) => h.id === harness)?.models ?? [];
   // A suggested model that isn't valid for the chosen provider (e.g. gpt-5.1 on
@@ -743,66 +746,65 @@ function ProposalCard({
   }
 
   return (
-    <div className="prompt-card proposal">
-      <div className="prompt-head">
-        <span className={`persona-swatch persona-${persona || "research"}`} />
-        Suggested subagent
+    <div className={`proposal-card ${pm.cls}`} style={{ ["--accent" as string]: pm.color }}>
+      <div className="proposal-eyebrow">
+        <PIcon size={14} style={{ color: pm.color }} />
+        Suggested next · <b>{pm.label}</b>
       </div>
-      <div className="proposal-fields">
-        <label>
-          Persona
-          <select value={persona} onChange={(e) => setPersona(e.target.value)} disabled={busy}>
-            {personas.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Provider
-          <select
-            value={harness}
-            onChange={(e) => {
-              setHarness(e.target.value);
-              setModel("");
-            }}
-            disabled={busy}
-          >
-            {ready.map((h) => (
-              <option key={h.id} value={h.id}>
-                {h.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Model
-          <select value={effectiveModel} onChange={(e) => setModel(e.target.value)} disabled={busy}>
-            <option value="">(harness default)</option>
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {modelLabel(m.id)}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      {proposal.why && <div className="proposal-why">{proposal.why}</div>}
       <div className="proposal-task" title={proposal.task}>
         {proposal.task}
       </div>
+      {proposal.why && <div className="proposal-why">{proposal.why}</div>}
+      {editing && (
+        <div className="proposal-fields">
+          <label>
+            Agent
+            <select value={persona} onChange={(e) => setPersona(e.target.value)} disabled={busy}>
+              {personas.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Provider
+            <select
+              value={harness}
+              onChange={(e) => {
+                setHarness(e.target.value);
+                setModel("");
+              }}
+              disabled={busy}
+            >
+              {ready.map((h) => (
+                <option key={h.id} value={h.id}>
+                  {h.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Model
+            <select
+              value={effectiveModel}
+              onChange={(e) => setModel(e.target.value)}
+              disabled={busy}
+            >
+              <option value="">(harness default)</option>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {modelLabel(m.id)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
       {err && <div className="proposal-err">{err}</div>}
-      <div className="prompt-actions">
+      <div className="proposal-actions">
         <button
-          className="btn-ghost"
-          disabled={busy}
-          onClick={() => act(() => dismissProposal(proposal.id))}
-        >
-          Dismiss
-        </button>
-        <button
-          className="btn-primary"
+          className="proposal-approve"
           disabled={busy || !harness}
           onClick={() =>
             act(() =>
@@ -814,7 +816,17 @@ function ProposalCard({
             )
           }
         >
-          Spawn ▶
+          Approve →
+        </button>
+        <button className="proposal-secondary" disabled={busy} onClick={() => setEditing((v) => !v)}>
+          {editing ? "Done" : "Change agent"}
+        </button>
+        <button
+          className="proposal-secondary"
+          disabled={busy}
+          onClick={() => act(() => dismissProposal(proposal.id))}
+        >
+          Dismiss
         </button>
       </div>
     </div>
@@ -1782,8 +1794,8 @@ export function ChatPanel({
             <Wordmark />
           </h2>
           <p>
-            Ask the agent to explore your codebase, create and run your baseline experiment, and
-            branch variants off it.
+            Pitch a game idea — even one vague line. The Producer captures it into a thesis, gets it
+            scored, and leads you to a playable, handing off to the other agents as it goes.
           </p>
           <EmptyStateAgentHint
             harnesses={harnesses}

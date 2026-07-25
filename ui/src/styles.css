@@ -3432,16 +3432,48 @@ a.files-pill:hover {
 
 /* Subagent dispatch approval card — rendered inline in the orchestrator's chat,
    sharing the plan/permission card chrome (.prompt-card). */
-.prompt-card.proposal {
-  border-left: 3px solid var(--accent-amber);
+/* Handoff suggestion card — accented with the suggested agent's persona color.
+   `--accent` is set inline to the persona's color var. */
+.proposal-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
+  padding: 12px 13px;
+  border: 1px solid color-mix(in srgb, var(--accent, var(--primary)) 34%, var(--border));
+  border-radius: var(--radius-lg, 12px);
+  background: color-mix(in srgb, var(--accent, var(--primary)) 6%, var(--surface-bright));
+}
+.proposal-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent, var(--primary));
+}
+.proposal-eyebrow b { font-weight: 700; }
+.proposal-task {
+  font-size: var(--fs-md);
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.proposal-why {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  font-style: italic;
 }
 .proposal-fields {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
 }
 .proposal-fields label {
   display: flex;
@@ -3458,22 +3490,9 @@ a.files-pill:hover {
   padding: 3px 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: var(--bg);
+  background: var(--surface-bright);
   color: var(--text);
   font-size: var(--fs-sm);
-}
-.proposal-why {
-  font-size: var(--fs-sm);
-  color: var(--muted);
-  font-style: italic;
-}
-.proposal-task {
-  font-size: var(--fs-sm);
-  color: var(--text);
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 .proposal-err {
   font-size: var(--fs-sm);
@@ -3481,9 +3500,36 @@ a.files-pill:hover {
 }
 .proposal-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
   gap: 8px;
+  margin-top: 2px;
 }
+.proposal-approve {
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: #fff;
+  background: var(--accent, var(--primary));
+  border: none;
+  border-radius: var(--radius-md);
+  padding: 7px 16px;
+  cursor: pointer;
+  transition: filter 0.12s ease;
+}
+.proposal-approve:hover:not(:disabled) { filter: brightness(1.06); }
+.proposal-approve:disabled { opacity: 0.55; cursor: default; }
+.proposal-secondary {
+  font: inherit;
+  font-size: var(--fs-md);
+  color: var(--subtext);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 7px 13px;
+  cursor: pointer;
+}
+.proposal-secondary:hover:not(:disabled) { background: var(--surface); color: var(--text); }
+.proposal-secondary:disabled { opacity: 0.55; cursor: default; }
 /* Compact variant for the Recents session rows — snugged up to the title
    (the row's 8px gap reads too airy for a 3px bar). */
 .persona-bar.sm {
