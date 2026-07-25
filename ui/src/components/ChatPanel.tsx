@@ -12,7 +12,7 @@ import {
   SlidersHorizontal,
   X,
 } from "lucide-react";
-import { personaMeta, PersonaBadge, DEFAULT_PERSONA } from "./personaMeta";
+import { personaMeta, PersonaBadge, PersonaPicker, DEFAULT_PERSONA } from "./personaMeta";
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Wordmark } from "./Wordmark";
 import {
@@ -1412,10 +1412,9 @@ export function ChatPanel({
           model: effective!.model,
           permissionMode: effective!.permissionMode,
           reasoningLevel: effective!.reasoningLevel,
-          // New sessions start as the producer — the orchestrator that leads the
-          // capture→evaluate→build pipeline and hands off to the other personas.
-          // You rarely pick a persona by hand; the pipeline routes you to them.
-          persona: DEFAULT_PERSONA,
+          // Persona chosen in the header badge (defaults to producer — the
+          // orchestrator that leads the pipeline and hands off to the others).
+          persona: composerPersona,
         });
         loadedSessions.current.add(session.id);
         setSessions((cur) => [session, ...cur]);
@@ -1580,6 +1579,8 @@ export function ChatPanel({
   // group when one of its sections is the current view.
   const [settingsOpen, setSettingsOpen] = useState(false);
   const inSettings = SETTINGS_NAV.some((s) => s.id === mainView);
+  // Persona the next new session will start as (chosen via the header badge).
+  const [composerPersona, setComposerPersona] = useState<string>(DEFAULT_PERSONA);
 
   const rail = (
     <aside className="session-rail floating-panel">
@@ -1729,11 +1730,11 @@ export function ChatPanel({
       <div className={headerClass}>
         {railReopen}
         {(() => {
-          // active session shows its own persona (null → research); a fresh
-          // session shows the producer default it will start as.
+          // active session shows its own persona (null → research), locked; a
+          // fresh session shows an editable picker defaulting to the producer.
           const shownPersona = activeSession
             ? activeSession.persona ?? "research"
-            : DEFAULT_PERSONA;
+            : composerPersona;
           return (
             <>
               <span
@@ -1741,7 +1742,11 @@ export function ChatPanel({
                 title={personaTitle(shownPersona)}
                 style={{ background: personaMeta(shownPersona).color }}
               />
-              <PersonaBadge persona={shownPersona} />
+              <PersonaPicker
+                value={shownPersona}
+                onChange={setComposerPersona}
+                locked={!!activeSession}
+              />
             </>
           );
         })()}

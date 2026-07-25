@@ -8,8 +8,10 @@ import {
   Lightbulb,
   LineChart,
   FlaskConical,
+  ChevronDown,
   type LucideIcon,
 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 export type PersonaMeta = {
   /** wire id */
@@ -22,6 +24,8 @@ export type PersonaMeta = {
   color: string;
   /** persona wire id used as a class suffix, e.g. persona-game-designer */
   cls: string;
+  /** one-line description of what this agent does */
+  role: string;
 };
 
 const META: Record<string, PersonaMeta> = {
@@ -31,6 +35,7 @@ const META: Record<string, PersonaMeta> = {
     Icon: Clapperboard,
     color: "var(--persona-producer)",
     cls: "persona-producer",
+    role: "Orchestrates the funnel; suggests the next agent for you to approve.",
   },
   "idea-foundry": {
     id: "idea-foundry",
@@ -38,6 +43,7 @@ const META: Record<string, PersonaMeta> = {
     Icon: Lightbulb,
     color: "var(--persona-idea-foundry)",
     cls: "persona-idea-foundry",
+    role: "Interviews a vague seed into a thesis with a real hook.",
   },
   analyst: {
     id: "analyst",
@@ -45,6 +51,7 @@ const META: Record<string, PersonaMeta> = {
     Icon: LineChart,
     color: "var(--persona-analyst)",
     cls: "persona-analyst",
+    role: "Scores an idea against the 35-signal market-fit rubric.",
   },
   "game-designer": {
     id: "game-designer",
@@ -52,6 +59,7 @@ const META: Record<string, PersonaMeta> = {
     Icon: Gamepad2,
     color: "var(--persona-game-designer)",
     cls: "persona-game-designer",
+    role: "Builds the playable prototype — loop first, then polish.",
   },
   research: {
     id: "research",
@@ -59,6 +67,7 @@ const META: Record<string, PersonaMeta> = {
     Icon: FlaskConical,
     color: "var(--persona-research)",
     cls: "persona-research",
+    role: "The general base agent. Fallback for non-game work.",
   },
 };
 
@@ -103,5 +112,92 @@ export function PersonaBadge({
       <Icon size={size} style={{ color: m.color }} />
       {showLabel && !compact && <span className="persona-badge-label">{m.label}</span>}
     </span>
+  );
+}
+
+/** Clickable persona badge that opens a role-annotated dropdown. When `locked`
+ *  (an already-started session, whose persona is fixed), it renders a plain
+ *  badge instead. */
+export function PersonaPicker({
+  value,
+  onChange,
+  locked = false,
+}: {
+  value?: string | null;
+  onChange: (id: string) => void;
+  locked?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  if (locked) return <PersonaBadge persona={value} />;
+
+  const m = personaMeta(value);
+  const Icon = m.Icon;
+  const selected = value ?? "research";
+  return (
+    <div className="persona-picker" ref={ref}>
+      <button
+        className={`persona-badge ${m.cls} persona-badge-btn`}
+        onClick={() => setOpen((v) => !v)}
+        title="Change persona"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <Icon size={14} style={{ color: m.color }} />
+        <span className="persona-badge-label">{m.label}</span>
+        <ChevronDown size={13} className="persona-badge-chev" />
+      </button>
+      {open && (
+        <div className="persona-menu" role="listbox">
+          <div className="persona-menu-h">Start this session as</div>
+          {PERSONA_ORDER.map((id) => {
+            const pm = personaMeta(id);
+            const OptIcon = pm.Icon;
+            const isSel = id === selected;
+            return (
+              <button
+                key={id}
+                className={`persona-opt ${pm.cls} ${isSel ? "sel" : ""}`}
+                role="option"
+                aria-selected={isSel}
+                onClick={() => {
+                  onChange(id);
+                  setOpen(false);
+                }}
+              >
+                <span className="persona-opt-ic">
+                  <OptIcon size={15} style={{ color: pm.color }} />
+                </span>
+                <span className="persona-opt-t">
+                  <span className="persona-opt-n" style={{ color: pm.color }}>
+                    {pm.label}
+                    {id === DEFAULT_PERSONA && <span className="persona-opt-def">default</span>}
+                  </span>
+                  <span className="persona-opt-d">{pm.role}</span>
+                </span>
+                {isSel && <span className="persona-opt-check">✓</span>}
+              </button>
+            );
+          })}
+          <div className="persona-menu-foot">
+            You rarely need this — the Producer routes you to the others as you go.
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
