@@ -2,7 +2,7 @@
 name = "openresearch-cli"
 version = "0.1.69"
 edition = "2021"
-description = "Crucible — from a game idea to a validated, playable prototype (crux)"
+description = "Crux — from a game idea to a validated, playable prototype (crux)"
 repository = "https://github.com/alphaXiv/openresearch-cli"
 license = "MIT"
 default-run = "crux"

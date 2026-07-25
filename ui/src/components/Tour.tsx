@@ -30,9 +30,9 @@ const STEPS: TourStep[] = [
   {
     focus: null,
     anchor: null,
-    title: "Welcome to Crucible",
+    title: "Welcome to Crux",
     description:
-      "Crucible turns a one-line game idea into a validated, playable prototype. A producer " +
+      "Crux turns a one-line game idea into a validated, playable prototype. A producer " +
       "orchestrates a crew of AI agents — you approve the moves.",
   },
   {

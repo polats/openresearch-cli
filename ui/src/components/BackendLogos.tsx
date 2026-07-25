@@ -23,7 +23,7 @@ function backendName(kind: string): string {
     case "slurm_job":
       return "Slurm";
     case "openresearch_job":
-      return "Crucible";
+      return "Crux";
     case "local_job":
       return "This machine";
     default:

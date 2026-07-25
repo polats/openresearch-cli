@@ -1,7 +1,7 @@
 // Theme system — each theme overrides the app's color tokens (styles.css :root).
 // Palettes are drawn from the tradition of Sanzo Wada's *A Dictionary of Color
 // Combinations*: muted, considered, named by Japanese traditional colors. The
-// default, "Crucible", is a molten vermilion (Shu) — the brand.
+// default, "Crux", is a molten vermilion (Shu) — the brand.
 //
 // Applied by writing CSS custom properties onto <html> (inline styles beat both
 // the light :root and the dark @media block), and persisted to localStorage.
@@ -22,7 +22,7 @@ export type Theme = {
 export const THEMES: Theme[] = [
   {
     id: "crucible",
-    name: "Crucible",
+    name: "Crux",
     jp: "朱 · shu",
     dark: false,
     primary: "#db4d2b",
