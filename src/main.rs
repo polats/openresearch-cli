@@ -130,6 +130,9 @@ enum Command {
     /// Print CLI usage for agents, or fetch a skill doc.
     Skill(SkillArgs),
 
+    /// Print the path to the bundled idea evaluator (materializing it first).
+    Evaluator(EvaluatorArgs),
+
     /// Install the Crux skill into local coding agents (Claude Code, Codex, OpenCode, Cursor).
     #[command(name = "install-skills")]
     InstallSkills(InstallSkillsArgs),
@@ -775,6 +778,14 @@ pub struct SkillArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct EvaluatorArgs {
+    /// `path` (default) prints the evaluator directory. Anything else errors —
+    /// the subcommand exists so the skill can resolve the evaluator in one
+    /// shell expansion: `node "$(orx evaluator path)/evaluate.mjs" …`.
+    pub what: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct InstallSkillsArgs {
     /// Which agent(s) to install into: `claude`, `codex`, `opencode`, `cursor`,
     /// or `all`. Defaults to every agent already set up on this machine.
@@ -950,6 +961,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Agent(_) => "agent",
         Command::Report(_) => "report",
         Command::Skill(_) => "skill",
+        Command::Evaluator(_) => "evaluator",
         Command::InstallSkills(_) => "install-skills",
         Command::Lit(_) => "lit",
         Command::Paper(_) => "paper",
@@ -993,6 +1005,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Agent(args) => commands::agent::run(args).await,
         Command::Report(args) => commands::report::run(args).await,
         Command::Skill(args) => commands::skill::run(args).await,
+        Command::Evaluator(args) => commands::evaluator::run(args).await,
         Command::InstallSkills(args) => commands::install_skills::run(args).await,
         Command::Lit(args) => commands::lit::run(args).await,
         Command::Paper(args) => commands::paper::run(args).await,

@@ -16,9 +16,41 @@ edit, commit, push. This worktree is yours alone.
 **NEVER `cd` into or write to `~/.cache/openresearch/repos/<owner>/<repo>`** — that
 is the shared **hub clone** that *every* session's worktree is derived from.
 Checking out a branch or dropping files there corrupts other agents' checkouts and
-can leave a branch locked to the hub. If a `git checkout <branch>` in your worktree
-fails with "already used by worktree", another session owns that branch — pick a
-different node, don't go hunting in the cache dir. Stay in `$PWD`.
+can leave a branch locked to the hub. Stay in `$PWD`, and if a checkout fails with
+"already used by worktree", use the detached flow below — don't go hunting in the
+cache dir.
+
+### When the branch is held by another session
+
+Git allows one worktree per branch, so `git checkout <branch>` fails with
+`already used by worktree …` whenever another live session holds it. This is
+normal on a hand-off: the idea-foundry session that *created* a node still owns
+its branch when the analyst is dispatched to evaluate it.
+
+You do **not** need the branch checked out to work on it, and you must not break
+the other session's lock. Work detached at the remote tip and push back to the
+branch ref:
+
+```sh
+git fetch origin
+git checkout --detach origin/<branch>      # read the thesis, edit, commit here
+git add <files> && git commit -m "…"
+git push origin HEAD:refs/heads/<branch>   # lands on the branch; lock untouched
+```
+
+The remote is what matters — sim runs clone the branch from GitHub, so a pushed
+commit is visible to everything downstream even though the other worktree's local
+ref hasn't caught up.
+
+If that push is rejected as non-fast-forward, the branch holder committed while
+you worked. Re-anchor and retry — never force-push:
+
+```sh
+git fetch origin && git rebase origin/<branch> && git push origin HEAD:refs/heads/<branch>
+```
+
+Only give up on the node if the rebase genuinely conflicts; then say what
+conflicted and let the human sequence the two sessions.
 
 ## Outside a live session (cloud / full-set contexts only)
 
@@ -108,4 +140,6 @@ as above, then commit, push, `orx exp run`.
 
 If the checkout fails with "already checked out at …", read the path: your own
 worktree means you already hold it. Another session's means that agent owns the
-node — leave it alone; never break the lock or branch a child to dodge it.
+branch — never break the lock, and never branch a child to dodge it. Use the
+detached flow from "When the branch is held by another session" above: commit at
+`origin/<branch>` and push to `HEAD:refs/heads/<branch>`.

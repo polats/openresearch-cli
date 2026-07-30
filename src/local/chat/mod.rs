@@ -2195,6 +2195,17 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
             cmd.env(key, value);
         }
     }
+    // The bundled idea evaluator, materialized on demand. Exported so an
+    // analyst's shell (and any `orx exp run` it launches) can reach the rubric
+    // and the alignment math without it being committed to the project repo.
+    // Best-effort: a write failure must not stop the turn — the skill's
+    // `orx evaluator path` fallback reports the real error.
+    if let Ok(dir) = crate::local::evaluator::ensure() {
+        cmd.env(
+            crate::local::evaluator::EVALUATOR_DIR_ENV,
+            dir.as_os_str(),
+        );
+    }
 }
 
 /// Env var carrying the launching chat session's id into a harness child. The

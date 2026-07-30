@@ -150,6 +150,15 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
             .to_string_lossy()
             .into_owned(),
     );
+    // Sim runs score an idea with the bundled evaluator, which lives in the
+    // binary rather than the project repo — a run command reaches it through
+    // this var (`node "$ORX_EVALUATOR_DIR/evaluate.mjs" …`).
+    if let Ok(evaluator) = crate::local::evaluator::ensure() {
+        env.insert(
+            crate::local::evaluator::EVALUATOR_DIR_ENV.to_string(),
+            evaluator.to_string_lossy().into_owned(),
+        );
+    }
 
     let dir = localbox::run_job(&localbox::LocalJobSpec {
         run_id: run_id.clone(),
