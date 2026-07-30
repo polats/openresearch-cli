@@ -984,9 +984,17 @@ function ProposalCard({
   const ready = harnesses.filter((h) => h.agentReady);
   const models = ready.find((h) => h.id === harness)?.models ?? [];
   // A suggested model that isn't valid for the chosen provider (e.g. gpt-5.1 on
-  // Codex) reads as — and is sent as — the harness default, so what's shown
-  // matches what spawns. Empty string = default.
+  // Codex, or a stale `claude-opus-5` against the CLI's live catalog) reads as —
+  // and is sent as — the harness default, so what's shown matches what spawns.
+  // Empty string = default, and it is sent *explicitly*: omitting the field
+  // makes the server fall back to the proposal's own suggestion, which is the
+  // stale value this line exists to drop.
   const effectiveModel = models.some((m) => m.id === model) ? model : "";
+  // Whether we're dropping a model the agent asked for. Worth saying out loud:
+  // the human is approving a dispatch, and "the model you were shown is not the
+  // one the agent named" is exactly the kind of silent substitution that makes a
+  // run hard to explain afterwards.
+  const droppedModel = model && !models.some((m) => m.id === model) ? model : null;
 
   async function act(fn: () => Promise<unknown>) {
     setBusy(true);
@@ -1056,6 +1064,13 @@ function ProposalCard({
           </label>
         </div>
       )}
+      {droppedModel && (
+        <div className="proposal-why">
+          {personaMeta(persona || "research").label} was suggested on{" "}
+          <code>{droppedModel}</code>, which this provider doesn&apos;t offer — it will
+          run on the provider default unless you pick a model.
+        </div>
+      )}
       {err && <div className="proposal-err">{err}</div>}
       <div className="proposal-actions">
         <button
@@ -1066,7 +1081,8 @@ function ProposalCard({
               approveProposal(proposal.id, {
                 persona: persona || undefined,
                 harness: harness || undefined,
-                model: effectiveModel || undefined,
+                // Always sent, empty included — see `effectiveModel`.
+                model: effectiveModel,
               }),
             )
           }

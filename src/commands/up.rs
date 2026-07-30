@@ -3558,6 +3558,24 @@ struct ApproveProposalReq {
     reasoning_level: Option<String>,
 }
 
+/// Which model a dispatch actually runs on. Three request states, and collapsing
+/// the last two is a real bug: the approval card resolves a suggestion the chosen
+/// provider doesn't offer (a stale `claude-opus-5` against Claude Code's live
+/// catalog) down to "provider default" and *shows* that — so if an explicit empty
+/// string fell back to the proposal, the dispatch would silently run the very id
+/// the card told the human it had dropped.
+///
+///   absent         → no override; honour the orchestrator's suggestion
+///   present, empty → the human chose the provider default (no model pinned)
+///   present, set   → the human's pick
+fn resolve_dispatch_model(requested: Option<&str>, suggested: Option<&str>) -> Option<String> {
+    match requested.map(str::trim) {
+        None => suggested.map(str::to_string),
+        Some("") => None,
+        Some(m) => Some(m.to_string()),
+    }
+}
+
 /// Approve a proposal: spawn a chat session with the chosen persona/harness/
 /// model and run the proposed task as its first turn.
 async fn approve_proposal(
@@ -3579,7 +3597,7 @@ async fn approve_proposal(
     let harness = nonempty(req.harness)
         .or_else(|| prop.harness.clone())
         .ok_or_else(|| bad_request("no harness — suggest one or pass it on approve"))?;
-    let model = nonempty(req.model).or_else(|| prop.model.clone());
+    let model = resolve_dispatch_model(req.model.as_deref(), prop.model.as_deref());
     if !local::harness::is_chat_harness(&harness) {
         return Err(bad_request(format!("unknown harness: {harness}")));
     }
@@ -4173,6 +4191,30 @@ mod tests {
         SshReadiness::NoUsableKey {
             pub_path: path.map(str::to_string),
         }
+    }
+
+    /// The dispatch that shipped `claude-opus-5` even though the card showed
+    /// "(provider default)": the agent suggested an id Claude Code's live catalog
+    /// no longer lists, the card dropped it, and the omitted field let the server
+    /// re-apply it. An explicit empty model must mean *default*, not *suggestion*.
+    #[test]
+    fn an_explicit_default_does_not_fall_back_to_the_suggestion() {
+        // Card resolved the stale suggestion to the provider default.
+        assert_eq!(resolve_dispatch_model(Some(""), Some("claude-opus-5")), None);
+        // Whitespace is the same intent, not a model named " ".
+        assert_eq!(resolve_dispatch_model(Some("   "), Some("claude-opus-5")), None);
+        // No override at all → the orchestrator's suggestion still stands.
+        assert_eq!(
+            resolve_dispatch_model(None, Some("claude-opus-5")).as_deref(),
+            Some("claude-opus-5")
+        );
+        // The human's pick wins over the suggestion.
+        assert_eq!(
+            resolve_dispatch_model(Some("opencode/kimi-k3"), Some("claude-opus-5")).as_deref(),
+            Some("opencode/kimi-k3")
+        );
+        // Nothing anywhere stays nothing.
+        assert_eq!(resolve_dispatch_model(None, None), None);
     }
 
     /// The row used to hardcode `~/.ssh/id_ed25519.pub`, which is wrong on any
