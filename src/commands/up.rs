@@ -56,9 +56,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // no eager agent bring-up. (--no-agent is now a no-op kept for compat.)
     let agent = Arc::new(AgentHost::new(args.model.clone()));
     let codex = Arc::new(local::codex::CodexHost::new());
+    let claude = Arc::new(local::claude::ClaudeHost::new());
     let state = AppState {
         agent: agent.clone(),
-        chat: Arc::new(ChatHost::new(agent.clone(), codex.clone())),
+        chat: Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone())),
         harnesses: Arc::new(tokio::sync::Mutex::new(None)),
         data_dir_move_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -136,6 +137,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
     agent.shutdown().await;
     codex.shutdown().await;
+    claude.shutdown().await;
     Ok(())
 }
 
@@ -284,6 +286,8 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/settings/data-dir/validate", post(validate_data_dir))
         .route("/api/settings/data-dir/move", post(move_data_dir))
+        .route("/api/github/repo-access", get(github_repo_access))
+        .route("/api/github/account", get(github_account))
         .route(
             "/api/settings/git",
             get(git_settings).post(set_git_settings),
@@ -324,6 +328,7 @@ fn router(state: AppState) -> Router {
             axum::routing::delete(delete_chat_session).patch(update_chat_session),
         )
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
+        .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
         .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
         .route("/api/chat/sessions/{id}/respond", post(respond_chat))
@@ -535,8 +540,28 @@ async fn list_personas() -> Json<Value> {
     Json(json!({ "personas": personas }))
 }
 
+/// Serialize a project for the UI, injecting the absolute `filesDir` so the
+/// dashboard can recognize files-dir paths in chat links. Every project the UI
+/// receives must go through this — the SSE `project.updated` diff (fired on
+/// every visit, since `open_project` bumps `updated_at`) and `create_project`
+/// upsert into the same `projects` state as `list_projects`, so enriching one
+/// site alone would let a bare project overwrite `filesDir` mid-session.
+fn project_json(p: &local::model::LocalProject) -> Value {
+    // LocalProject is all String/Option/i64, so this can't realistically fail;
+    // fail loud rather than emit a malformed `null` project if it ever does.
+    let mut v = serde_json::to_value(p).expect("LocalProject serializes");
+    if let Value::Object(map) = &mut v {
+        map.insert(
+            "filesDir".into(),
+            Value::String(local::files::files_dir_display(p)),
+        );
+    }
+    v
+}
+
 async fn list_projects() -> ApiResult {
     let projects = Store::open()?.list_local_projects()?;
+    let projects: Vec<Value> = projects.iter().map(project_json).collect();
     Ok(Json(json!({ "projects": projects })))
 }
 
@@ -619,13 +644,34 @@ async fn create_project(
             return Err(bad_request("githubOwner and githubRepo are required"));
         }
         let branch = req.baseline_branch.filter(|b| !b.trim().is_empty());
+        let meta = local::github::repo_meta(&owner, &repo).await;
+        // No branch given → the repo's own default. Falling through to
+        // create_project's hardcoded "main" breaks every master/dev repo with
+        // "Branch 'main' not found" — and the form has no branch field to
+        // recover with. The API answer needs a token, so fall back to git's
+        // own credentials for the SSH-only user.
+        let branch = match branch.or_else(|| meta.as_ref().and_then(|m| m.default_branch.clone())) {
+            Some(b) => Some(b),
+            None => {
+                let (o, r) = (owner.clone(), repo.clone());
+                // Bounded like authed_get: ls-remote tries ssh then https, and
+                // a black-holed host blocks on TCP connect for ~75s each. A
+                // stall degrades to create_project's "main" instead of hanging
+                // the create request.
+                tokio::time::timeout(
+                    Duration::from_secs(15),
+                    tokio::task::spawn_blocking(move || local::git::remote_default_branch(&o, &r)),
+                )
+                .await
+                .ok()
+                .and_then(|joined| joined.ok())
+                .flatten()
+            }
+        };
         // Unknown access (no token / API hiccup) counts as access: forking
         // needs a token anyway, and surprise forks are worse than a later
         // push error.
-        let fork = req.fork_repo
-            || !local::github::has_push_access(&owner, &repo)
-                .await
-                .unwrap_or(true);
+        let fork = req.fork_repo || !meta.as_ref().map(|m| m.can_push).unwrap_or(true);
         if fork {
             // The entered branch picks what gets copied; the fork itself
             // starts at its default branch. The seed clone/push streams the
@@ -698,14 +744,16 @@ async fn create_project(
             .await
             .map_err(|e| anyhow!("clone task failed: {e}"))?;
     }
-    Ok(Json(json!({ "project": result.map_err(bad_request)? })))
+    Ok(Json(
+        json!({ "project": project_json(&result.map_err(bad_request)?) }),
+    ))
 }
 
 async fn get_project(Path(id): Path<String>) -> ApiResult {
     let project = Store::open()?
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
-    Ok(Json(json!({ "project": project })))
+    Ok(Json(json!({ "project": project_json(&project) })))
 }
 
 /// Mark a project visited: bumps updated_at, which drives the recency sort
@@ -716,7 +764,7 @@ async fn open_project(Path(id): Path<String>) -> ApiResult {
     let project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
-    Ok(Json(json!({ "project": project })))
+    Ok(Json(json!({ "project": project_json(&project) })))
 }
 
 /// Present-vs-absent for PATCH fields: absent = leave, null = clear.
@@ -806,7 +854,7 @@ async fn update_project(
     let project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
-    Ok(Json(json!({ "project": project })))
+    Ok(Json(json!({ "project": project_json(&project) })))
 }
 
 /// Delete a project and everything hanging off it. Refuses while runs are in
@@ -839,6 +887,7 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         let _ = state.chat.interrupt(&session.id).await;
         state.chat.opencode.kill_session(&session.id).await;
         state.chat.codex.kill_session(&session.id).await;
+        state.chat.claude.kill_session(&session.id).await;
         local::chat::cleanup_session_worktree(&project, &session.id);
     }
     store.delete_local_project(&id)?;
@@ -1294,6 +1343,8 @@ async fn play_session_beat(State(state): State<AppState>, Path(id): Path<String>
         verdict: None,
         verdict_notes: None,
         verdict_at: None,
+        // Dashboard-initiated, so no launching chat session to notify.
+        chat_session_id: None,
     };
     store.upsert_run(&run)?;
     store.touch_supervisor(&run_id)?;
@@ -1770,6 +1821,53 @@ async fn project_working_tree(Path(id): Path<String>) -> ApiResult {
     .await
 }
 
+/// Live view of one chat session's private worktree — what the agent has
+/// changed, before any run exists. Unlike `project_working_tree` (clone-scoped,
+/// diffed against HEAD), the session worktree starts detached on the baseline
+/// tip and the agent commits to experiment branches, so "what it changed" is
+/// the working tree diffed against the merge-base of the baseline and HEAD; a
+/// bare HEAD diff would hide every committed edit. Read-only throughout: no
+/// index-touching (`git add -N`) that would mutate the agent's checkout.
+///
+/// A never-started session (worktree is lazy) or a pruned worktree degrades to
+/// `resolve_checkout_root`'s clone fallback; we report `{ exists: false }`
+/// rather than pass off the clone's contents as the session's work.
+async fn session_worktree(Path(id): Path<String>) -> ApiResult {
+    blocking_api(move || {
+        let store = Store::open()?;
+        let session = store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        let project = store
+            .get_local_project(&session.project_id)?
+            .ok_or_else(|| not_found("project"))?;
+        let (root, root_kind) = resolve_checkout_root(&store, &project, Some(&id))?;
+        if root_kind != "worktree" {
+            return Ok(Json(json!({ "exists": false })));
+        }
+        let branch = local::git::current_branch(&root);
+        // Diff against the merge-base of the baseline tip and HEAD — the fork
+        // point of the agent's work. Every step that can't resolve (missing
+        // origin ref, unrelated histories, unborn HEAD) falls back to HEAD, so
+        // the diff degrades to "uncommitted only" rather than erroring.
+        let baseline = &project.baseline_branch;
+        let remote_baseline = format!("origin/{baseline}");
+        let base = local::git::merge_base(&root, &remote_baseline, "HEAD")?
+            .unwrap_or_else(|| "HEAD".to_string());
+        let files = local::git::changed_files(&root, &base)?;
+        let payload = local::git::working_tree_diff_against(&root, Some(&base))?;
+        Ok(Json(json!({
+            "exists": true,
+            "branch": branch,
+            "baselineBranch": baseline,
+            "baseSha": base,
+            "files": files,
+            "diff": diff_json(payload),
+        })))
+    })
+    .await
+}
+
 /// Cap on file bytes served to the viewer (mirrors openresearch.sh).
 const FILE_READ_LIMIT: u64 = 512_000;
 
@@ -1820,9 +1918,12 @@ fn resolve_checkout_root(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodeTreeQuery {
-    /// Branch to list the committed tree of; absent lists the hub clone's
-    /// checkout.
+    /// Branch to list the committed tree of; absent lists a live checkout.
     r#ref: Option<String>,
+    /// Chat session whose worktree to list (the live view the Worktree tab's
+    /// Files pane wants). Absent falls back to the hub clone's checkout.
+    /// Mutually exclusive with `ref` — a committed tree has no live worktree.
+    session_id: Option<String>,
 }
 
 /// Cap on entries returned by the code-tree listing.
@@ -1839,10 +1940,19 @@ async fn project_code_tree(Path(id): Path<String>, Query(q): Query<CodeTreeQuery
         let project = store
             .get_local_project(&id)?
             .ok_or_else(|| not_found("project"))?;
-        // Branch refs live in the shared object DB — the hub clone resolves
-        // them all; no per-session root here (file reads still take one).
-        let (root, root_kind) = resolve_checkout_root(&store, &project, None)?;
         let ref_name = q.r#ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let session_id = q
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if ref_name.is_some() && session_id.is_some() {
+            return Err(bad_request("ref and sessionId are mutually exclusive"));
+        }
+        // Branch refs live in the shared object DB — any checkout resolves them;
+        // for a live listing the session's worktree is the live view when given
+        // (its untracked files the clone never sees), else the hub clone.
+        let (root, root_kind) = resolve_checkout_root(&store, &project, session_id)?;
         let (root_kind, branch, mut entries) = match ref_name {
             Some(name) => {
                 let sha = local::git::resolve_branch_commit(&root, name)?
@@ -2385,6 +2495,36 @@ fn data_dir_json() -> Value {
         // env | config | xdg | default — env means a forced override (read-only).
         "source": source,
     })
+}
+
+/// The signed-in GitHub login, so "creates github.com/you/x" can name the real
+/// account. `null` when there's no usable token — the UI keeps saying "you".
+async fn github_account() -> ApiResult {
+    Ok(Json(
+        json!({ "login": local::github::viewer_login().await }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct RepoAccessQuery {
+    owner: String,
+    repo: String,
+}
+
+/// Whether the stored credentials can push to `owner/repo`, so the New project
+/// form can drop the fork choice when it isn't one. Mirrors the create path:
+/// unknown (no token / API hiccup) counts as access, so the UI never nags about
+/// a fork the server wouldn't make.
+async fn github_repo_access(Query(q): Query<RepoAccessQuery>) -> ApiResult {
+    let owner = q.owner.trim().to_string();
+    let repo = q.repo.trim().to_string();
+    if owner.is_empty() || repo.is_empty() {
+        return Err(bad_request("owner and repo are required"));
+    }
+    let meta = local::github::repo_meta(&owner, &repo).await;
+    Ok(Json(json!({
+        "canPush": meta.map(|m| m.can_push).unwrap_or(true),
+    })))
 }
 
 async fn data_dir_settings() -> ApiResult {
@@ -3008,7 +3148,65 @@ async fn slurm_preflight(Json(req): Json<SlurmPreflightReq>) -> ApiResult {
 /// or the modal python import. `configured` means "worth trying", not
 /// "healthy"; deep health stays in each backend's own settings endpoint,
 /// fetched when a row is expanded.
-fn compute_settings_json() -> Value {
+/// Whether a box would accept this machine. Three-valued on purpose: the check
+/// needs the api, so "we couldn't ask" is a different answer from "no" and the
+/// badge shouldn't have to pick one of the two. Each arm carries what the row
+/// needs to say — guessing a key path would send the user to a file that may
+/// not exist.
+#[derive(Clone, PartialEq)]
+enum SshReadiness {
+    Ready,
+    /// The `.pub` on this machine worth registering, if there is one.
+    NoUsableKey {
+        pub_path: Option<String>,
+    },
+    Unverified {
+        reason: String,
+    },
+}
+
+async fn openresearch_ssh_readiness() -> SshReadiness {
+    use crate::local::ssh_identity::{preferred_local, tilde, KeyStatus};
+    let Ok(Some(creds)) = crate::config::load_credentials().await else {
+        // Signed-out is reported by the row's own `or_logged_in`.
+        return SshReadiness::NoUsableKey { pub_path: None };
+    };
+    let named = |local: &[crate::local::ssh_identity::LocalKey]| SshReadiness::NoUsableKey {
+        pub_path: preferred_local(local)
+            .and_then(|k| k.path.as_deref())
+            .map(tilde),
+    };
+    match crate::local::ssh_identity::check(&creds).await {
+        KeyStatus::Matched => SshReadiness::Ready,
+        KeyStatus::NoLocalMatch { local, .. } | KeyStatus::NoneRegistered { local } => {
+            named(&local)
+        }
+        KeyStatus::Unknown { reason } => SshReadiness::Unverified { reason },
+    }
+}
+
+/// The openresearch row's one-line status. Every branch that tells the user to
+/// run something names a path we actually found — never a guessed one.
+fn openresearch_summary(logged_in: bool, ssh: &SshReadiness) -> String {
+    if !logged_in {
+        return "Not signed in — run orx login".to_string();
+    }
+    match ssh {
+        SshReadiness::Ready => "Signed in — ephemeral boxes billed to your org".to_string(),
+        SshReadiness::NoUsableKey {
+            pub_path: Some(path),
+        } => format!("No usable SSH key — run orx ssh-key add {path}"),
+        SshReadiness::NoUsableKey { pub_path: None } => {
+            "No SSH key on this computer — run ssh-keygen -t ed25519, then orx ssh-key add"
+                .to_string()
+        }
+        SshReadiness::Unverified { reason } => {
+            format!("Signed in — couldn't check your SSH key ({reason})")
+        }
+    }
+}
+
+fn compute_settings_json(ssh: SshReadiness) -> Value {
     let default = crate::config::compute_default();
     let (default_backend, default_flavor) = match &default {
         Some((b, f)) => (Some(b.as_str()), f.as_deref()),
@@ -3088,12 +3286,12 @@ fn compute_settings_json() -> Value {
         },
         {
             "id": "openresearch",
-            "configured": or_logged_in,
-            "summary": if or_logged_in {
-                "Signed in — ephemeral boxes billed to your org"
-            } else {
-                "Not signed in — run orx login"
-            },
+            // Signed in alone would be a green light on a backend that can't
+            // connect — the box authorizes your *registered* keys, so one of
+            // them has to be on this machine too.
+            "configured": or_logged_in && ssh == SshReadiness::Ready,
+            "unverified": or_logged_in && matches!(ssh, SshReadiness::Unverified { .. }),
+            "summary": openresearch_summary(or_logged_in, &ssh),
         },
     ]);
     json!({
@@ -3104,8 +3302,9 @@ fn compute_settings_json() -> Value {
 }
 
 async fn compute_settings() -> ApiResult {
+    let ssh = openresearch_ssh_readiness().await;
     // fs/env probes only, but keep them off the async runtime anyway.
-    let payload = tokio::task::spawn_blocking(compute_settings_json)
+    let payload = tokio::task::spawn_blocking(move || compute_settings_json(ssh))
         .await
         .map_err(|e| ApiError::from(anyhow!("compute settings task failed: {e}")))?;
     Ok(Json(payload))
@@ -3134,12 +3333,15 @@ async fn set_compute_default(Json(req): Json<SetComputeDefaultReq>) -> ApiResult
     if let Some(b) = &backend {
         local::validate_compute_default(b, flavor.as_deref()).map_err(bad_request)?;
     }
+    // Picking openresearch as the default is the moment to answer "will this
+    // actually work?", so the row that comes back is honest about the SSH key.
+    let ssh = openresearch_ssh_readiness().await;
     // Validation already ran above, so a failure in here is a server-side
     // fault (io error, corrupt settings.json refusal) — surface it as 500 via
     // the plain ApiError conversion, not as a 400 blaming the request.
     let payload = tokio::task::spawn_blocking(move || -> Result<Value> {
         crate::config::set_compute_default(backend, flavor)?;
-        Ok(compute_settings_json())
+        Ok(compute_settings_json(ssh))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("compute default task failed: {e}")))??;
@@ -3164,7 +3366,7 @@ async fn openresearch_settings() -> ApiResult {
             "loggedIn": false,
             "apiUrl": null,
             "orgs": [],
-            "sshKeyRegistered": null,
+            "sshKeyStatus": "unknown",
             "error": null,
         })));
     };
@@ -3176,18 +3378,39 @@ async fn openresearch_settings() -> ApiResult {
             Vec::new()
         }
     };
-    let ssh_key_registered = match crate::client::list_ssh_keys(&creds).await {
-        Ok(k) => Some(!k.ssh_keys.is_empty()),
-        Err(e) => {
-            error.get_or_insert(e.to_string());
-            None
+    // "Registered" alone is a misleading green: a key registered from another
+    // laptop leaves this machine unable to reach any box. Report whether the
+    // private half is actually here.
+    use crate::local::ssh_identity::{preferred_local, tilde, KeyStatus};
+    // Hand back the .pub we actually found so the note can name a real file
+    // rather than guessing at ~/.ssh/id_ed25519.pub.
+    let mut ssh_key_path: Option<String> = None;
+    let mut note_key = |local: &[crate::local::ssh_identity::LocalKey]| {
+        ssh_key_path = preferred_local(local)
+            .and_then(|k| k.path.as_deref())
+            .map(tilde);
+    };
+    let ssh_key_status = match crate::local::ssh_identity::check(&creds).await {
+        KeyStatus::Matched => "matched",
+        KeyStatus::NoLocalMatch { local, .. } => {
+            note_key(&local);
+            "no_local_match"
+        }
+        KeyStatus::NoneRegistered { local } => {
+            note_key(&local);
+            "none_registered"
+        }
+        KeyStatus::Unknown { reason } => {
+            error.get_or_insert(reason);
+            "unknown"
         }
     };
     Ok(Json(json!({
         "loggedIn": true,
         "apiUrl": creds.api_url,
         "orgs": orgs,
-        "sshKeyRegistered": ssh_key_registered,
+        "sshKeyStatus": ssh_key_status,
+        "sshKeyPath": ssh_key_path,
         "error": error,
     })))
 }
@@ -3276,12 +3499,14 @@ async fn create_chat_session(
         harness: req.harness,
         native_session_id: None,
         title: None,
+        title_source: None,
         model: nonempty(req.model),
         permission_mode: nonempty(req.permission_mode),
         reasoning_level: nonempty(req.reasoning_level),
         persona,
         parent_session_id: None,
         archived: false,
+        context_usage_json: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
@@ -3382,6 +3607,9 @@ async fn approve_proposal(
         // Nest the spawned subagent under the orchestrator that suggested it.
         parent_session_id: prop.parent_session_id.clone(),
         archived: false,
+        // The task text titles it up front, so the auto-titler leaves it alone.
+        title_source: None,
+        context_usage_json: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
@@ -3542,7 +3770,7 @@ async fn chat_attachment(Path(name): Path<String>) -> std::result::Result<Respon
 }
 
 async fn interrupt_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    state.chat.interrupt(&id).await?;
+    state.chat.interrupt_by_user(&id).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -3710,7 +3938,7 @@ fn collect_events(cursor: &mut EventCursor, first: bool) -> Result<Vec<Event>> {
                 .insert(project.id.clone(), project.updated_at);
             out.push(json_event(
                 "project.updated",
-                &json!({ "project": project }),
+                &json!({ "project": project_json(&project) }),
             ));
         }
         push_experiment_events(&store, &project.id, cursor, &mut out)?;
@@ -3935,4 +4163,48 @@ async fn play_referer_asset(headers: &axum::http::HeaderMap, path: &str) -> Opti
     })
     .await
     .ok()?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn no_key(path: Option<&str>) -> SshReadiness {
+        SshReadiness::NoUsableKey {
+            pub_path: path.map(str::to_string),
+        }
+    }
+
+    /// The row used to hardcode `~/.ssh/id_ed25519.pub`, which is wrong on any
+    /// machine whose key is named something else.
+    #[test]
+    fn names_the_key_file_we_actually_found() {
+        let s = openresearch_summary(true, &no_key(Some("~/.ssh/work_ed25519.pub")));
+        assert!(s.contains("orx ssh-key add ~/.ssh/work_ed25519.pub"));
+        assert!(!s.contains("id_ed25519"), "no guessed default");
+    }
+
+    /// Nothing on disk to register, so `ssh-key add` alone would fail.
+    #[test]
+    fn tells_you_to_generate_one_when_there_is_no_key() {
+        let s = openresearch_summary(true, &no_key(None));
+        assert!(s.contains("ssh-keygen"));
+    }
+
+    #[test]
+    fn signed_out_beats_every_key_state() {
+        assert!(openresearch_summary(false, &SshReadiness::Ready).contains("orx login"));
+        assert!(openresearch_summary(false, &no_key(None)).contains("orx login"));
+    }
+
+    #[test]
+    fn unverified_says_why_it_could_not_check() {
+        let s = openresearch_summary(
+            true,
+            &SshReadiness::Unverified {
+                reason: "timed out".to_string(),
+            },
+        );
+        assert!(s.contains("timed out"), "surfaces the cause: {s}");
+    }
 }

@@ -68,6 +68,9 @@
   --radius-lg: 10px;
   --radius-xl: 12px;
   --radius-full: 999px;
+  /* Top offset for centred-ish modals. Capped in px so a short laptop screen
+     doesn't give up a third of its height to dead space. */
+  --modal-top: min(30vh, 260px);
 
   /* xterm surface — deliberately dark in both themes; keep in sync with the
      terminal theme in LogTerminal.tsx. */
@@ -502,8 +505,10 @@ textarea::placeholder {
 .status-badge.live .dot {
   animation: pulse 1.2s ease-in-out infinite;
 }
-/* The status color lives on the dot; the label stays neutral. */
-.st-done .dot {
+/* The status color lives on the dot — or on the check icon, for states that
+   render one instead (Connected). The label stays neutral either way. */
+.st-done .dot,
+.st-done > svg {
   color: var(--accent-green);
 }
 .st-failed .dot {
@@ -839,7 +844,8 @@ textarea::placeholder {
 .pane-toolbar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
   padding: 10px 12px 0;
   flex-shrink: 0;
 }
@@ -859,6 +865,24 @@ textarea::placeholder {
 .plan-tab-content .md {
   max-width: var(--readable-col);
 }
+.subagent-tab-content {
+  overflow-y: auto;
+  background: var(--base);
+  padding: 12px 16px;
+}
+.subagent-tab-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border-variant);
+}
+.subagent-live {
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  color: var(--accent-amber);
+}
 
 /* Segmented control: a clearly-darker track (the theme's creams all blend
    into each other) with a raised white pill on the active segment. */
@@ -877,12 +901,16 @@ textarea::placeholder {
   color: var(--text);
   border-radius: var(--radius-sm);
 }
-.seg button:hover {
+.seg button:not(:disabled):hover {
   color: var(--text);
 }
 .seg button.active {
   background: var(--base);
   box-shadow: 0 1px 3px color-mix(in oklab, var(--text) 25%, transparent);
+}
+.seg button:disabled {
+  color: var(--muted);
+  cursor: default;
 }
 
 /* ---- chat ---- */
@@ -973,6 +1001,29 @@ textarea::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* An auto-generated title materializes character by character when it replaces
+   the first-line placeholder. Quiet on purpose: no color, no scale, no layout
+   shift — the parent keeps its single-line box and its ellipsis. Each character
+   is an inline-block (transform doesn't apply to plain inline boxes) so the
+   glyph can lift without disturbing the line box; the per-character delay is
+   inline-styled. Spaces stay bare inline text and just fade. */
+.title-reveal-char {
+  display: inline-block;
+  animation: title-char-in 240ms ease-out both;
+}
+@keyframes title-char-in {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(0.15em);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .title-reveal-char {
+    animation: none;
+  }
+}
+
 .session-row .session-time {
   font-size: var(--fs-2xs);
   color: var(--muted);
@@ -1104,6 +1155,25 @@ textarea::placeholder {
   border-color: var(--text);
 }
 
+/* Shown while an existing session's transcript is fetched, so switching
+   sessions never flashes the empty state before its messages seed in. */
+.chat-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--subtext);
+  font-size: var(--fs-xl);
+  padding: 20px;
+}
+/* Larger, more visible wheel than the inline .spinner used in the thread. */
+.chat-loading .spinner {
+  width: 22px;
+  height: 22px;
+  border-width: 3px;
+}
+
 /* user message: a right-aligned rounded bubble, no border, no label */
 .msg-user {
   align-self: flex-end;
@@ -1175,6 +1245,13 @@ textarea::placeholder {
 .tool-group.has-error .tool-group-summary {
   color: var(--accent-red);
 }
+/* A single-tool group renders its ToolRow directly (no summary line); keep the
+   errored-line color parity with grouped summaries. The child combinator is
+   load-bearing: grouped rows live under .tool-group-rows and must keep their
+   normal color. */
+.tool-group.has-error > .tool-row .tool-line {
+  color: var(--accent-red);
+}
 .tool-chevron {
   flex-shrink: 0;
   color: var(--muted);
@@ -1190,6 +1267,50 @@ textarea::placeholder {
   margin: 2px 0 4px 7px;
   padding-left: 10px;
   border-left: 1px solid var(--border-variant);
+}
+/* A sub-agent spawn row: one clickable line that opens the transcript in the
+   right panel (never expands inline). Sized like the transcript body text. */
+.subagent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 2px 0;
+  padding: 3px 4px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: var(--fs-base);
+  text-align: left;
+  border-radius: var(--radius-sm);
+}
+.subagent-row:hover:not(:disabled) {
+  background: var(--surface);
+}
+.subagent-row:disabled {
+  cursor: default;
+}
+.subagent-row.has-error {
+  color: var(--accent-red);
+}
+/* Match the body text size/color; keep flex:1 + min-width:0 (from base
+   .tool-line) so a long label truncates with an ellipsis and the chevron pins
+   right. */
+.subagent-row .tool-line {
+  font-size: var(--fs-base);
+  color: var(--text);
+}
+.subagent-row-chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.subagent-icon {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.subagent-empty {
+  padding: 3px 4px;
+  font-size: var(--fs-md);
+  color: var(--muted);
 }
 .tool-row {
   display: flex;
@@ -1330,7 +1451,13 @@ textarea::placeholder {
   resize: none;
   padding: 10px 12px 4px;
   font-size: var(--fs-md);
-  min-height: 42px;
+  /* Auto-grow with the draft (Firefox doesn't ship field-sizing yet and
+     falls back to the fixed two-row box). min-height keeps the two-row
+     resting look — field-sizing ignores rows — and max-height caps the
+     growth, past which the textarea scrolls internally. Also matches the
+     plan strip's revise textarea, which grows the same way. */
+  field-sizing: content;
+  min-height: 52px;
   max-height: 180px;
 }
 /* pasted images waiting to be sent */
@@ -1446,6 +1573,17 @@ textarea::placeholder {
   border-radius: var(--radius-xs);
   padding: 1px 5px;
 }
+/* KaTeX math — tame the library's 1.21em default so formulas sit at body
+   size, and let wide display equations scroll instead of overflowing. */
+.md .katex {
+  font-size: 1.05em;
+}
+.md .katex-display {
+  margin: 12px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
 /* File mention chip — reads as clickable inline code (thin border, panel
    fill, mono), matching openresearch.sh's FileMention. */
 .md .file-chip {
@@ -1538,14 +1676,19 @@ textarea::placeholder {
 .md a {
   color: var(--primary);
 }
+/* Same wide-table treatment as .report-md table: cells keep whole-word
+   min-content widths (see .md td below), so an over-wide table scrolls in
+   place instead of clipping at the pane edge. */
 .md table {
   border-collapse: collapse;
-  width: 100%;
+  display: block;
+  width: max-content;
+  max-width: 100%;
   font-size: var(--fs-md);
   margin: 10px 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  overflow: hidden;
+  overflow-x: auto;
 }
 .md th,
 .md td {
@@ -1553,6 +1696,11 @@ textarea::placeholder {
   padding: 8px 14px;
   text-align: left;
   color: var(--text);
+  /* .md's word-break: break-word shrinks cell min-content width to one
+     character, letting auto table layout split short words mid-word;
+     overflow-wrap keeps full-word min-content and only breaks overflow. */
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 .md tr:last-child td {
   border-bottom: none;
@@ -1710,6 +1858,43 @@ textarea::placeholder {
   padding: 3px 5px;
 }
 
+/* Agent scope: dashed "…" pill standing in for a region of the tree created
+ * by other agents. Clicking it switches the pane back to Project scope. */
+.react-flow__node.react-flow__node-elided.selectable {
+  cursor: pointer;
+}
+.elided-node {
+  /* Keep width/height in sync with ELIDED_W/ELIDED_H in TreeView.tsx (layout
+     math positions the pill with them). */
+  width: 148px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--text) 3%, transparent);
+  color: var(--muted);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-medium);
+  text-align: left;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.elided-node:hover {
+  border-color: var(--text);
+  color: var(--text);
+}
+.elided-node .elided-node-label {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+.elided-node .elided-node-sub {
+  /* Stays muted while the pill's label brightens on hover. */
+  color: var(--muted);
+}
+
 /* run-history squares (RUNS strip on node cards) */
 .run-squares {
   display: flex;
@@ -1733,6 +1918,144 @@ textarea::placeholder {
 }
 .run-sq.other {
   border: 1.5px solid var(--border);
+}
+
+/* Hover detail card for tree nodes. Portaled to <body> at a fixed viewport
+ * position (outside the canvas transform), so it neither scales with zoom nor
+ * disturbs the tree layout. */
+.exp-hover-card {
+  position: fixed;
+  /* Must clear the maximized right pane (.right-pane.max, z 60) that
+   * hosts the tree; the portal's end-of-body DOM order breaks the tie in the
+   * card's favor. Still below the modal tier (100). */
+  z-index: 60;
+  background: var(--base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  padding: 14px 16px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+/* Scoped mono: font family only, so the row's own size scale wins (the global
+ * .mono class pins font-size and would break the 10px foot row). */
+.exp-hover-card .hc-mono {
+  font-family: var(--mono);
+}
+.exp-hover-card .hc-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.exp-hover-card .hc-slug {
+  font-family: var(--mono);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.exp-hover-card .hc-title {
+  margin-top: 3px;
+  color: var(--text);
+}
+/* Plain text between hairline rules — no fill, matching the app's quiet
+ * hairline idiom (a recessed box read as a heavy slab on long results). */
+.exp-hover-card .hc-body {
+  margin-top: 10px;
+  border-top: 1px solid var(--border-variant);
+  padding-top: 10px;
+  line-height: 1.6;
+  white-space: pre-line;
+  display: -webkit-box;
+  -webkit-line-clamp: 10;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Expanded via the Show more toggle: unclamp, but keep the card viewport-
+ * sized — long results scroll inside the body instead of growing the card
+ * past the screen. */
+.exp-hover-card .hc-body.expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  max-height: 45vh;
+  overflow-y: auto;
+  /* Breathing room so mid-scroll text doesn't sit flush on the next rule. */
+  padding-bottom: 4px;
+}
+.exp-hover-card .hc-toggle {
+  margin-top: 4px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--muted);
+}
+/* Quiet muted→text affordance (no underline/accent — deliberate: the card
+ * is all hairlines and an accent link would be its loudest element). */
+.exp-hover-card .hc-toggle:hover {
+  color: var(--text);
+}
+.exp-hover-card .hc-failure {
+  margin-top: 8px;
+  color: var(--accent-red);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.exp-hover-card .hc-stats {
+  margin-top: 10px;
+  border-top: 1px solid var(--border-variant);
+  padding-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: var(--fs-xs);
+  color: var(--text);
+}
+.exp-hover-card .hc-git {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-variant);
+  font-size: var(--fs-xs);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.exp-hover-card .hc-git-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.exp-hover-card .hc-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.exp-hover-card .hc-foot {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+}
+.exp-hover-card .hc-foot .hc-mono {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .react-flow__handle {
@@ -2111,10 +2434,10 @@ textarea::placeholder {
   padding-top: 96px;
 }
 .onb-eyebrow {
-  font-size: var(--fs-2xs);
+  font-size: var(--fs-xl);
   font-weight: var(--fw-semibold);
   color: var(--muted);
-  margin-bottom: 14px;
+  margin-bottom: 18px;
 }
 .onb-title {
   margin: 0 0 6px;
@@ -2159,9 +2482,16 @@ textarea::placeholder {
   font-size: var(--fs-sm);
   color: var(--subtext);
 }
-.onb-card-meta code {
+/* Inline command chips, wherever renderNote() emits them. */
+.onb-card-meta code,
+.model-more code {
   font-family: var(--mono);
   font-size: var(--fs-xs);
+  background: var(--panel);
+  border: 1px solid var(--border-variant);
+  border-radius: var(--radius-xs);
+  padding: 1px 5px;
+  white-space: nowrap;
 }
 .onb-card-row {
   display: grid;
@@ -2178,64 +2508,105 @@ textarea::placeholder {
   font-size: var(--fs-md);
   padding: 8px 0;
 }
-.onb-gh-options {
+/* The fix for the row above it: one command, one action. Indented under its
+   status row so it reads as a remedy, not a third peer item. */
+.onb-fix {
   display: flex;
-  flex-direction: column;
-  gap: 16px;
-  margin-top: 12px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border-variant);
-}
-.onb-gh-option {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.onb-gh-option-label {
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
-  color: var(--text);
-}
-.onb-gh-option-body {
-  display: flex;
-  align-items: center;
+  align-items: baseline;
   flex-wrap: wrap;
   gap: 10px;
+  margin: 6px 0 9px;
 }
-.onb-gh-cmd {
-  font-family: var(--mono);
-  font-size: var(--fs-sm);
+/* Nice-to-have that isn't required to proceed (git identity) — set below the
+   requirement and visually quieter so it never reads as a second blocker. */
+.onb-aside {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-variant);
+}
+.onb-aside-text {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  line-height: 1.5;
+}
+/* The identity command is long — let it wrap inside the chip rather than
+   overflow the card. */
+.onb-aside .onb-cmd-chip {
+  max-width: 100%;
+}
+.onb-aside .onb-cmd-chip code {
+  font-size: var(--fs-xs);
+  white-space: normal;
+  word-break: break-word;
+}
+/* The call to action. Full-strength text so it's unmissable, but regular
+   weight at body size — semibold would tie it with the `GitHub` row label
+   above and read as a second heading. */
+.onb-fix-label {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-regular);
+  color: var(--text);
+}
+/* Secondary escape hatch (paste a PAT) — deliberately quiet so it doesn't
+   compete with the primary command. */
+.onb-fix-alt {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.onb-fix-alt:hover {
+  color: var(--text);
+}
+/* Command + its copy button share one border, so the button reads as part of
+   the command rather than a separate control next to it. */
+.onb-cmd-chip {
+  display: inline-flex;
+  align-items: stretch;
+  /* Hug the command — the card is a flex column, which would stretch it. */
+  align-self: flex-start;
+  max-width: 100%;
   background: var(--panel);
   border: 1px solid var(--border-variant);
   border-radius: var(--radius-sm);
-  padding: 3px 8px;
+  overflow: hidden;
 }
-.onb-gh-hint {
-  font-size: var(--fs-sm);
-  color: var(--subtext);
-}
-.onb-gh-hint code {
+.onb-cmd-chip code {
   font-family: var(--mono);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
+  padding: 4px 9px;
 }
-.onb-gh-or {
-  display: flex;
+.onb-cmd-copy {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
+  flex-shrink: 0;
+  padding: 0 8px;
+  border: 0;
+  border-left: 1px solid var(--border-variant);
+  background: none;
   color: var(--muted);
-  font-size: var(--fs-xs);
+  cursor: pointer;
 }
-.onb-gh-or::before,
-.onb-gh-or::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--border-variant);
+.onb-cmd-copy:hover {
+  background: var(--surface);
+  color: var(--text);
 }
-.onb-gh-option .onb-token-form {
-  flex: 1;
-  min-width: 0;
-  margin-top: 0;
+/* Why Continue is disabled on step 1 — a disabled control with no explanation
+   reads as a bug. */
+.onb-gate-hint {
+  margin: 18px 0 0;
+  font-size: var(--fs-base);
+  font-weight: var(--fw-semibold);
+  line-height: 1.5;
+  color: var(--text);
 }
 .onb-token-form {
   display: flex;
@@ -2383,14 +2754,19 @@ textarea::placeholder {
   inset: 0;
   background: rgba(29, 27, 26, 0.4);
   display: flex;
-  align-items: center;
+  /* Top-anchored, not centered: the card's height changes with the selected
+     tab, and centering would slide the tab row up/down under the cursor. */
+  align-items: flex-start;
   justify-content: center;
+  padding: var(--modal-top) 16px 24px;
+  overflow-y: auto;
   z-index: 100;
 }
 .modal {
   width: 480px;
   max-width: 94vw;
-  max-height: 88vh;
+  /* Derived from the offset so the two can't drift out of sync. */
+  max-height: calc(100vh - var(--modal-top) - 48px);
   overflow-y: auto;
   background: var(--base);
   border: 1px solid var(--border);
@@ -4070,6 +4446,36 @@ a.files-pill:hover {
   min-width: 190px;
   padding: 6px;
 }
+/* Context-window meter: ring trigger + title/value head over a thin bar. */
+.composer-bare.context-ring {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 8px;
+}
+.context-meter-menu {
+  width: 280px;
+  padding: 10px 12px 12px;
+}
+.context-meter-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.context-meter-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.context-meter-menu .progress {
+  margin: 8px 0 0;
+}
+.context-meter-menu .progress-track {
+  height: 5px;
+  border: none;
+  background: var(--border);
+}
 /* Right-anchored menus (bottom-right controls) open toward the left edge. */
 .model-menu.align-right,
 .option-menu.align-right {
@@ -4206,6 +4612,47 @@ a.files-pill:hover {
 .skill-item .skill-desc {
   font-size: var(--fs-xs);
   color: var(--subtext);
+}
+
+/* Command chip — the picked slash-skill, rendered as a unit in the composer
+   (removable) and echoed in sent user bubbles (inert). */
+.skill-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--primary);
+  background: var(--primary-subtle);
+  border: 1px solid var(--border-variant);
+  border-radius: var(--radius-sm);
+}
+/* The chip overlays the textarea's first line, Claude-desktop style; the
+   textarea's first line is indented past it (inline text-indent, measured
+   from the chip's width), so wrapped args flow full-width beneath the chip. */
+.composer-input {
+  position: relative;
+  display: flex;
+  /* Clips the chip once the textarea scrolls it out of the first line. */
+  overflow: hidden;
+}
+.composer-input textarea {
+  flex: 1;
+}
+.composer-chip {
+  position: absolute;
+  /* Sit on the textarea's first text line (10px top padding, --fs-md text)
+     despite the chip's smaller --fs-sm body. */
+  top: 9px;
+  left: 12px;
+  z-index: 1;
+  /* Inert like inline text — clicks land in the textarea underneath. */
+  pointer-events: none;
+}
+.msg-user .skill-chip {
+  margin-right: 2px;
+  vertical-align: baseline;
 }
 
 /* --- file viewer (right-pane tab opened from chat tool rows) ------------- */
@@ -4796,6 +5243,62 @@ a.files-pill:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- live worktree tab (WorktreeTab.tsx) ----
+   The Changes/Files viewer for a chat session's private worktree. Reuses the
+   .code-tab shell; adds a branch chip, a status-badged change list, and a diff
+   region below it. */
+.wt-branch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: color-mix(in oklab, var(--text) 8%, transparent);
+  color: var(--subtext);
+  font-size: var(--fs-xs);
+}
+.wt-branch-chip > svg {
+  flex-shrink: 0;
+}
+.wt-branch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+.wt-count {
+  padding: 0;
+  border: none;
+}
+/* Same horizontal gutter as .drawer-body so the diff cards match the
+ * experiment Changes view; no padding-top for the same reason there — sticky
+ * diff-file headers would sit below the top with content peeking through.
+ * The first child carries the spacing as margin instead. */
+.wt-changes {
+  padding: 0 16px 24px;
+}
+.wt-changes > :first-child {
+  margin-top: 14px;
+}
+.wt-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--muted);
+}
+.wt-empty > svg {
+  color: var(--subtext);
+}
+.wt-empty p {
+  margin: 0;
+  max-width: 320px;
+  font-size: var(--fs-sm);
 }
 
 /* ---- onboarding tour ----

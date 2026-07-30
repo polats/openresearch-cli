@@ -56,7 +56,7 @@ pub fn legacy_root_warning(project: &LocalProject, experiment: &LocalExperiment)
             format!(
                 "warning: root experiment {} rides the project's base branch '{}' \
                  (created before baselines got their own orx/* branch). Treat '{}' \
-                 as frozen — publish READMEs/notebooks elsewhere, or recreate the \
+                 as immutable — publish READMEs/notebooks elsewhere, or recreate the \
                  tree with `orx create-experiment --baseline`.",
                 experiment.id, project.baseline_branch, project.baseline_branch
             )
@@ -67,8 +67,8 @@ pub fn legacy_root_warning(project: &LocalProject, experiment: &LocalExperiment)
 /// pushed to origin: a child forks off its parent's tip, a baseline/root off
 /// the project's base branch. The base branch itself is never an experiment
 /// node — it stays mutable (README, notebooks, publication surface) while
-/// `orx/*` branches hold the frozen experiment code. Matches the server path,
-/// which also branches baselines to `orx/<slug>`.
+/// `orx/*` branches hold the experiment nodes' recorded code. Matches the
+/// server path, which also branches baselines to `orx/<slug>`.
 #[allow(clippy::too_many_arguments)]
 pub fn create_experiment(
     store: &Store,
@@ -179,6 +179,7 @@ pub fn create_experiment(
         merge_parent_experiment_id: merge_parent.map(|m| m.id.clone()),
         created_at: now,
         updated_at: now,
+        chat_session_id: crate::local::chat::launching_chat_session(),
     };
     store.create_local_experiment(&experiment)?;
     Ok((experiment, merge_warning))
@@ -226,6 +227,7 @@ mod tests {
             merge_parent_experiment_id: None,
             created_at: 0,
             updated_at: 0,
+            chat_session_id: None,
         }
     }
 

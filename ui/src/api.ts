@@ -8,6 +8,10 @@ export interface Project {
   githubRepo: string;
   baselineBranch: string;
   repoPath: string;
+  /** Absolute path of the project's files dir (`<data dir>/files/<slug>`),
+   *  non-canonical to match the paths agents inline into chat. Lets the UI
+   *  recognize a files-dir link and route it to the files endpoints. */
+  filesDir: string;
   runCommand?: string | null;
   /** arXiv id the project starts from (versionless). */
   paperId?: string | null;
@@ -50,6 +54,8 @@ export interface Experiment {
   mergeParentExperimentId?: string | null;
   /** Entry page under /play/<id>/ (path + optional query); null = index.html. */
   playEntry?: string | null;
+  /** Chat session that created this experiment; null for dashboard/legacy rows. */
+  chatSessionId?: string | null;
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
@@ -153,6 +159,18 @@ export interface ResolvedPaper {
 export const searchPapers = (q: string) =>
   get<{ papers: PaperHit[] }>(`/api/papers/search?q=${encodeURIComponent(q)}`).then(
     (r) => r.papers,
+  );
+
+/** The signed-in GitHub login, for naming the account a new repo lands on.
+ * `login` is null when there's no usable token. */
+export const githubAccount = () => get<{ login: string | null }>("/api/github/account");
+
+/** Whether the stored credentials can push to a repo. An unanswerable check
+ * (no token / API hiccup) reports `true`, matching the server's own fallback,
+ * so an outage never shows a fork choice the server wouldn't honour. */
+export const repoAccess = (owner: string, repo: string) =>
+  get<{ canPush: boolean }>(
+    `/api/github/repo-access?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`,
   );
 
 /** Resolve an arXiv id / URL to title + linked GitHub repo. May take a few
@@ -424,8 +442,9 @@ export const getWorkingTree = (projectId: string) =>
 export type CheckoutRoot = "worktree" | "clone" | "branch";
 
 /** Source selector for checkout reads: `ref` picks a branch's committed
- * state (sessionId is then ignored server-side); `sessionId` alone picks the
- * session's live worktree; neither picks the hub clone. */
+ * state; `sessionId` picks the session's live worktree; neither picks the hub
+ * clone. Don't send both — the file endpoint ignores `sessionId` under `ref`,
+ * but code-tree rejects the combination outright. */
 export interface CheckoutRef {
   sessionId?: string;
   ref?: string;
@@ -465,11 +484,43 @@ export interface CodeTree {
 }
 
 /** Flat file listing of the project — a branch's committed tree when `ref` is
- * given, else the hub clone's checkout — plus the branch name. */
-export const getCodeTree = (projectId: string, opts: { ref?: string } = {}) => {
+ * given, else a chat session's live worktree when `sessionId` is given, else
+ * the hub clone's checkout — plus the branch name. `ref` and `sessionId` are
+ * mutually exclusive (the server rejects both). */
+export const getCodeTree = (projectId: string, opts: CheckoutRef = {}) => {
   const qs = checkoutQuery(opts).toString();
   return get<CodeTree>(`/api/projects/${projectId}/code-tree${qs ? `?${qs}` : ""}`);
 };
+
+/** How a file in a session's worktree differs from the diff base. Lowercase to
+ * match the server's serialization and the single-letter badges the UI draws. */
+export type ChangedStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
+
+export interface ChangedFile {
+  path: string;
+  status: ChangedStatus;
+  /** Pre-rename path — present only for `renamed` entries. */
+  oldPath?: string;
+}
+
+/** Live view of a chat session's private worktree. `exists: false` when the
+ * agent hasn't started yet (the worktree is created lazily on the first turn)
+ * or was pruned — the remaining fields are then absent. `files` is the
+ * complete change list even when `diff` truncates (they come from separate git
+ * passes); `diff` is the working tree against the baseline merge-base, with
+ * untracked files rendered as new-file diffs. */
+export interface SessionWorktree {
+  exists: boolean;
+  /** Checked-out branch, or null when detached at the baseline tip. */
+  branch?: string | null;
+  baselineBranch?: string;
+  baseSha?: string;
+  files?: ChangedFile[];
+  diff?: DiffPayload;
+}
+
+export const getSessionWorktree = (sessionId: string) =>
+  get<SessionWorktree>(`/api/chat/sessions/${sessionId}/worktree`);
 
 /** A GitHub `tree` URL for a branch. Branch names contain `/` (`orx/<slug>`),
  * so encode each path segment — never the whole string, which would escape the
@@ -668,6 +719,12 @@ export type ComputeTargetId =
 export interface ComputeTargetSummary {
   id: ComputeTargetId;
   configured: boolean;
+  /**
+   * The readiness check couldn't run (offline, unreadable ~/.ssh), so
+   * `configured` is a guess rather than an answer. Absent for backends whose
+   * state is decidable locally.
+   */
+  unverified?: boolean;
   summary: string;
 }
 
@@ -709,8 +766,14 @@ export interface OpenResearchSettings {
   loggedIn: boolean;
   apiUrl: string | null;
   orgs: string[];
-  /** null = signed in but the key check failed (see error). */
-  sshKeyRegistered: boolean | null;
+  /**
+   * Whether a registered key's private half is on THIS machine — `matched` is
+   * the only state that can actually reach a box. Optional: an older `orx`
+   * binary serving a newer ui omits it.
+   */
+  sshKeyStatus?: "matched" | "no_local_match" | "none_registered" | "unknown";
+  /** The `.pub` on this machine worth registering; null if there isn't one. */
+  sshKeyPath?: string | null;
   error: string | null;
 }
 
@@ -768,6 +831,18 @@ export const deleteFile = (projectId: string, path: string) =>
 export const fileUrl = (projectId: string, path: string) =>
   `/api/projects/${projectId}/files/file?path=${encodeURIComponent(path)}`;
 
+/** Text body of a files-dir file (raw bytes decoded as UTF-8), or `null` when
+ *  the file is missing (404). The endpoint returns bytes, not JSON, so this
+ *  bypasses the `get`/`json` helpers; a 404 is a normal "not found", not an
+ *  error to surface. */
+export const getFilesDirFileText = (projectId: string, path: string): Promise<string | null> =>
+  fetch(fileUrl(projectId, path)).then((r) => {
+    if (r.status === 404) return null;
+    // Bare message — the viewer prefixes "Failed to load file:" itself.
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.text();
+  });
+
 export interface GitSettings {
   gitVersion: string | null;
   userName: string | null;
@@ -809,7 +884,30 @@ export type HarnessId = "claude-code" | "codex" | "opencode";
 
 export interface HarnessModel {
   id: string;
+  /**
+   * Reasoning/effort choices this *specific* model accepts, led by the
+   * `default` sentinel. Absent means "no list of its own" — fall back to the
+   * harness-wide {@link HarnessOptions.reasoningLevels}. An empty array is
+   * different: the model was checked and genuinely has no reasoning control,
+   * so the picker is hidden. Use `reasoningFor` rather than reading this
+   * directly.
+   */
+  reasoningLevels?: OptionChoice[];
+  /** The catalog's own human name ("Opus", "GPT-5.6 Sol"). Absent on
+   * statically-listed fallback models — derive from the id then. */
+  displayName?: string;
+  /** The catalog's one-line blurb. For Claude this carries the resolved
+   * version ("Opus 4.8 with 1M context · …") — its aliases don't. */
+  description?: string;
+  /** The tier that actually runs when nothing is chosen — present only when
+   * the CLI reports it (codex). When set, `reasoningLevels` has no `default`
+   * sentinel and the composer preselects this concrete tier. */
+  defaultReasoningLevel?: string;
 }
+
+/** Display label for a harness model: the catalog's own name when it has one,
+ * else prettified from the id. */
+export const harnessModelLabel = (m: HarnessModel) => m.displayName ?? modelLabel(m.id);
 
 /** One selectable value in a composer toggle (permission mode / reasoning). */
 export interface OptionChoice {
@@ -817,7 +915,12 @@ export interface OptionChoice {
   label: string;
 }
 
-/** The toggle vocabulary a harness supports. Empty arrays hide the control. */
+/**
+ * The toggle vocabulary a harness supports. Empty arrays hide the control.
+ *
+ * `reasoningLevels` here is the harness-wide *fallback*; per-model choices ride
+ * on {@link HarnessModel.reasoningLevels} and win. Resolve with `reasoningFor`.
+ */
 export interface HarnessOptions {
   permissionModes: OptionChoice[];
   defaultPermissionMode?: string | null;
@@ -842,6 +945,70 @@ export interface HarnessUsage {
   note?: string;
   /** External link to manage/top-up usage (Zen dashboard). */
   manageUrl?: string;
+}
+
+/**
+ * Wire id for "send no explicit effort/variant — let the CLI and its own config
+ * decide". Must match `REASONING_DEFAULT_ID` in `src/local/harness/options.rs`.
+ */
+export const REASONING_DEFAULT_ID = "default";
+
+/**
+ * The reasoning choices to show for a harness + model, and the id to treat as
+ * the default.
+ *
+ * Per-model metadata wins when present (Codex's per-model tiers, OpenCode's
+ * `variants`); otherwise the harness-wide list applies. A model that reports an
+ * empty list genuinely has no reasoning control, so the picker is hidden — this
+ * is why the absent/empty distinction matters and `?? []` would be wrong.
+ */
+export function reasoningFor(
+  harness: Harness | undefined,
+  modelId: string | null | undefined,
+): { choices: OptionChoice[]; defaultId: string | null } {
+  const model = harness?.models.find((m) => m.id === modelId);
+  const choices = model?.reasoningLevels ?? harness?.options?.reasoningLevels ?? [];
+  // Preselection, in order of how much the CLI actually told us:
+  //  1. the model's reported concrete default (codex) — a real tier, shown as
+  //     the value that will run;
+  //  2. the `default` sentinel when it's on offer — "send no override", for
+  //     harnesses whose unset default isn't any fixed tier (Claude's adaptive
+  //     thinking) or is unknown (opencode);
+  //  3. the harness-wide default, then the first tier.
+  const modelDefault = model?.defaultReasoningLevel;
+  const defaultId =
+    modelDefault && choices.some((c) => c.id === modelDefault)
+      ? modelDefault
+      : choices.some((c) => c.id === REASONING_DEFAULT_ID)
+        ? REASONING_DEFAULT_ID
+        : (harness?.options?.defaultReasoningLevel ?? choices[0]?.id ?? null);
+  return { choices, defaultId };
+}
+
+/**
+ * Keep a stored reasoning level only if the given harness+model still offers
+ * it; otherwise fall back to that model's default. This is what makes switching
+ * models drop an effort the new model can't accept (e.g. `ultra` off Sol onto
+ * 5.5) instead of silently sending an invalid value.
+ */
+export function reconcileReasoning(
+  harness: Harness | undefined,
+  modelId: string | null | undefined,
+  current: string | null,
+): string | null {
+  // Harness not resolved yet — detection is async, and it can also fail. "We
+  // don't know what this model offers" is not "this model offers nothing", so
+  // leave the stored level alone; resetting it here would let a send that races
+  // the harness fetch overwrite a deliberate choice.
+  if (!harness) return current;
+  const { choices, defaultId } = reasoningFor(harness, modelId);
+  // A model with no reasoning control: the picker is hidden, so the user can no
+  // longer clear a level themselves. Return the sentinel rather than `null` —
+  // `null` reads as "no override supplied" and leaves whatever the session row
+  // already holds in place, which would keep sending a stale level the model
+  // never offered.
+  if (choices.length === 0) return REASONING_DEFAULT_ID;
+  return current && choices.some((c) => c.id === current) ? current : defaultId;
 }
 
 export interface Harness {
@@ -939,6 +1106,9 @@ export interface ChatPart {
   tool?: string;
   state?: ChatToolState;
   prompt?: ChatPrompt;
+  /** Nested transcript of a sub-agent this part spawned (Codex `subagent`
+   * tool). Streams live and recurses for sub-agents that spawn their own. */
+  children?: ChatPart[];
 }
 
 export interface ChatMessage {
@@ -948,11 +1118,22 @@ export interface ChatMessage {
   createdAt: number;
 }
 
+/** How much of the model's context window a session has used, measured off the
+ * most recent API request (latest wins, not cumulative). `contextWindow` is
+ * absent when the harness doesn't report one. */
+export interface ContextUsage {
+  usedTokens: number;
+  contextWindow?: number;
+}
+
 export interface ChatSession {
   id: string;
   projectId: string;
   harness: HarnessId;
   title: string | null;
+  /** Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
+   * (harness auto-title), `"user"` (rename). Null on legacy sessions. */
+  titleSource?: string | null;
   model: string | null;
   permissionMode: string | null;
   reasoningLevel: string | null;
@@ -965,6 +1146,7 @@ export interface ChatSession {
   createdAt: number;
   updatedAt: number;
   busy: boolean;
+  contextUsage?: ContextUsage;
 }
 
 export const listChatSessions = (projectId: string) =>
@@ -1104,6 +1286,19 @@ export function fmtBytes(n: number): string {
     u += 1;
   }
   return u === 0 ? `${n} B` : `${v.toFixed(1)} ${units[u]}`;
+}
+
+/** Compact token count, e.g. 62300 → "62k", 1_200_000 → "1.2M", 940 → "940". */
+export function fmtTokens(n: number): string {
+  if (n < 1000) return `${Math.round(n)}`;
+  // One decimal, dropped when it's .0 ("31.4k", "200k", "1M"). The k branch
+  // stops where toFixed(1) would round to "1000.0" (e.g. 999_960 → "1M").
+  if (n < 999_950) return `${trimZero((n / 1000).toFixed(1))}k`;
+  return `${trimZero((n / 1_000_000).toFixed(1))}M`;
+}
+
+function trimZero(s: string): string {
+  return s.endsWith(".0") ? s.slice(0, -2) : s;
 }
 
 export function shortId(id: string): string {

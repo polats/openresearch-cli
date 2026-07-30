@@ -3,11 +3,15 @@
 // links) render as chips that open the file as a right-pane tab.
 
 import { Check, Copy, FileCode } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import { resolveSyntaxLanguage } from "../syntaxLanguage";
 import { highlight } from "../syntaxHighlight";
+// Must match rehype-katex's bundled katex — a version skew breaks \boxed.
+import "katex/dist/katex.min.css";
 
 // Chat blocks are short; cap tokenizing well below the file viewer's limit.
 const HIGHLIGHT_MAX_BYTES = 100_000;
@@ -129,6 +133,35 @@ function FileChip({
   );
 }
 
+// Matches regions the math normalizer must not touch: fenced code blocks
+// (tolerating an unclosed fence mid-stream) and inline code spans.
+const CODE_REGIONS = /(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]*`)/g;
+
+/** Single-dollar math is off: prose like "cost $8–18 across nodes ($1.45
+ * each)" would pair its dollar signs into an inline-math region. Math must
+ * use `$$` delimiters — mid-paragraph `$$...$$` still renders inline. */
+export const remarkMathOptions = { singleDollarTextMath: false };
+
+/** Rewrite `\(...\)` / `\[...\]` math delimiters to remark-math's `$$` forms
+ * (`$` alone is not math — see `remarkMathOptions`).
+ *
+ * Agents emit LaTeX with backslash delimiters, which plain markdown mangles:
+ * `\(` parses as an escaped paren and `_` as emphasis. remark-math only
+ * recognizes dollar delimiters, so convert before parsing — skipping code
+ * blocks and inline code, where backslashes are literal. */
+export function normalizeMathDelimiters(text: string): string {
+  if (!text.includes("\\(") && !text.includes("\\[")) return text;
+  return text
+    .split(CODE_REGIONS)
+    .map((seg, i) => {
+      if (i % 2 === 1) return seg; // odd segments are code — leave untouched
+      return seg
+        .replace(/\\\[([\s\S]+?)\\\]/g, (_, inner: string) => `$$${inner}$$`)
+        .replace(/\\\(([\s\S]+?)\\\)/g, (_, inner: string) => `$$${inner}$$`);
+    })
+    .join("");
+}
+
 /** A link target that is a file path rather than a web URL. */
 function isFileHref(href: string): boolean {
   if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return false; // has a scheme
@@ -159,7 +192,17 @@ export const mdCodeComponents: Record<string, (props: any) => ReactNode> = {
   pre: ({ children }: any) => <>{children}</>,
 };
 
-export function Md({ text, onOpenFile }: { text: string; onOpenFile?: (path: string) => void }) {
+/** Memoized: markdown + KaTeX parsing is the expensive part of a chat render,
+ * and during streaming only the growing part's text actually changes — every
+ * other Md in the transcript can skip the re-parse (memo compares `text` by
+ * value; keep `onOpenFile` referentially stable at call sites). */
+export const Md = memo(function Md({
+  text,
+  onOpenFile,
+}: {
+  text: string;
+  onOpenFile?: (path: string) => void;
+}) {
   const components: Record<string, (props: any) => ReactNode> = {
     "file-mention": (props) => (
       <FileChip path={props.path} lines={props.lines} onOpenFile={onOpenFile} />
@@ -182,11 +225,12 @@ export function Md({ text, onOpenFile }: { text: string; onOpenFile?: (path: str
   return (
     <div className="md">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkFileMentions]}
+        remarkPlugins={[remarkGfm, [remarkMath, remarkMathOptions], remarkFileMentions]}
+        rehypePlugins={[rehypeKatex]}
         components={components as any}
       >
-        {text}
+        {normalizeMathDelimiters(text)}
       </ReactMarkdown>
     </div>
   );
-}
+});

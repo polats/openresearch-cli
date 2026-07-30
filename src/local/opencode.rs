@@ -196,9 +196,10 @@ fn playbook_md_with_memory(project: &LocalProject, session_id: &str, memory: &st
     });
     // The default compute target (Settings → Compute) is read fresh on every
     // playbook rewrite, but how soon a rewrite reaches a live agent varies:
-    // claude re-injects the playbook per turn; codex only on thread
-    // start/resume; a live opencode server keeps its playbook until respawn
-    // (`AgentHost::ensure` early-returns for a running child). Launch-time
+    // claude reads it at child spawn, so a rewrite reaches the agent on the next
+    // respawn (config change / interrupt / crash), not every turn; codex only on
+    // thread start/resume; a live opencode server keeps its playbook until
+    // respawn (`AgentHost::ensure` early-returns for a running child). Launch-time
     // resolution in `exp run` stays authoritative either way: the agent is
     // told to OMIT `--backend`, never to echo the default back, so even a
     // stale prompt launches on the current default.
@@ -554,6 +555,10 @@ async fn spawn_agent(
             cmd.env(key, value);
         }
     }
+    // Tag runs the agent launches (`orx exp run`) with this session so the run
+    // watcher notifies this chat. One serve child per session; set after the
+    // synced-env loop so it isn't shadowed.
+    crate::local::chat::set_chat_session_env(&mut cmd, session_id);
     if let Some(config) = &config_override {
         // The repo tracks its own opencode.json; ours rides OPENCODE_CONFIG.
         // Project configs load after OPENCODE_CONFIG and would override our

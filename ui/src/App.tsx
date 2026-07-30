@@ -1,5 +1,6 @@
 import {
   FileCode,
+  FolderGit2,
   FolderTree,
   GitBranch,
   Maximize2,
@@ -7,9 +8,10 @@ import {
   Play,
   ScrollText,
   Terminal,
+  Users,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelRun,
   endPlaySession,
@@ -24,7 +26,9 @@ import {
   type Run,
 } from "./api";
 import { ChatPanel } from "./components/ChatPanel";
+import { SubagentTab } from "./components/SubagentTab";
 import { CodeTab } from "./components/CodeTab";
+import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
 import { FilesTab } from "./components/FilesTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
@@ -37,7 +41,7 @@ import { Md } from "./components/Md";
 import { SettingsView, type SettingsTab } from "./components/SettingsPage";
 import { Tour, TOUR_DONE_KEY } from "./components/Tour";
 import { TreeView } from "./components/TreeView";
-import { useOrxEvents } from "./events";
+import { onChatEvent, useOrxEvents } from "./events";
 
 /** An experiment view open as a right-panel tab. */
 interface ExpViewDef {
@@ -51,7 +55,13 @@ const sameExpTab = (a: ExpViewDef, b: ExpViewDef) => a.id === b.id && a.view ===
  * code browser). */
 interface FileViewDef {
   path: string;
-  /** Chat session whose worktree holds the file (absent → hub clone). */
+  /** Which backend serves this file. Absent/"repo" → the repo `/file`
+   * endpoint (worktree/clone/branch), falling back to the files dir when a
+   * non-ref path misses the checkout; "files" → the project's files dir
+   * (`/files/report` + `/files/file`). */
+  source?: "repo" | "files";
+  /** Chat session whose worktree holds the file (absent → hub clone).
+   * Files-dir tabs never carry this. */
   sessionId?: string;
   /** Branch whose committed copy to show (code browser in branch mode);
    * overrides the live checkout. */
@@ -59,9 +69,13 @@ interface FileViewDef {
 }
 
 const sameFileTab = (a: FileViewDef, b: FileViewDef) =>
-  a.path === b.path && a.sessionId === b.sessionId && a.ref === b.ref;
+  a.path === b.path &&
+  (a.source ?? "repo") === (b.source ?? "repo") &&
+  a.sessionId === b.sessionId &&
+  a.ref === b.ref;
 
-const fileTabKey = (t: FileViewDef) => `${t.sessionId ?? ""}:${t.ref ?? ""}:${t.path}`;
+const fileTabKey = (t: FileViewDef) =>
+  `${t.source ?? "repo"}:${t.sessionId ?? ""}:${t.ref ?? ""}:${t.path}`;
 
 /** A proposed plan open as a right-panel tab (from the chat plan strip/card).
  * The markdown is already client-side (it rode the prompt part), so the tab
@@ -75,12 +89,21 @@ interface PlanViewDef {
   plan: string;
 }
 
+/** A sub-agent's transcript, opened from a chat spawn row's "view" button. One
+ * tab per spawn part; its parts stream live off the session's chat message. */
+interface SubagentViewDef {
+  kind: "subagent";
+  sessionId: string;
+  /** The `subagent` spawn part whose `children` are the sub-agent transcript. */
+  spawnPartId: string;
+}
+
 /** The project's code-browser tab (at most one): an experiment branch's
  * committed tree, or the hub clone's checkout, opened from an experiment
  * card's Code shortcut. Source + expansion state live here — CodeTab
  * unmounts whenever another right-pane tab fronts it (e.g. clicking a
  * file), and remount must not lose them. Discriminates on the `code` flag
- * (the other tab kinds discriminate on `view`/`path`/`kind`). */
+ * (the other tab kinds discriminate on `id`/`path`/`kind`/`wt`). */
 interface CodeTabDef {
   code: true;
   /** Source to browse: "" = the project clone, else a branch name. */
@@ -89,28 +112,67 @@ interface CodeTabDef {
   toggled: ReadonlySet<string>;
 }
 
-// Map a path an agent reported to a repo-relative one — keeping the session
-// id when it points into a per-session worktree, so the file is read from the
-// right checkout. Relative paths name files in the click context's checkout
-// and inherit `contextSessionId`; the regex fallbacks encode the
+/** The live session-worktree tab (at most one): what a chat session's agent is
+ * changing right now, opened from the chat header. Bound to one session — the
+ * Changes/Files view and Files-tree expansion state live here so the tab
+ * survives WorktreeTab's unmount/remount when another right-pane tab fronts it.
+ * Discriminates on the `wt` flag. */
+interface WorktreeTabDef {
+  wt: true;
+  /** The chat session this tab watches. */
+  sessionId: string;
+  /** Which segmented view is showing. */
+  view: WorktreeView;
+  /** Files-view dirs the user flipped away from their depth default. */
+  toggled: ReadonlySet<string>;
+}
+
+/** Escape a string for literal use inside a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Map a path an agent reported to a right-pane file tab. A files-dir path
+// (a report/figure the agent wrote under <data dir>/files/<slug>/…) is stripped
+// to a files-dir-relative path and tagged source:"files" so FileViewer reads it
+// from the /files endpoints. Otherwise it's a repo/worktree path stripped to
+// repo-relative, keeping the session id when it points into a per-session
+// worktree. Relative paths name files in the click context's checkout and
+// inherit `contextSessionId`; the regex fallbacks encode the
 // ~/.cache/openresearch/ layouts from src/local/git.rs:
 // worktrees/<owner>/<repo>/<session>/… and repos/<owner>/<repo>/….
 function parseFilePath(
   rawPath: string,
   repoPath?: string,
   contextSessionId?: string,
+  filesDir?: string,
+  slug?: string,
 ): FileViewDef | null {
   let path = rawPath;
   let sessionId: string | undefined;
   const clone = repoPath?.replace(/\/+$/, "");
+  const files = filesDir?.replace(/\/+$/, "");
   if (!path.startsWith("/")) {
     sessionId = contextSessionId;
+  } else if (files && (path === files || path.startsWith(`${files}/`))) {
+    // Files-dir file — exact prefix match against the (non-canonical) dir the
+    // backend surfaced, which mirrors what the agent inlines.
+    const rel = path.slice(files.length).replace(/^\/+/, "");
+    return rel ? { path: rel, source: "files" } : null;
   } else if (clone && (path === clone || path.startsWith(`${clone}/`))) {
     path = path.slice(clone.length).replace(/^\/+/, "");
   } else {
-    const wt = path.match(/\/openresearch\/worktrees\/[^/]+\/[^/]+\/([^/]+)\/(.+)$/);
-    const hub = wt ? null : path.match(/\/openresearch\/repos\/[^/]+\/[^/]+\/(.+)$/);
-    if (wt) {
+    // Files-dir fallback for a symlink-divergent path (e.g. /tmp vs
+    // /private/tmp) where the exact prefix missed: match the …/files/<slug>/<rel>
+    // layout, requiring the slug segment when we know it. (Legacy artifacts/ is
+    // migrated to files/ in place, so it never appears in a live path.)
+    const slugPat = slug ? escapeRegExp(slug) : "[^/]+";
+    const fd = path.match(new RegExp(`/files/${slugPat}/(.+)$`));
+    const wt = fd ? null : path.match(/\/openresearch\/worktrees\/[^/]+\/[^/]+\/([^/]+)\/(.+)$/);
+    const hub = fd || wt ? null : path.match(/\/openresearch\/repos\/[^/]+\/[^/]+\/(.+)$/);
+    if (fd) {
+      return { path: fd[1], source: "files" };
+    } else if (wt) {
       sessionId = wt[1];
       path = wt[2];
     } else if (hub) {
@@ -167,18 +229,47 @@ export default function App() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [files, setFiles] = useState<ProjectFiles | null>(null);
   const [view, setView] = useState<"tree" | "table">("tree");
+  // Experiments pane scope: "agent" narrows to the open chat session's work.
+  // Falls back to "project" whenever there's no session to scope to. The
+  // toggle only renders when every experiment carries attribution — any
+  // unattributed node (legacy, or created before chatSessionId existed) means
+  // Agent scope would misrepresent the tree, so those projects keep today's UI.
+  const [scope, setScope] = useState<"agent" | "project">("project");
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const allExperimentsAttributed =
+    experiments.length > 0 && experiments.every((e) => e.chatSessionId);
+  const effectiveScope = activeSessionId && allExperimentsAttributed ? scope : "project";
+  // Agent scope means "this session's experiments" in both panes: runs are
+  // scoped by their experiment's owner, not by which session launched them.
+  const scopedRuns = useMemo(() => {
+    if (effectiveScope !== "agent") return runs;
+    const mine = new Set(
+      experiments.filter((e) => e.chatSessionId === activeSessionId).map((e) => e.id),
+    );
+    return runs.filter((r) => mine.has(r.experimentId));
+  }, [runs, experiments, effectiveScope, activeSessionId]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   // Right-panel tab strip: the pinned Experiments tab plus a closable tab per
   // opened experiment view / project file. Views are single-purpose, so the
   // same experiment can hold both a terminal tab and a changes tab.
   const [rightTab, setRightTab] = useState<
-    "experiments" | ExpViewDef | FileViewDef | PlanViewDef | CodeTabDef
+    | "experiments"
+    | ExpViewDef
+    | FileViewDef
+    | PlanViewDef
+    | SubagentViewDef
+    | CodeTabDef
+    | WorktreeTabDef
   >("experiments");
   const [expTabs, setExpTabs] = useState<ExpViewDef[]>([]);
   const [fileTabs, setFileTabs] = useState<FileViewDef[]>([]);
   const [planTabs, setPlanTabs] = useState<PlanViewDef[]>([]);
+  const [subagentTabs, setSubagentTabs] = useState<SubagentViewDef[]>([]);
   // At most one code-browser tab per project; null = not open.
   const [codeTab, setCodeTab] = useState<CodeTabDef | null>(null);
+  // At most one live worktree tab, bound to the session it was opened from;
+  // null = not open.
+  const [worktreeTab, setWorktreeTab] = useState<WorktreeTabDef | null>(null);
   // The right pane is a floating panel: closable, edge-resizable, expandable
   // to (nearly) full screen. Width persists across sessions.
   const [panelOpen, setPanelOpen] = useState(true);
@@ -197,6 +288,9 @@ export default function App() {
       return true; // storage unavailable — don't loop the walkthrough
     }
   });
+  // Set only when the walkthrough hands off, so the New project modal opens
+  // once — a later visit to Projects starts closed as usual.
+  const [justOnboarded, setJustOnboarded] = useState(false);
   // The spotlight tour of the workspace (Tour.tsx). Starting it normalizes
   // the layout so every tour target exists; those are the defaults, so
   // nothing needs restoring on finish/skip.
@@ -264,8 +358,15 @@ export default function App() {
     setExpTabs([]);
     setFileTabs([]);
     setPlanTabs([]);
+    setSubagentTabs([]);
     setCodeTab(null);
+    setWorktreeTab(null);
     setRightTab("experiments");
+    // Scoping is an explicit per-project choice — don't let Agent scope
+    // re-bind to whichever session ChatPanel auto-selects in the next project.
+    // (activeSessionId needs no reset here: ChatPanel owns it and re-reports
+    // null on its own project-switch effect.)
+    setScope("project");
     listExperiments(projectId).then(setExperiments).catch(() => {});
     listRuns(projectId).then(setRuns).catch(() => {});
     getFiles(projectId).then(setFiles).catch(() => {});
@@ -294,6 +395,10 @@ export default function App() {
     },
   });
 
+  // Stable identity: in TreeView's layout-memo deps, so an inline arrow would
+  // recompute the graph on every render.
+  const showProjectScope = useCallback(() => setScope("project"), []);
+
   // Open an experiment view as a right-panel tab (creating it if needed) and
   // focus it.
   const openExperimentTab = useCallback((id: string, view: ExperimentView = "changes") => {
@@ -313,7 +418,7 @@ export default function App() {
       const next = expTabs.filter((_, i) => i !== idx);
       setExpTabs(next);
       // Closing the focused tab falls back to a neighbor, else the Log tab.
-      if (typeof rightTab === "object" && "view" in rightTab && sameExpTab(rightTab, tab))
+      if (typeof rightTab === "object" && "id" in rightTab && sameExpTab(rightTab, tab))
         setRightTab(next[Math.min(idx, next.length - 1)] ?? "experiments");
     },
     [expTabs, rightTab],
@@ -324,10 +429,18 @@ export default function App() {
   // parseFilePath for how it resolves against the reported path.
   const openFileTab = useCallback(
     (rawPath: string, contextSessionId?: string, ref?: string) => {
-      const repoPath = projects?.find((p) => p.id === projectId)?.repoPath;
-      const tab = parseFilePath(rawPath, repoPath, contextSessionId);
+      const project = projects?.find((p) => p.id === projectId);
+      const tab = parseFilePath(
+        rawPath,
+        project?.repoPath,
+        contextSessionId,
+        project?.filesDir,
+        project?.slug,
+      );
       if (!tab) return;
-      if (ref) tab.ref = ref;
+      // A branch ref only applies to repo files; never stamp it onto a
+      // files-dir tab (it has no branch, and would fragment the tab identity).
+      if (ref && tab.source !== "files") tab.ref = ref;
       setFileTabs((prev) => (prev.some((t) => sameFileTab(t, tab)) ? prev : [...prev, tab]));
       setRightTab(tab);
       setPanelOpen(true);
@@ -369,10 +482,44 @@ export default function App() {
       if (idx === -1) return;
       const next = planTabs.filter((_, i) => i !== idx);
       setPlanTabs(next);
-      if (typeof rightTab === "object" && "kind" in rightTab && rightTab.promptId === tab.promptId)
+      if (
+        typeof rightTab === "object" &&
+        "kind" in rightTab &&
+        rightTab.kind === "plan" &&
+        rightTab.promptId === tab.promptId
+      )
         setRightTab(next[Math.min(idx, next.length - 1)] ?? "experiments");
     },
     [planTabs, rightTab],
+  );
+
+  // Open a sub-agent's transcript as a right-panel tab (a chat spawn row's
+  // "view"). One tab per spawn part; its parts stream live off the chat message,
+  // so the tab body just reads the current part and needs no fetch.
+  const openSubagentTab = useCallback((sessionId: string, spawnPartId: string) => {
+    const tab: SubagentViewDef = { kind: "subagent", sessionId, spawnPartId };
+    setSubagentTabs((prev) =>
+      prev.some((t) => t.spawnPartId === spawnPartId) ? prev : [...prev, tab],
+    );
+    setRightTab(tab);
+    setPanelOpen(true);
+  }, []);
+
+  const closeSubagentTab = useCallback(
+    (tab: SubagentViewDef) => {
+      const idx = subagentTabs.findIndex((t) => t.spawnPartId === tab.spawnPartId);
+      if (idx === -1) return;
+      const next = subagentTabs.filter((_, i) => i !== idx);
+      setSubagentTabs(next);
+      if (
+        typeof rightTab === "object" &&
+        "kind" in rightTab &&
+        rightTab.kind === "subagent" &&
+        rightTab.spawnPartId === tab.spawnPartId
+      )
+        setRightTab(next[Math.min(idx, next.length - 1)] ?? "experiments");
+    },
+    [subagentTabs, rightTab],
   );
 
   // Card shortcut: browse a specific experiment branch in the code tab.
@@ -400,6 +547,49 @@ export default function App() {
       typeof cur === "object" && "code" in cur ? "experiments" : cur,
     );
   }, []);
+
+  // Open (or re-front) the live worktree tab for a chat session — from the chat
+  // header's worktree button. One tab at a time: opening it for a different
+  // session rebinds it (Changes view, expansion state reset) rather than
+  // stacking a second. Defaults to the Changes view.
+  const openWorktreeTab = useCallback((sessionId: string) => {
+    setWorktreeTab((prev) =>
+      prev && prev.sessionId === sessionId
+        ? prev
+        : { wt: true, sessionId, view: "changes", toggled: new Set<string>() },
+    );
+    // rightTab only discriminates on the `wt` flag — the pane body always
+    // renders the live `worktreeTab` state, so this value's fields aren't read.
+    setRightTab({ wt: true, sessionId, view: "changes", toggled: new Set<string>() });
+    setPanelOpen(true);
+  }, []);
+
+  // View/expansion changes persist on the tab def, not in WorktreeTab state —
+  // the component unmounts whenever another right-pane tab fronts it.
+  const updateWorktreeTab = useCallback((patch: Partial<Omit<WorktreeTabDef, "wt" | "sessionId">>) => {
+    setWorktreeTab((prev) => (prev ? { ...prev, ...patch } : prev));
+  }, []);
+
+  const closeWorktreeTab = useCallback(() => {
+    setWorktreeTab(null);
+    setRightTab((cur) => (typeof cur === "object" && "wt" in cur ? "experiments" : cur));
+  }, []);
+
+  // A deleted session takes its worktree with it — close the tab rather than
+  // leave it 404-ing over stale content (deletion arrives over SSE; ChatPanel
+  // only forgets its own session list).
+  useEffect(
+    () =>
+      onChatEvent((ev) => {
+        if (ev.type !== "sessionDeleted") return;
+        setWorktreeTab((prev) => {
+          if (!prev || prev.sessionId !== ev.sessionId) return prev;
+          setRightTab((cur) => (typeof cur === "object" && "wt" in cur ? "experiments" : cur));
+          return null;
+        });
+      }),
+    [],
+  );
 
   // Drag the panel's left edge to resize; width persists across reloads.
   const resizePanel = (e: React.PointerEvent) => {
@@ -449,10 +639,22 @@ export default function App() {
     if (projectId === id) setProjectId(null);
   };
 
-  const expTab = typeof rightTab === "object" && "view" in rightTab ? rightTab : null;
+  // ExpViewDef and WorktreeTabDef both carry a `view`; the experiment tab is
+  // the one keyed by an experiment `id` (worktree tabs discriminate on `wt`).
+  const expTab =
+    typeof rightTab === "object" && "id" in rightTab ? rightTab : null;
   const fileTab = typeof rightTab === "object" && "path" in rightTab ? rightTab : null;
-  const planTab = typeof rightTab === "object" && "kind" in rightTab ? rightTab : null;
+  // PlanViewDef and SubagentViewDef both carry `kind`; discriminate on its value.
+  const planTab =
+    typeof rightTab === "object" && "kind" in rightTab && rightTab.kind === "plan"
+      ? rightTab
+      : null;
+  const subagentTab =
+    typeof rightTab === "object" && "kind" in rightTab && rightTab.kind === "subagent"
+      ? rightTab
+      : null;
   const codeTabActive = typeof rightTab === "object" && "code" in rightTab;
+  const worktreeTabActive = typeof rightTab === "object" && "wt" in rightTab;
   const activeProject = projects?.find((p) => p.id === projectId) ?? null;
   const tabExperiment = expTab ? (experiments.find((e) => e.id === expTab.id) ?? null) : null;
 
@@ -477,6 +679,8 @@ export default function App() {
             onOpen={setProjectId}
             onCreated={onProjectCreated}
             onDeleted={onProjectDeleted}
+            openNewProject={justOnboarded}
+            onNewProjectOpened={() => setJustOnboarded(false)}
           />
         ) : (
           <Onboarding
@@ -486,6 +690,7 @@ export default function App() {
               } catch {
                 // private mode etc. — the flow just replays next boot
               }
+              setJustOnboarded(true);
               setOnboarded(true);
             }}
           />
@@ -534,7 +739,10 @@ export default function App() {
             }}
             onOpenFile={openFileTab}
             onOpenPlan={openPlanTab}
+            onOpenSubagent={openSubagentTab}
+            onOpenWorktree={openWorktreeTab}
             onStartTour={startTour}
+            onActiveSessionChange={setActiveSessionId}
           >
             {mainView === "files" ? (
               (() => {
@@ -616,6 +824,16 @@ export default function App() {
                   onClose={() => closePlanTab(t)}
                 />
               ))}
+              {subagentTabs.map((t) => (
+                <ClosableTab
+                  key={`subagent:${t.spawnPartId}`}
+                  active={subagentTab !== null && subagentTab.spawnPartId === t.spawnPartId}
+                  label="Sub-agent"
+                  icon={<Users size={12} style={{ flexShrink: 0 }} />}
+                  onSelect={() => setRightTab(t)}
+                  onClose={() => closeSubagentTab(t)}
+                />
+              ))}
               {codeTab && (
                 <ClosableTab
                   key="code"
@@ -624,6 +842,16 @@ export default function App() {
                   icon={<FolderTree size={12} style={{ flexShrink: 0 }} />}
                   onSelect={() => setRightTab(codeTab)}
                   onClose={closeCodeTab}
+                />
+              )}
+              {worktreeTab && (
+                <ClosableTab
+                  key="worktree"
+                  active={worktreeTabActive}
+                  label="Worktree"
+                  icon={<FolderGit2 size={12} style={{ flexShrink: 0 }} />}
+                  onSelect={() => setRightTab(worktreeTab)}
+                  onClose={closeWorktreeTab}
                 />
               )}
             </div>
@@ -652,6 +880,29 @@ export default function App() {
           {rightTab === "experiments" ? (
             <div className="tab-body">
               <div className="pane-toolbar">
+                {allExperimentsAttributed && (
+                  <div className="seg">
+                    <button
+                      className={effectiveScope === "agent" ? "active" : ""}
+                      disabled={!activeSessionId}
+                      title={
+                        activeSessionId
+                          ? undefined
+                          : "Open a chat session to filter to its experiments"
+                      }
+                      onClick={() => setScope("agent")}
+                    >
+                      Agent
+                    </button>
+                    <button
+                      className={effectiveScope === "project" ? "active" : ""}
+                      onClick={() => setScope("project")}
+                    >
+                      Project
+                    </button>
+                  </div>
+                )}
+                <span style={{ flex: 1 }} />
                 <div className="seg">
                   <button
                     className={view === "tree" ? "active" : ""}
@@ -672,15 +923,24 @@ export default function App() {
                   activeProject && (
                     <TreeView
                       experiments={experiments}
-                      runs={runs}
+                      runs={scopedRuns}
                       project={activeProject}
                       onOpenView={openExperimentTab}
                       onOpenCodeBranch={openCodeTabForBranch}
+                      agentSessionId={effectiveScope === "agent" ? activeSessionId : null}
+                      onShowProjectScope={showProjectScope}
                     />
                   )
                 ) : (
                   <RunsTable
-                    runs={runs}
+                    runs={scopedRuns}
+                    emptyHint={
+                      // Unlike the tree's empty state, suppressed when Project
+                      // scope would be just as empty.
+                      effectiveScope === "agent" && runs.length > 0
+                        ? "No runs from this agent's experiments yet. Switch to Project to see all runs."
+                        : undefined
+                    }
                     experiments={experiments}
                     onOpen={(run) => {
                       setSelectedRunId(run.id);
@@ -699,6 +959,7 @@ export default function App() {
                   key={fileTabKey(fileTab)}
                   projectId={projectId}
                   path={fileTab.path}
+                  source={fileTab.source}
                   sessionId={fileTab.sessionId}
                   gitRef={fileTab.ref}
                   onOpenFile={openFileTab}
@@ -716,6 +977,15 @@ export default function App() {
                 />
               </div>
             </div>
+          ) : subagentTab ? (
+            <SubagentTab
+              // Remount per spawn part so the seed + subscription reset cleanly.
+              key={subagentTab.spawnPartId}
+              sessionId={subagentTab.sessionId}
+              spawnPartId={subagentTab.spawnPartId}
+              onOpenFile={(path) => openFileTab(path, subagentTab.sessionId)}
+              onOpenSubagent={(pid) => openSubagentTab(subagentTab.sessionId, pid)}
+            />
           ) : codeTabActive ? (
             <div className="tab-body">
               {projectId && activeProject && codeTab && (
@@ -728,6 +998,23 @@ export default function App() {
                   toggled={codeTab.toggled}
                   onSelChange={(sel) => updateCodeTab({ sel })}
                   onToggledChange={(toggled) => updateCodeTab({ toggled })}
+                  onOpenFile={openFileTab}
+                />
+              )}
+            </div>
+          ) : worktreeTabActive ? (
+            <div className="tab-body">
+              {projectId && worktreeTab && (
+                <WorktreeTab
+                  // Remount when the bound session changes — its data, poll
+                  // subscription, and request-id guard must not carry over.
+                  key={`wt:${worktreeTab.sessionId}`}
+                  sessionId={worktreeTab.sessionId}
+                  projectId={projectId}
+                  view={worktreeTab.view}
+                  toggled={worktreeTab.toggled}
+                  onViewChange={(view) => updateWorktreeTab({ view })}
+                  onToggledChange={(toggled) => updateWorktreeTab({ toggled })}
                   onOpenFile={openFileTab}
                 />
               )}

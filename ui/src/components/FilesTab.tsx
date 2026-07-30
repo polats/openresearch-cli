@@ -12,7 +12,9 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import {
   deleteFile,
   fileUrl,
@@ -23,7 +25,7 @@ import {
   type ProjectFiles,
 } from "../api";
 import { CodeView } from "./CodeView";
-import { mdCodeComponents } from "./Md";
+import { mdCodeComponents, normalizeMathDelimiters, remarkMathOptions } from "./Md";
 
 /** Top-level folder reserved for project-wide reports (mirrors the backend). */
 const PROJECT_NAMESPACE = "project";
@@ -86,8 +88,10 @@ function collectReports(entries: FileEntry[]): FileEntry[] {
 }
 
 /** Report markdown with report-relative image/link paths (`images/...`)
- * rewritten to the file endpoint, scoped to the report's folder. */
-function ReportMd({
+ * rewritten to the file endpoint, scoped to the report's folder. Exported so
+ * the chat file viewer can render files-dir reports with the same image
+ * resolution (a bare <Md> would 404 the figures). */
+export function ReportMd({
   projectId,
   folder,
   markdown,
@@ -104,7 +108,8 @@ function ReportMd({
   return (
     <div className="md report-md">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, [remarkMath, remarkMathOptions]]}
+        rehypePlugins={[rehypeKatex]}
         components={{
           // In-page anchors (headings, GFM footnotes) keep their hash href
           // and stay in the page; everything else resolves + opens a tab.
@@ -133,7 +138,7 @@ function ReportMd({
           ...mdCodeComponents,
         }}
       >
-        {stripFrontmatter(markdown)}
+        {normalizeMathDelimiters(stripFrontmatter(markdown))}
       </ReactMarkdown>
     </div>
   );

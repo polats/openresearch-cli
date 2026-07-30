@@ -139,6 +139,7 @@ mod tests {
             merge_parent_experiment_id: None,
             created_at: now,
             updated_at: now,
+            chat_session_id: None,
         }
     }
 
@@ -164,6 +165,7 @@ mod tests {
             verdict: None,
             verdict_notes: None,
             verdict_at: None,
+            chat_session_id: None,
         }
     }
 

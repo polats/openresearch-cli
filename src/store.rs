@@ -211,6 +211,11 @@ pub struct StoredRun {
     pub verdict: Option<String>,
     pub verdict_notes: Option<String>,
     pub verdict_at: Option<i64>,
+    /// The `orx up` chat session that launched this run, when it was started by
+    /// an agent harness child (which exports `ORX_CHAT_SESSION_ID`). `None` for
+    /// CLI-launched or server runs. The run watcher routes the completion
+    /// notification to exactly this session — never a project-wide guess.
+    pub chat_session_id: Option<String>,
 }
 
 pub struct Store {
@@ -272,6 +277,7 @@ impl Store {
                 agent_status         TEXT NOT NULL DEFAULT 'idle',
                 created_at           INTEGER NOT NULL,
                 updated_at           INTEGER NOT NULL,
+                chat_session_id      TEXT,
                 UNIQUE(project_id, slug)
             );
             DROP TABLE IF EXISTS local_reports;
@@ -281,10 +287,12 @@ impl Store {
                 harness           TEXT NOT NULL,
                 native_session_id TEXT,
                 title             TEXT,
+                title_source      TEXT,
                 model             TEXT,
                 permission_mode   TEXT,
                 reasoning_level   TEXT,
                 archived          INTEGER NOT NULL DEFAULT 0,
+                context_usage_json TEXT,
                 created_at        INTEGER NOT NULL,
                 updated_at        INTEGER NOT NULL
             );
@@ -331,6 +339,7 @@ impl Store {
             "ALTER TABLE runs ADD COLUMN commit_sha TEXT",
             "ALTER TABLE runs ADD COLUMN result_markdown TEXT",
             "ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE runs ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN permission_mode TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN reasoning_level TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
@@ -353,6 +362,9 @@ impl Store {
             "ALTER TABLE local_projects ADD COLUMN persona TEXT",
             "ALTER TABLE local_experiments ADD COLUMN merge_parent_experiment_id TEXT",
             "ALTER TABLE local_projects ADD COLUMN auto_prompts TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN context_usage_json TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN title_source TEXT",
+            "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -410,6 +422,17 @@ impl Store {
                     AND permission_mode IN ('ask', 'accept-edits'))",
             [],
         );
+
+        // NOTE: `reasoning_level` deliberately has NO migration for issue #123,
+        // unlike the permission modes above. Rows written by older builds carry
+        // an implicit effort (`high`), but every value the old builds wrote is
+        // still a value the picker offers, so a blanket reset here would be
+        // indistinguishable from — and would silently destroy — a level the user
+        // just chose, on the very next open. That is the failure mode the NOTE
+        // above warns about. Stale levels are reconciled where the information
+        // to do it safely exists: `reconcileReasoning` in `ui/src/api.ts` drops
+        // one the selected model doesn't offer, and each harness's mapper drops
+        // it again before it can reach a CLI.
         Ok(Self { conn })
     }
 
@@ -434,8 +457,9 @@ impl Store {
         self.conn.execute(
             "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command,
                                created_at, updated_at, ended_at, exit_code,
-                               commit_sha, result_markdown, cancel_requested, kind)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                               commit_sha, result_markdown, cancel_requested, kind,
+                               chat_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                status = excluded.status,
                backend_json = excluded.backend_json,
@@ -444,6 +468,9 @@ impl Store {
                exit_code = excluded.exit_code,
                commit_sha = excluded.commit_sha,
                result_markdown = excluded.result_markdown",
+            // chat_session_id is deliberately absent from the DO UPDATE SET:
+            // run ownership is immutable, so a later status upsert never
+            // rewrites (or clears) the session that launched the run.
             params![
                 run.id,
                 run.experiment_id,
@@ -459,6 +486,7 @@ impl Store {
                 run.result_markdown,
                 run.cancel_requested,
                 run.kind,
+                run.chat_session_id,
             ],
         )?;
         Ok(())
@@ -762,12 +790,12 @@ impl Store {
 
     pub fn create_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"),
+            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"),
             params![
                 e.id, e.project_id, e.parent_experiment_id, e.slug, e.branch_name,
                 e.title, e.description, e.run_command, e.agent_status, e.created_at, e.updated_at,
                 e.verdict, e.verdict_notes, e.verdict_at, e.play_entry,
-                e.merge_parent_experiment_id,
+                e.merge_parent_experiment_id, e.chat_session_id,
             ],
         )?;
         Ok(())
@@ -794,6 +822,9 @@ impl Store {
     }
 
     /// Full-row update by id (title / description / run_command / agent_status).
+    ///
+    /// `chat_session_id` is deliberately omitted: session ownership is stamped
+    /// once at creation and is immutable thereafter.
     pub fn update_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
             "UPDATE local_experiments SET parent_experiment_id = ?2, slug = ?3, branch_name = ?4,
@@ -813,16 +844,17 @@ impl Store {
 
     pub fn create_chat_session(&self, s: &StoredChatSession) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, model,
+            "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
                                         permission_mode, reasoning_level, archived, created_at, updated_at,
                                         persona, parent_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 s.id,
                 s.project_id,
                 s.harness,
                 s.native_session_id,
                 s.title,
+                s.title_source,
                 s.model,
                 s.permission_mode,
                 s.reasoning_level,
@@ -882,6 +914,18 @@ impl Store {
         Ok(())
     }
 
+    /// Persist the latest context-window usage (serialized `ContextUsage`).
+    /// Does not bump `updated_at` — usage is a passive by-product of a turn that
+    /// already bumped it, and re-ordering the session on every token report would
+    /// be noise.
+    pub fn set_chat_session_context_usage(&self, id: &str, json: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET context_usage_json = ?2 WHERE id = ?1",
+            params![id, json],
+        )?;
+        Ok(())
+    }
+
     pub fn set_chat_session_permission_mode(&self, id: &str, mode: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE chat_sessions SET permission_mode = ?2, updated_at = ?3 WHERE id = ?1",
@@ -908,21 +952,26 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_chat_session_title(&self, id: &str, title: &str) -> Result<()> {
+    /// Unconditional title write. `source` records who wrote it — see
+    /// [`StoredChatSession::title_source`] for the vocabulary — which is what
+    /// later lets auto-titling tell a placeholder from a title worth keeping.
+    pub fn set_chat_session_title(&self, id: &str, title: &str, source: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE chat_sessions SET title = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, title, now_ms()],
+            "UPDATE chat_sessions SET title = ?2, title_source = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, title, source, now_ms()],
         )?;
         Ok(())
     }
 
-    /// Set the title only if the session currently has none (NULL or blank).
-    /// Atomic check-and-set for harness auto-titling, so it can't clobber a
-    /// title the user set via Rename. Returns true if a row was written.
-    pub fn set_chat_session_title_if_empty(&self, id: &str, title: &str) -> Result<bool> {
+    /// Adopt a generated title only while the title is still unset or the
+    /// first-line placeholder. Atomic check-and-set: a user Rename (`'user'`)
+    /// and a legacy row (NULL source with a non-blank title) are never
+    /// overwritten, and a session that already has a `'generated'` title is
+    /// never re-titled. Returns true if a row was written.
+    pub fn set_chat_session_title_if_placeholder(&self, id: &str, title: &str) -> Result<bool> {
         let n = self.conn.execute(
-            "UPDATE chat_sessions SET title = ?2, updated_at = ?3 \
-             WHERE id = ?1 AND (title IS NULL OR trim(title) = '')",
+            "UPDATE chat_sessions SET title = ?2, title_source = 'generated', updated_at = ?3 \
+             WHERE id = ?1 AND (title IS NULL OR trim(title) = '' OR title_source = 'fallback')",
             params![id, title, now_ms()],
         )?;
         Ok(n > 0)
@@ -1111,6 +1160,10 @@ pub struct StoredChatSession {
     pub harness: String,
     pub native_session_id: Option<String>,
     pub title: Option<String>,
+    /// Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
+    /// (harness auto-title), `"user"` (Rename). NULL on legacy rows, which the
+    /// conditional setter treats as "unknown, don't overwrite".
+    pub title_source: Option<String>,
     pub model: Option<String>,
     /// Permission-mode wire id (`"auto"` / `"plan"` / …); None = harness default.
     pub permission_mode: Option<String>,
@@ -1125,6 +1178,8 @@ pub struct StoredChatSession {
     pub parent_session_id: Option<String>,
     /// Hidden from the default Recents list, but fully intact and resumable.
     pub archived: bool,
+    /// Serialized `ContextUsage` for the latest turn; None until first reported.
+    pub context_usage_json: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -1142,7 +1197,8 @@ pub struct StoredChatMessage {
 }
 
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, \
-     permission_mode, reasoning_level, archived, created_at, updated_at, persona, parent_session_id";
+     permission_mode, reasoning_level, archived, context_usage_json, created_at, updated_at, \
+     title_source, persona, parent_session_id";
 
 fn row_to_chat_session(
     row: &rusqlite::Row<'_>,
@@ -1157,10 +1213,12 @@ fn row_to_chat_session(
         permission_mode: row.get(6)?,
         reasoning_level: row.get(7)?,
         archived: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
-        persona: row.get(11)?,
-        parent_session_id: row.get(12)?,
+        context_usage_json: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+        title_source: row.get(12)?,
+        persona: row.get(13)?,
+        parent_session_id: row.get(14)?,
     })
 }
 
@@ -1217,7 +1275,8 @@ const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_
                                  created_at, updated_at, ended_at, exit_code,
                                  commit_sha, result_markdown, cancel_requested,
                                  supervisor_heartbeat_ms, kind, metrics_json,
-                                 verdict, verdict_notes, verdict_at FROM runs";
+                                 verdict, verdict_notes, verdict_at,
+                                 chat_session_id FROM runs";
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, baseline_branch, \
                             repo_path, run_command, paper_id, created_at, updated_at, \
@@ -1226,7 +1285,7 @@ const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, baseline_
 const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branch_name, \
                                title, description, run_command, agent_status, created_at, updated_at, \
                                verdict, verdict_notes, verdict_at, play_entry, \
-                               merge_parent_experiment_id";
+                               merge_parent_experiment_id, chat_session_id";
 
 fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlite::Error> {
     Ok(StoredRun {
@@ -1249,6 +1308,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlit
         verdict: row.get(16)?,
         verdict_notes: row.get(17)?,
         verdict_at: row.get(18)?,
+        chat_session_id: row.get(19)?,
     })
 }
 
@@ -1298,8 +1358,186 @@ mod tests {
             verdict: None,
             verdict_notes: None,
             verdict_at: None,
+            chat_session_id: None,
         }
     }
+
+    #[test]
+    fn chat_session_context_usage_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("orx-store-ctxusage-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        // Fresh session: no usage yet.
+        assert!(store
+            .get_chat_session("chat_1")
+            .unwrap()
+            .unwrap()
+            .context_usage_json
+            .is_none());
+        // Set, then read it back verbatim.
+        let json = r#"{"usedTokens":27564,"contextWindow":200000}"#;
+        store
+            .set_chat_session_context_usage("chat_1", json)
+            .unwrap();
+        assert_eq!(
+            store
+                .get_chat_session("chat_1")
+                .unwrap()
+                .unwrap()
+                .context_usage_json
+                .as_deref(),
+            Some(json)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn chat_session_fixture(id: &str) -> StoredChatSession {
+        StoredChatSession {
+            id: id.into(),
+            project_id: "proj_1".into(),
+            harness: "claude-code".into(),
+            native_session_id: None,
+            title: None,
+            title_source: None,
+            model: None,
+            permission_mode: None,
+            reasoning_level: None,
+            archived: false,
+            context_usage_json: None,
+            persona: None,
+            parent_session_id: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn title_source_roundtrips_and_defaults_to_none() {
+        let dir = std::env::temp_dir().join(format!("orx-store-titlesrc-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let fresh = store.get_chat_session("chat_1").unwrap().unwrap();
+        assert!(fresh.title.is_none());
+        assert!(fresh.title_source.is_none());
+
+        store
+            .set_chat_session_title("chat_1", "First line…", "fallback")
+            .unwrap();
+        let after = store.get_chat_session("chat_1").unwrap().unwrap();
+        assert_eq!(after.title.as_deref(), Some("First line…"));
+        assert_eq!(after.title_source.as_deref(), Some("fallback"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn title_if_placeholder_respects_provenance() {
+        let dir = std::env::temp_dir().join(format!("orx-store-titleph-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["untitled", "fallback", "renamed", "legacy"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+        }
+
+        // No title at all (a harness-native title arriving before any user
+        // message) → filled.
+        assert!(store
+            .set_chat_session_title_if_placeholder("untitled", "Generated one")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat_session("untitled")
+                .unwrap()
+                .unwrap()
+                .title_source
+                .as_deref(),
+            Some("generated")
+        );
+        // Already generated → never re-titled.
+        assert!(!store
+            .set_chat_session_title_if_placeholder("untitled", "Generated two")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat_session("untitled")
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Generated one")
+        );
+        // ...but an explicit Rename still overrides it.
+        store
+            .set_chat_session_title("untitled", "My name", "user")
+            .unwrap();
+        let renamed = store.get_chat_session("untitled").unwrap().unwrap();
+        assert_eq!(renamed.title.as_deref(), Some("My name"));
+        assert_eq!(renamed.title_source.as_deref(), Some("user"));
+
+        // The first-line placeholder → replaced.
+        store
+            .set_chat_session_title("fallback", "Hey can you look at…", "fallback")
+            .unwrap();
+        assert!(store
+            .set_chat_session_title_if_placeholder("fallback", "Review the parser")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat_session("fallback")
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Review the parser")
+        );
+
+        // A user Rename → never clobbered, whichever order the race resolves in.
+        store
+            .set_chat_session_title("renamed", "Mine", "user")
+            .unwrap();
+        assert!(!store
+            .set_chat_session_title_if_placeholder("renamed", "Generated")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat_session("renamed")
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Mine")
+        );
+
+        // Legacy row: a title with no recorded source is "unknown, don't touch".
+        store
+            .conn
+            .execute(
+                "UPDATE chat_sessions SET title = 'Old title' WHERE id = 'legacy'",
+                [],
+            )
+            .unwrap();
+        assert!(!store
+            .set_chat_session_title_if_placeholder("legacy", "Generated")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat_session("legacy")
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Old title")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     /// kind survives the upsert, metrics/verdict setters round-trip, and both
     /// bump updated_at (the SSE diff keys on it); clearing a verdict nulls
@@ -1360,6 +1598,7 @@ mod tests {
             verdict_at: None,
             play_entry: None,
             merge_parent_experiment_id: None,
+            chat_session_id: None,
         };
         store.create_local_experiment(&exp).unwrap();
         store
@@ -1385,6 +1624,8 @@ mod tests {
             reasoning_level: None,
             persona: persona.map(str::to_string),
             parent_session_id: None,
+            title_source: None,
+            context_usage_json: None,
             archived: false,
             created_at: 1,
             updated_at: 1,
@@ -1452,7 +1693,163 @@ mod tests {
         assert_eq!(got.status, "approved");
         assert_eq!(got.session_id.as_deref(), Some("chat_x"));
         assert!(got.updated_at > 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
+    fn run_fixture(id: &str, status: &str, chat_session_id: Option<&str>) -> StoredRun {
+        StoredRun {
+            id: id.into(),
+            experiment_id: "exp_1".into(),
+            project_id: "proj_1".into(),
+            status: status.into(),
+            backend_json: "{}".into(),
+            command: "echo hi".into(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            supervisor_heartbeat_ms: None,
+            kind: "job".into(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
+            chat_session_id: chat_session_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn run_chat_session_id_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("orx-store-runsess-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        store
+            .upsert_run(&run_fixture("run_owned", "starting", Some("chat_A")))
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("run_orphan", "starting", None))
+            .unwrap();
+
+        assert_eq!(
+            store.get_run("run_owned").unwrap().unwrap().chat_session_id,
+            Some("chat_A".to_string())
+        );
+        assert_eq!(
+            store
+                .get_run("run_orphan")
+                .unwrap()
+                .unwrap()
+                .chat_session_id,
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_ownership_is_immutable_across_upserts() {
+        let dir = std::env::temp_dir().join(format!("orx-store-runimmut-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        // Created by chat_A.
+        store
+            .upsert_run(&run_fixture("run_1", "starting", Some("chat_A")))
+            .unwrap();
+        // A later status upsert that carries a *different* (or absent) session
+        // must NOT rewrite the owner — ownership is immutable.
+        store
+            .upsert_run(&run_fixture("run_1", "failed", Some("chat_B")))
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "done", None))
+            .unwrap();
+
+        let run = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(run.status, "done", "status still updates on conflict");
+        assert_eq!(
+            run.chat_session_id,
+            Some("chat_A".to_string()),
+            "the launching session is never overwritten by a later upsert"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn experiment_fixture(id: &str, chat_session_id: Option<&str>) -> LocalExperiment {
+        LocalExperiment {
+            id: id.into(),
+            project_id: "proj_1".into(),
+            parent_experiment_id: None,
+            slug: format!("exp-{id}"),
+            branch_name: format!("orx/exp-{id}"),
+            title: None,
+            description: None,
+            run_command: "echo hi".into(),
+            agent_status: "idle".into(),
+            created_at: 1,
+            updated_at: 1,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
+            play_entry: None,
+            merge_parent_experiment_id: None,
+            chat_session_id: chat_session_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn experiment_chat_session_id_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("orx-store-expsess-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        store
+            .create_local_experiment(&experiment_fixture("exp_owned", Some("chat_x")))
+            .unwrap();
+        store
+            .create_local_experiment(&experiment_fixture("exp_orphan", None))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get_local_experiment("exp_owned")
+                .unwrap()
+                .unwrap()
+                .chat_session_id,
+            Some("chat_x".to_string())
+        );
+        assert_eq!(
+            store
+                .get_local_experiment("exp_orphan")
+                .unwrap()
+                .unwrap()
+                .chat_session_id,
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn experiment_ownership_is_immutable_across_updates() {
+        let dir = std::env::temp_dir().join(format!("orx-store-expimm-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        store
+            .create_local_experiment(&experiment_fixture("exp_owned", Some("chat_x")))
+            .unwrap();
+
+        // A later full-row update must not rewrite the owning session.
+        let mut updated = experiment_fixture("exp_owned", None);
+        updated.title = Some("renamed".into());
+        store.update_local_experiment(&updated).unwrap();
+
+        let stored = store.get_local_experiment("exp_owned").unwrap().unwrap();
+        assert_eq!(stored.title.as_deref(), Some("renamed"), "title updates");
+        assert_eq!(
+            stored.chat_session_id,
+            Some("chat_x".to_string()),
+            "the creating session is never overwritten by a later update"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
