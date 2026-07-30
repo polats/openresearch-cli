@@ -2,6 +2,7 @@ import {
   Check,
   ChevronRight,
   CornerDownLeft,
+  FolderGit2,
   Gamepad2,
   FolderOpen,
   HelpCircle,
@@ -10,6 +11,7 @@ import {
   Plus,
   Settings,
   SlidersHorizontal,
+  Users,
   X,
 } from "lucide-react";
 import { personaMeta, PersonaBadge, PersonaPicker, DEFAULT_PERSONA } from "./personaMeta";
@@ -40,6 +42,8 @@ import {
   getPersonas,
   getHarnesses,
   modelLabel,
+  reasoningFor,
+  reconcileReasoning,
   renameChatSession,
   respondChat,
   sendChatMessage,
@@ -69,6 +73,7 @@ import {
   usePopover,
   type ModelSelection,
 } from "./ModelPicker";
+import { ContextMeter } from "./ContextMeter";
 
 const SELECTION_STORAGE_KEY = "orx:agent-selection";
 
@@ -110,7 +115,9 @@ type Action =
   | { type: "upsertMessage"; sessionId: string; message: ChatMessage }
   | { type: "optimisticUser"; sessionId: string; text: string; imageUrls: string[] }
   | { type: "busy"; sessionId: string; busy: boolean }
-  | { type: "seedBusy"; sessions: string[] }
+  // `known` scopes the reseed: flags for sessions outside it (other projects —
+  // busy events aren't project-filtered) are carried forward, not wiped.
+  | { type: "seedBusy"; sessions: string[]; known: string[] }
   | { type: "forget"; sessionId: string };
 
 const LOCAL_PREFIX = "local-";
@@ -176,8 +183,12 @@ function reducer(state: ChatState, action: Action): ChatState {
       else busySessions.delete(action.sessionId);
       return { ...state, busySessions };
     }
-    case "seedBusy":
-      return { ...state, busySessions: new Set(action.sessions) };
+    case "seedBusy": {
+      const busySessions = new Set(action.sessions);
+      const known = new Set(action.known);
+      for (const id of state.busySessions) if (!known.has(id)) busySessions.add(id);
+      return { ...state, busySessions };
+    }
     case "forget": {
       // Deleted session: drop its transcript and busy flag so a same-id event
       // arriving late can't render stale state.
@@ -284,13 +295,46 @@ function toolLine(part: ChatPart): string {
       return desc ?? "Fetched a page";
     case "Task":
       return desc ?? "Ran a subagent";
+    case "subagent":
+      return subagentLine(input);
     case "error":
       return "Error";
+    case "interrupted":
+      return "Interrupted";
     default: {
       const detail = desc ?? fp ?? cmd ?? part.state?.title ?? "";
       return detail ? `${tool}: ${detail}` : tool;
     }
   }
+}
+
+/** Readable one-liner for a Codex sub-agent spawn/activity row, from the
+ * collab item fields the backend put in `state.input`. */
+function subagentLine(input: Record<string, unknown>): string {
+  const trim = (s: string) => (s.length > 60 ? `${s.slice(0, 60)}…` : s);
+  const prompt = typeof input.prompt === "string" && input.prompt ? ` — “${trim(input.prompt)}”` : "";
+  // collabAgentToolCall carries `tool`; subAgentActivity carries `kind`.
+  switch (typeof input.tool === "string" ? input.tool : "") {
+    case "spawnAgent":
+      return `Spawned agent${prompt}`;
+    case "sendInput":
+      return `Sent input to agent${prompt}`;
+    case "resumeAgent":
+      return "Resumed agent";
+    case "wait":
+      return "Waiting on agent";
+    case "closeAgent":
+      return "Closed agent";
+  }
+  switch (typeof input.kind === "string" ? input.kind : "") {
+    case "started":
+      return "Sub-agent started";
+    case "interacted":
+      return "Sub-agent activity";
+    case "interrupted":
+      return "Sub-agent interrupted";
+  }
+  return "Sub-agent";
 }
 
 /** One expandable tool row inside a group: gray summary line, click to reveal
@@ -333,22 +377,33 @@ function ToolRow({ part, onOpenFile }: { part: ChatPart; onOpenFile?: (path: str
   );
 }
 
-/** A run of consecutive tool calls, collapsed into one gray line like the
- * Claude desktop app ("Read hello.py" for one, "Used N tools" for several).
- * Clicking expands every row; a still-running tool auto-expands. */
+/** A run of consecutive tool calls. A single call renders as its own row
+ * (click reveals input/output); several collapse behind one "Used N tools"
+ * line that expands to every row, auto-expanded while one is still running. */
 function ToolGroup({ parts, onOpenFile }: { parts: ChatPart[]; onOpenFile?: (path: string) => void }) {
   const running = parts.some((p) => p.state?.status === "running");
   const errored = parts.some((p) => p.state?.status === "error");
   const [open, setOpen] = useState(false);
-  // While a tool is in flight, show it live; collapse once the run settles.
-  const expanded = open || running;
 
-  const summary =
-    parts.length === 1
-      ? toolLine(parts[0])
-      : running
-        ? toolLine(parts.find((p) => p.state?.status === "running") ?? parts[parts.length - 1])
-        : `Used ${parts.length} tools`;
+  // A single tool needs no group wrapper: its ToolRow already shows the same
+  // line (dot + toolLine) and expands to the input/output directly. The
+  // summary-plus-rows shape would paint the identical line twice. A running
+  // lone row stays collapsed by design — the old auto-expand only revealed a
+  // duplicate line whose detail was collapsed anyway.
+  if (parts.length === 1) {
+    return (
+      <div className={`tool-group ${errored ? "has-error" : ""}`}>
+        <ToolRow part={parts[0]} onOpenFile={onOpenFile} />
+      </div>
+    );
+  }
+
+  // While a tool is in flight, show the rows live; collapse once the run
+  // settles. Because a running group is always expanded, a summary echoing
+  // the running tool's line would sit directly above the identical row — the
+  // count never duplicates.
+  const expanded = open || running;
+  const summary = `Used ${parts.length} tools`;
 
   return (
     <div className={`tool-group ${errored ? "has-error" : ""}`}>
@@ -577,17 +632,24 @@ function PromptCard({
   );
 }
 
+/** Whether a part paints anything in the transcript. The single source of
+ * truth for "invisible": empty text/reasoning (encrypted-thinking models
+ * stored these before the harness-side skip existed) and resolved permission
+ * cards (which leave no trace). Shared by `messageHasVisibleContent` and
+ * `renderParts` so the two can't drift. */
+function partIsVisible(part: ChatPart): boolean {
+  if (part.type === "prompt")
+    return !!part.prompt && !(part.prompt.resolved && part.prompt.kind === "permission");
+  if (part.type === "text" || part.type === "reasoning") return !!part.text;
+  return true; // tool, image, …
+}
+
 /** Whether a message renders anything once resolved-permission cards vanish —
  * a bridge permission card rides its own message, so resolving it leaves the
  * message empty and it must drop out of the transcript entirely. */
 function messageHasVisibleContent(m: ChatMessage): boolean {
   if (m.role === "user") return true;
-  return m.parts.some((part) => {
-    if (part.type === "prompt")
-      return !!part.prompt && !(part.prompt.resolved && part.prompt.kind === "permission");
-    if (part.type === "text" || part.type === "reasoning") return !!part.text;
-    return true; // tool, image, …
-  });
+  return m.parts.some(partIsVisible);
 }
 
 /** Memoized: streaming re-broadcasts the whole updated message ~7x/sec, and
@@ -603,25 +665,42 @@ const Message = memo(function Message({
   onOpenFile,
   onRespond,
   onOpenPlan,
+  onOpenSubagent,
+  skills,
 }: {
   message: ChatMessage;
   onOpenFile?: (path: string) => void;
   onRespond?: (answer: PromptAnswer) => void;
   /** Open a plan's full markdown in the right pane (plan cards/strip). */
   onOpenPlan?: (plan: string, promptId: string) => void;
+  /** Open a sub-agent's transcript in the right pane (spawn-row "view"). */
+  onOpenSubagent?: (spawnPartId: string) => void;
+  /** Known slash-skills, for rendering a leading `/name` as a command chip. */
+  skills?: SkillInfo[];
 }) {
   if (message.role === "user") {
     const text = message.parts
       .filter((p) => p.type === "text")
       .map((p) => p.text ?? "")
       .join("\n");
+    // A leading known `/command` renders as the same chip the composer shows.
+    // Unknown commands (or skills removed since) fall back to plain text.
+    const slash = text.match(/^\/(\S+)([\s\S]*)$/);
+    const command = slash ? skills?.find((s) => s.name === slash[1]) : undefined;
     // Optimistic parts carry a data URL; server parts carry a file name.
     const images = message.parts
       .filter((p) => p.type === "image" && p.text)
       .map((p) => (p.text!.startsWith("data:") ? p.text! : chatAttachmentUrl(p.text!)));
     return (
       <div className="msg-user">
-        {text}
+        {command ? (
+          <>
+            <span className="skill-chip">/{command.name}</span>
+            {slash![2]}
+          </>
+        ) : (
+          text
+        )}
         {images.length > 0 && (
           <div className="msg-images">
             {images.map((src, i) => (
@@ -634,8 +713,28 @@ const Message = memo(function Message({
       </div>
     );
   }
-  // Coalesce consecutive tool parts into one collapsed group (Claude-desktop
-  // style); text / reasoning / prompt parts break a run and render inline.
+  return (
+    <div className="msg-assistant">
+      {renderParts(message.parts, { onOpenFile, onRespond, onOpenPlan, onOpenSubagent })}
+    </div>
+  );
+});
+
+/** Shared assistant-parts renderer, reused for a message body and (recursively)
+ * for a sub-agent's nested transcript. Coalesces consecutive tool parts into one
+ * collapsed group (Claude-desktop style); text / reasoning / prompt parts break
+ * a run and render inline. A sub-agent spawn part (tool `subagent`) also breaks
+ * the run and renders as its own nested block. */
+function renderParts(
+  parts: ChatPart[],
+  opts: {
+    onOpenFile?: (path: string) => void;
+    onRespond?: (answer: PromptAnswer) => void;
+    onOpenPlan?: (plan: string, promptId: string) => void;
+    onOpenSubagent?: (spawnPartId: string) => void;
+  },
+): React.ReactNode[] {
+  const { onOpenFile, onRespond, onOpenPlan, onOpenSubagent } = opts;
   const rendered: React.ReactNode[] = [];
   let toolRun: ChatPart[] = [];
   const flushTools = () => {
@@ -645,15 +744,34 @@ const Message = memo(function Message({
     );
     toolRun = [];
   };
-  for (const part of message.parts) {
+  for (const part of parts) {
+    // A part that renders nothing must not break a tool run either — e.g. the
+    // empty reasoning parts encrypted-thinking models produced (stored
+    // transcripts predating the ingest-side skip still carry them), or a
+    // resolved permission card. Without this, each invisible part splits
+    // consecutive tools into single-row groups.
+    if (!partIsVisible(part)) continue;
+    // A sub-agent spawn part streams its own transcript in `children` — render
+    // it as a standalone nested block, not folded into a tool run. The signal is
+    // harness-agnostic: Codex tags the row `subagent`, while Claude's `Task` /
+    // OpenCode's `task` rows are spawns whenever they carry children.
+    if (part.type === "tool" && (part.tool === "subagent" || (part.children?.length ?? 0) > 0)) {
+      flushTools();
+      rendered.push(
+        <SubagentBlock key={part.id} part={part} onOpenSubagent={onOpenSubagent} />,
+      );
+      continue;
+    }
     if (part.type === "tool") {
       toolRun.push(part);
       continue;
     }
     flushTools();
-    if (part.type === "text" && part.text)
-      rendered.push(<Md key={part.id} text={part.text} onOpenFile={onOpenFile} />);
-    else if (part.type === "reasoning" && part.text)
+    // The visibility skip above guarantees text/reasoning parts here are
+    // non-empty.
+    if (part.type === "text")
+      rendered.push(<Md key={part.id} text={part.text!} onOpenFile={onOpenFile} />);
+    else if (part.type === "reasoning")
       rendered.push(
         <details key={part.id} className="reasoning">
           <summary>thinking…</summary>
@@ -672,9 +790,80 @@ const Message = memo(function Message({
       );
   }
   flushTools();
+  return rendered;
+}
 
-  return <div className="msg-assistant">{rendered}</div>;
-});
+/** Find a part by id anywhere in a parts tree (depth-first). Used by the
+ * right-pane sub-agent tab to locate a spawn part across a session's messages. */
+export function findPartById(parts: ChatPart[], id: string): ChatPart | null {
+  for (const part of parts) {
+    if (part.id === id) return part;
+    const nested = part.children && findPartById(part.children, id);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+/** The sub-agent's transcript, rendered standalone in the right-pane tab (the
+ * only place the transcript is shown — the inline row just opens this). Reuses
+ * `renderParts`, so nested sub-agents are themselves click-to-open rows. */
+export function SubagentTranscript({
+  spawn,
+  onOpenFile,
+  onOpenSubagent,
+}: {
+  spawn: ChatPart;
+  onOpenFile?: (path: string) => void;
+  onOpenSubagent?: (spawnPartId: string) => void;
+}) {
+  const parts = spawn.children ?? [];
+  const running = spawn.state?.status === "running";
+  // Gate the empty state on what actually renders, not the raw part count — a
+  // stored transcript of nothing but invisible parts must still read as empty.
+  const rendered = renderParts(parts, { onOpenFile, onOpenSubagent });
+  return (
+    <div className="msg-assistant">
+      <div className="subagent-tab-header">
+        <span className={toolStatusClass(spawn.state?.status)} />
+        <span className="tool-line">{toolLine(spawn)}</span>
+        {running && <span className="subagent-live">live</span>}
+      </div>
+      {rendered.length === 0 ? (
+        <div className="subagent-empty">{running ? "Working…" : "No activity"}</div>
+      ) : (
+        rendered
+      )}
+    </div>
+  );
+}
+
+/** A Codex/Claude/OpenCode sub-agent spawn row. A single clickable line — a
+ * status dot + label — that opens the sub-agent's full transcript in the
+ * right-side panel (like the Claude/Codex desktop apps). The transcript is
+ * never expanded inline; the row stays a one-liner whether the sub-agent is
+ * running (pulsing dot) or done. */
+function SubagentBlock({
+  part,
+  onOpenSubagent,
+}: {
+  part: ChatPart;
+  onOpenSubagent?: (spawnPartId: string) => void;
+}) {
+  const errored = part.state?.status === "error";
+  return (
+    <button
+      className={`subagent-row ${errored ? "has-error" : ""}`}
+      title="Open sub-agent transcript"
+      onClick={() => onOpenSubagent?.(part.id)}
+      disabled={!onOpenSubagent}
+    >
+      <Users size={12} className="subagent-icon" />
+      <span className={toolStatusClass(part.state?.status)} />
+      <span className="tool-line">{toolLine(part)}</span>
+      <ChevronRight size={12} className="subagent-row-chevron" />
+    </button>
+  );
+}
 
 /** Memoized transcript: composer keystrokes re-render ChatPanel (draft state
  * lives there), and this boundary keeps them from re-allocating N Message
@@ -687,11 +876,15 @@ const Transcript = memo(function Transcript({
   onOpenFile,
   onRespond,
   onOpenPlan,
+  onOpenSubagent,
+  skills,
 }: {
   messages: ChatMessage[];
   onOpenFile?: (path: string) => void;
   onRespond?: (answer: PromptAnswer) => void;
   onOpenPlan?: (plan: string, promptId: string) => void;
+  onOpenSubagent?: (spawnPartId: string) => void;
+  skills?: SkillInfo[];
 }) {
   return (
     <>
@@ -702,6 +895,8 @@ const Transcript = memo(function Transcript({
           onOpenFile={onOpenFile}
           onRespond={onRespond}
           onOpenPlan={onOpenPlan}
+          onOpenSubagent={onOpenSubagent}
+          skills={skills}
         />
       ))}
     </>
@@ -711,6 +906,10 @@ const Transcript = memo(function Transcript({
 // --- session rail ------------------------------------------------------------
 
 type SessionFilter = "active" | "archived" | "all";
+
+/** Whether the rail's current filter shows a session in this archived state. */
+const matchesFilter = (filter: SessionFilter, archived: boolean) =>
+  filter === "all" ? true : filter === "archived" ? archived : !archived;
 
 /** Menu label + rail section heading per filter — "Recents" for the default view. */
 const SESSION_FILTERS: { id: SessionFilter; label: string; railLabel: string }[] = [
@@ -889,6 +1088,50 @@ function ProposalCard({
   );
 }
 
+/** Per-character stagger, and the ceiling on the whole run — a long title
+ * shouldn't take a second and a half to finish arriving. */
+const TITLE_CHAR_STAGGER_MS = 14;
+const TITLE_STAGGER_CAP_MS = 500;
+/** How long the reveal flag stays set: the capped stagger plus one character's
+ * 240ms animation, plus slack. After this the title renders as plain text. */
+const TITLE_REVEAL_CLEAR_MS = 1200;
+
+/** A session title that materializes character by character when a
+ * harness-generated one replaces the first-line placeholder. `animate` is false
+ * everywhere else (initial load, renames, re-renders), and then this renders the
+ * bare string — the animated form is deliberately the exception.
+ *
+ * The characters are `aria-hidden` and the whole title rides an `aria-label`:
+ * a screen reader must hear one title, not forty single-letter spans. */
+function TitleReveal({ title, animate }: { title: string; animate: boolean }) {
+  if (!animate) return <>{title}</>;
+  return (
+    <span className="title-reveal" aria-label={title}>
+      {Array.from(title).map((ch, i) =>
+        // Spaces stay plain inline boxes: the animated characters must be
+        // inline-block (transform doesn't apply to inline boxes), but an
+        // inline-block space collapses to zero width and eats the word gap.
+        ch === " " ? (
+          <span key={i} aria-hidden>
+            {ch}
+          </span>
+        ) : (
+          <span
+            key={i}
+            aria-hidden
+            className="title-reveal-char"
+            style={{
+              animationDelay: `${Math.min(i * TITLE_CHAR_STAGGER_MS, TITLE_STAGGER_CAP_MS)}ms`,
+            }}
+          >
+            {ch}
+          </span>
+        ),
+      )}
+    </span>
+  );
+}
+
 /** One Recents row. Hover swaps the timestamp for a three-dot menu with
  * Rename, Archive/Unarchive, and Delete (Claude-desktop style). Rename turns
  * the title into an inline input. */
@@ -899,6 +1142,7 @@ function SessionRow({
   waiting,
   persona,
   depth = 0,
+  revealTitle,
   onOpen,
   onRename,
   onSetArchived,
@@ -913,6 +1157,10 @@ function SessionRow({
   persona?: string | null;
   /** Nesting depth in the Recents thread (0 = top-level orchestrator). */
   depth?: number;
+  /** Nonce set while this row's freshly auto-generated title should play its
+   * reveal; it doubles as the remount key so a second retitle replays it.
+   * Undefined the rest of the time (static title). */
+  revealTitle: number | undefined;
   onOpen: () => void;
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
@@ -1011,7 +1259,13 @@ function SessionRow({
         />
       ) : (
         <span className="session-titlewrap">
-          <span className="session-title">{title}</span>
+          <span className="session-title">
+            <TitleReveal
+              key={revealTitle ?? "static"}
+              title={title}
+              animate={revealTitle !== undefined}
+            />
+          </span>
           <span className="session-sub" title={`${personaMeta(rowPersona).label} · ${provider}`}>
             <PersonaBadge persona={rowPersona} compact size={12} />
             {provider}
@@ -1082,9 +1336,12 @@ export function ChatPanel({
   onTogglePanel,
   onOpenFile,
   onOpenPlan,
+  onOpenSubagent,
+  onOpenWorktree,
   onStartTour,
   persona,
   baselineBranch,
+  onActiveSessionChange,
   children,
 }: {
   projectId: string;
@@ -1108,12 +1365,19 @@ export function ChatPanel({
   onOpenFile?: (path: string, sessionId?: string) => void;
   /** Open a plan's markdown as a right-pane tab (plan strip / plan cards). */
   onOpenPlan?: (plan: string, sessionId: string, promptId: string) => void;
+  /** Open a sub-agent's transcript as a right-pane tab (spawn-row "view").
+   * `sessionId` is the chat session; `spawnPartId` locates the spawn part. */
+  onOpenSubagent?: (sessionId: string, spawnPartId: string) => void;
+  /** Open the live worktree tab for a session (chat header worktree button). */
+  onOpenWorktree?: (sessionId: string) => void;
   /** Replay the onboarding tour (chat header help button). */
   onStartTour?: () => void;
   /** The project's persona wire id — colors the session-title bar. */
   persona?: string | null;
   /** Branch new baselines fork from — shown in the composer's branch picker. */
   baselineBranch?: string | null;
+  /** The open chat session, surfaced so the shell can scope panes to it. */
+  onActiveSessionChange?: (sessionId: string | null) => void;
   /** Middle-pane content when a settings section is active (the SettingsView). */
   children?: React.ReactNode;
 }) {
@@ -1177,11 +1441,25 @@ export function ChatPanel({
   // active session changes. Distinct from `selection`, which is the sticky
   // global preference that seeds *new* sessions.
   const [sessionOverride, setSessionOverride] = useState<Partial<ModelSelection>>({});
+  // Sessions whose title was just replaced by a harness-generated one, mapped
+  // to a nonce that bumps per reveal so a second retitle remounts the spans and
+  // replays the animation instead of sitting on a finished one.
+  const [titleReveals, setTitleReveals] = useState<Map<string, number>>(new Map());
+  // Last title seen per session id. The SSE subscription is keyed on projectId
+  // alone, so its closure can't read `sessions`; this ref is what tells an
+  // incoming title from the one already on screen.
+  const seenTitles = useRef(new Map<string, string | null>());
   const loadedSessions = useRef(new Set<string>());
   // Tombstones: a turn finishing in the same instant as a delete can emit its
   // final chat.session upsert *after* chat.session.deleted; ignoring upserts
   // for known-deleted ids keeps the ghost row from coming back.
   const deletedIds = useRef(new Set<string>());
+  // Bumped on every chat.message dispatch — the reconnect repair uses it to
+  // detect a live flush racing its transcript refetch.
+  const msgGen = useRef(0);
+  // Render-fresh mirror of `sessions` for callbacks memoized on projectId
+  // alone (syncSessionList snapshots it before fetching).
+  const sessionsRef = useRef<ChatSession[]>([]);
   const threadRef = useRef<HTMLDivElement>(null);
   const threadInnerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -1192,10 +1470,34 @@ export function ChatPanel({
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [skillIdx, setSkillIdx] = useState(0);
   const [skillMenuDismissed, setSkillMenuDismissed] = useState(false);
+  // A picked skill renders as a chip on the textarea's first line
+  // (Claude-desktop style); the textarea then holds only the args. send()
+  // reassembles `/name args`, so the wire and transcript keep the plain-text
+  // form. The chip overlays the textarea and the first line is indented past
+  // it (text-indent), so long args wrap full-width beneath the chip instead
+  // of being squeezed into a narrower column.
+  const [pickedSkill, setPickedSkill] = useState<SkillInfo | null>(null);
+  const chipRef = useRef<HTMLSpanElement>(null);
+  const [chipIndent, setChipIndent] = useState(0);
+  useLayoutEffect(() => {
+    setChipIndent(pickedSkill && chipRef.current ? chipRef.current.offsetWidth + 8 : 0);
+    syncChipScroll();
+  }, [pickedSkill]);
+
+  /** The chip belongs to the first line of *content*, so when the textarea
+   * scrolls it must ride along (and clip at the wrapper) instead of sitting
+   * fixed over whatever line scrolled to the top. */
+  function syncChipScroll() {
+    if (chipRef.current)
+      chipRef.current.style.transform = `translateY(${-(composerRef.current?.scrollTop ?? 0)}px)`;
+  }
+  // IME guard: mid-composition text can transiently look like a full command.
+  const composingRef = useRef(false);
   useEffect(() => {
     getSkills().then(setSkills).catch(() => {});
   }, []);
-  const slashToken = draft.startsWith("/") && !/\s/.test(draft) ? draft.slice(1) : null;
+  const slashToken =
+    !pickedSkill && draft.startsWith("/") && !/\s/.test(draft) ? draft.slice(1) : null;
   const skillMatches =
     slashToken !== null && !skillMenuDismissed
       ? skills.filter((s) => s.name.startsWith(slashToken.toLowerCase()))
@@ -1205,7 +1507,15 @@ export function ChatPanel({
   useEffect(() => setSkillIdx(0), [slashToken]);
 
   function pickSkill(skill: SkillInfo) {
-    setDraft(`/${skill.name} `);
+    setPickedSkill(skill);
+    setDraft("");
+    composerRef.current?.focus();
+  }
+
+  /** Backspace at the start deletes the command outright (Claude-desktop
+   * behavior) — the args stay put; re-type `/` to pick another skill. */
+  function removeSkillChip() {
+    setPickedSkill(null);
     composerRef.current?.focus();
   }
 
@@ -1241,7 +1551,7 @@ export function ChatPanel({
   //  * with a session open — that session's stored settings, with any unsent
   //    picker tweaks layered on. The harness is the session's, not the global.
   //  * with no session — the sticky global preference (seeds a new session).
-  const composerSelection: ModelSelection | null = openSession
+  const rawSelection: ModelSelection | null = openSession
     ? {
         harness: openSession.harness,
         model: sessionOverride.model ?? openSession.model,
@@ -1249,52 +1559,120 @@ export function ChatPanel({
         reasoningLevel: sessionOverride.reasoningLevel ?? openSession.reasoningLevel,
       }
     : (selection ?? defaultSelection(harnesses));
-  const activeHarness = composerSelection
-    ? harnesses.find((h) => h.id === composerSelection.harness)
+  const activeHarness = rawSelection
+    ? harnesses.find((h) => h.id === rawSelection.harness)
     : undefined;
   const opts = activeHarness?.options;
+  // Reconcile the reasoning level against the *currently selected model* here
+  // rather than only in the picker's `pick`. Two paths reach the composer with
+  // a level nobody chose for this model: a session row stored by an older build
+  // (which always wrote an explicit effort), and a stale localStorage selection.
+  // Reconciling at the point the composer derives its state covers both, so the
+  // displayed value and the value `send` transmits can never be one the model
+  // rejects.
+  const composerSelection: ModelSelection | null = rawSelection && {
+    ...rawSelection,
+    reasoningLevel: reconcileReasoning(
+      activeHarness,
+      rawSelection.model,
+      rawSelection.reasoningLevel,
+    ),
+  };
+  // Reasoning choices follow the *selected model*, not just the harness — an
+  // OpenCode model with no `variants` hides the picker entirely, and Codex's
+  // top tiers appear only on the models that accept them.
+  const reasoning = reasoningFor(activeHarness, composerSelection?.model);
 
-  // Editing the pickers: a session-scoped tweak when a session is open (applied
-  // on next send), else an update to the sticky global preference.
-  const selectModel = (next: ModelSelection) => {
-    if (openSession) {
-      setSessionOverride({
-        model: next.model,
-        permissionMode: next.permissionMode,
-        reasoningLevel: next.reasoningLevel,
+  // Editing the pickers: every change updates the sticky global preference —
+  // the config a "New session" composer opens with is whatever the user chose
+  // LAST, whether they chose it on an empty composer or inside a session. With
+  // a session open the change additionally lands as that session's unsent
+  // tweak (applied on the next send).
+  //
+  // The session override is *merged*, never replaced. It has to be: the pickers
+  // build their `next` by spreading `composerSelection`, whose reasoning level
+  // is a reconciled value rather than the session's stored one. Replacing would
+  // let a change on one axis pin a reconciled value on another — picking a
+  // permission mode would write a reasoning level the user never chose, and the
+  // next send would persist it over their real setting.
+  const selectModel = (next: Partial<ModelSelection>) => {
+    if (!composerSelection) return;
+    const merged = { ...composerSelection, ...next };
+    setSelection(merged);
+    localStorage.setItem(SELECTION_STORAGE_KEY, JSON.stringify(merged));
+    if (openSession) setSessionOverride((cur) => ({ ...cur, ...next }));
+  };
+  const setPermissionMode = (id: string) => selectModel({ permissionMode: id });
+  const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
+
+  sessionsRef.current = sessions;
+
+  /** Fetch the authoritative session list and adopt it wholesale: the rows
+   * (honoring delete tombstones and keeping locally-newer contextUsage — same
+   * merge as the chat.session handler), the seenTitles baseline (so the next
+   * live event compares against what's on screen rather than animating a title
+   * the user already had), and the busy set. A session we showed that the
+   * authoritative list no longer has was deleted while SSE was down (its
+   * chat.session.deleted frame is lost for good) — run the full forget
+   * cleanup, or its cached transcript, busy flag, and active selection linger
+   * as a ghost. Shared by the project-change load and the SSE-reconnect
+   * repair. Resolves to the adopted list, null on fetch failure. */
+  const syncSessionList = useCallback(async (): Promise<ChatSession[] | null> => {
+    // Snapshot BEFORE the fetch: a session created while the request is in
+    // flight is absent from the response but also absent here, so it can
+    // never be mistaken for deleted (forgetSession tombstones — a false
+    // positive would kill a live session for good).
+    const before = sessionsRef.current.map((s) => s.id);
+    try {
+      const list = (await listChatSessions(projectId)).filter(
+        (s) => !deletedIds.current.has(s.id),
+      );
+      const ids = new Set(list.map((s) => s.id));
+      // Forget BEFORE seeding busy: forget drops the ghost's busy flag, so
+      // the known-scoped seed below can't carry it forward as if the session
+      // belonged to another project.
+      for (const id of before) if (!ids.has(id)) forgetSession(id);
+      // Same contextUsage-preservation rule as the chat.session handler (the
+      // scope differs: this replaces the whole array, that merges one row).
+      setSessions((cur) => {
+        const prevUsage = new Map(cur.map((c) => [c.id, c.contextUsage]));
+        return list.map((s) => ({
+          ...s,
+          contextUsage: s.contextUsage ?? prevUsage.get(s.id),
+        }));
       });
-    } else {
-      setSelection(next);
-      localStorage.setItem(SELECTION_STORAGE_KEY, JSON.stringify(next));
+      seenTitles.current = new Map(list.map((s) => [s.id, s.title]));
+      dispatch({
+        type: "seedBusy",
+        sessions: list.filter((s) => s.busy).map((s) => s.id),
+        known: list.map((s) => s.id),
+      });
+      return list;
+    } catch {
+      return null;
     }
-  };
-  const setPermissionMode = (id: string) => {
-    if (composerSelection) selectModel({ ...composerSelection, permissionMode: id });
-  };
-  const setReasoningLevel = (id: string) => {
-    if (composerSelection) selectModel({ ...composerSelection, reasoningLevel: id });
-  };
+  }, [projectId]);
 
   // Reset everything when the project changes.
   useEffect(() => {
     setSessions([]);
+    // Clear the mirror NOW, not at the next render: syncSessionList below
+    // snapshots it, and the old project's rows would all read as "deleted"
+    // against the new project's list — tombstoning the entire old project.
+    sessionsRef.current = [];
     setActiveId(null);
     setDraft("");
+    setPickedSkill(null);
     setAttachments([]);
     dispatch({ type: "reset" });
     loadedSessions.current = new Set();
-    listChatSessions(projectId)
-      .then((list) => {
-        setSessions(list);
-        // Prefer the newest non-archived session; archived ones stay hidden.
-        setActiveId((cur) => cur ?? list.find((s) => !s.archived)?.id ?? null);
-        dispatch({
-          type: "seedBusy",
-          sessions: list.filter((s) => s.busy).map((s) => s.id),
-        });
-      })
-      .catch(() => {});
-  }, [projectId]);
+    setTitleReveals(new Map());
+    seenTitles.current = new Map();
+    void syncSessionList().then((list) => {
+      // Prefer the newest non-archived session; archived ones stay hidden.
+      if (list) setActiveId((cur) => cur ?? list.find((s) => !s.archived)?.id ?? null);
+    });
+  }, [projectId, syncSessionList]);
 
   // Load message history when a session becomes active.
   useEffect(() => {
@@ -1317,29 +1695,94 @@ export function ChatPanel({
   useEffect(() => {
     return onChatEvent((ev) => {
       switch (ev.type) {
-        case "session":
+        case "session": {
           if (ev.session.projectId !== projectId) return;
           if (deletedIds.current.has(ev.session.id)) return;
+          // A generated title landing on a session already on screen is the
+          // auto-title arriving — reveal it. A session we've never seen is
+          // skipped on purpose: a list load or a newly created row must not
+          // animate a title that was simply always there.
+          const known = seenTitles.current.has(ev.session.id);
+          const changed = seenTitles.current.get(ev.session.id) !== ev.session.title;
+          seenTitles.current.set(ev.session.id, ev.session.title);
+          if (known && changed && ev.session.titleSource === "generated") {
+            setTitleReveals((cur) => {
+              const next = new Map(cur);
+              next.set(ev.session.id, (cur.get(ev.session.id) ?? 0) + 1);
+              return next;
+            });
+            // Drop the flag once the run is over (longest stagger + one char
+            // duration, plus slack) so later re-renders show a static title.
+            window.setTimeout(() => {
+              setTitleReveals((cur) => {
+                if (!cur.has(ev.session.id)) return cur;
+                const next = new Map(cur);
+                next.delete(ev.session.id);
+                return next;
+              });
+            }, TITLE_REVEAL_CLEAR_MS);
+          }
           setSessions((cur) => {
             const i = cur.findIndex((s) => s.id === ev.session.id);
             if (i < 0) return [ev.session, ...cur];
             const next = cur.slice();
-            next[i] = ev.session;
+            // An interrupted turn aborts before the persist block, so its
+            // follow-up chat.session can lack usage the client already showed
+            // live. Usage is never legitimately cleared, so keep the local
+            // value whenever the incoming session omits one.
+            next[i] = { ...ev.session, contextUsage: ev.session.contextUsage ?? cur[i].contextUsage };
             return next;
           });
           break;
+        }
         case "sessionDeleted":
           forgetSession(ev.sessionId);
           break;
         case "message":
+          msgGen.current++;
           dispatch({ type: "upsertMessage", sessionId: ev.sessionId, message: ev.message });
           break;
         case "busy":
           dispatch({ type: "busy", sessionId: ev.sessionId, busy: ev.busy });
           break;
+        case "usage":
+          setSessions((cur) =>
+            cur.map((s) => (s.id === ev.sessionId ? { ...s, contextUsage: ev.usage } : s)),
+          );
+          break;
       }
     });
   }, [projectId]);
+
+  // Repair after an SSE gap. Chat frames are edge-only — a dropped EventSource
+  // mid-turn loses chat.message / chat.busy events for good, which strands the
+  // UI (a spinner that never clears, or a reply that never appears until a
+  // reload). On reconnect, refetch the authoritative state: the session list
+  // (busy flags ride it) and the active transcript. The seed replaces the
+  // transcript wholesale, so a live flush racing the fetch would be clobbered
+  // — and if it was the turn's FINAL flush, never repaired; the msgGen check
+  // refetches once when that race is detected. Separate subscription so it can
+  // depend on activeId without re-running the main handler's effect.
+  useEffect(() => {
+    return onChatEvent((ev) => {
+      if (ev.type !== "reconnected") return;
+      void syncSessionList();
+      if (!activeId || !loadedSessions.current.has(activeId)) return;
+      // One retry is sufficient: flush persists to the store BEFORE it emits,
+      // so a refetch issued after observing a raced event already reads that
+      // event's content.
+      const reseed = (allowRetry: boolean) => {
+        const gen = msgGen.current;
+        getChatMessages(activeId)
+          .then((messages) => {
+            dispatch({ type: "seed", sessionId: activeId, messages });
+            if (allowRetry && msgGen.current !== gen) reseed(false);
+          })
+          .catch(() => {});
+      };
+      reseed(true);
+    });
+  }, [activeId, syncSessionList]);
 
   const messages = activeId ? (state.messagesBySession[activeId] ?? []) : [];
   const busy = activeId ? state.busySessions.has(activeId) : false;
@@ -1374,6 +1817,8 @@ export function ChatPanel({
   }, [state.busySessions, state.messagesBySession]);
   const awaitingInput = activeId ? waitingSessions.has(activeId) : false;
   const activeSession = openSession;
+  // Nonce while the open session's title is mid-reveal; undefined = static.
+  const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
   // The newest unresolved plan prompt, if any — it drives the docked strip
   // above the composer. Resolution re-emits the message over SSE, so this
@@ -1445,6 +1890,14 @@ export function ChatPanel({
     [onOpenPlan, activeId],
   );
 
+  const openSubagent = useMemo(
+    () =>
+      onOpenSubagent && activeId
+        ? (spawnPartId: string) => onOpenSubagent(activeId, spawnPartId)
+        : undefined,
+    [onOpenSubagent, activeId],
+  );
+
   // File opens resolve against the active session's worktree — the agent runs
   // there, so that's where its paths point.
   const openFileInSession = useMemo(
@@ -1455,6 +1908,11 @@ export function ChatPanel({
   // Drop any unsent composer tweak when switching sessions, so it never bleeds
   // from one session's pickers onto another's.
   useEffect(() => setSessionOverride({}), [activeId]);
+
+  // Surface the open session to the shell (Agent-scoped panes key off it).
+  useEffect(() => {
+    onActiveSessionChange?.(activeId);
+  }, [activeId, onActiveSessionChange]);
 
   // Opening a session — or remounting the thread (leaving a settings view,
   // history seeding in) — always starts pinned at the latest messages.
@@ -1487,15 +1945,21 @@ export function ChatPanel({
   }, [threadMounted]);
 
   async function send() {
-    const text = draft.trim();
+    const args = draft.trim();
+    // Reassemble the picked skill chip into the plain `/name args` wire form —
+    // the backend's slash expansion and the transcript both see only text.
+    const text = pickedSkill ? `/${pickedSkill.name}${args ? ` ${args}` : ""}` : args;
     const pending = attachments;
     if (!text && pending.length === 0) return;
     // A pending question card owns plain typed text as a custom answer
     // (Claude-desktop behavior). This also works while the turn is HELD on
     // the card — where a new message would be rejected as busy and silently
     // dropped. A failed answer restores the draft so the text isn't lost.
+    // (Auto-convert is off while a card is pending; a chip picked from the
+    // menu or left over just serializes into the note text, same as typing it.)
     if (text && pendingQuestion && pending.length === 0) {
       setDraft("");
+      setPickedSkill(null);
       void respond({ promptId: pendingQuestion, answers: [], note: text }).then((ok) => {
         if (!ok) setDraft((cur) => cur || text);
       });
@@ -1507,6 +1971,7 @@ export function ChatPanel({
     const effective = composerSelection;
     if (!effective && !activeId) return; // no harness available at all
     setDraft("");
+    setPickedSkill(null);
     setAttachments([]);
     let sid = activeId;
     try {
@@ -1552,8 +2017,56 @@ export function ChatPanel({
         dataBase64: a.dataUrl.slice(a.dataUrl.indexOf(",") + 1),
       }));
       await sendChatMessage(sid, text, turnOpts, images.length ? images : undefined);
-    } catch {
-      if (sid) dispatch({ type: "busy", sessionId: sid, busy: false });
+    } catch (err) {
+      // The message never reached a turn — put it back in the composer so a
+      // retry is one keypress, whichever branch below applies.
+      setDraft((cur) => cur || text);
+      setAttachments((cur) => (cur.length ? cur : pending));
+      if (!sid) return; // session creation failed; no transcript to annotate
+      const msg = err instanceof Error ? err.message : String(err);
+      // A *network* failure does not prove no turn started — the backend
+      // claims the turn (and emits busy) before its response, so a lost
+      // response can reject on a live, streaming turn; ask the server before
+      // declaring failure. An explicit busy rejection is different: the slot
+      // belongs to someone else's turn (run watcher, second tab) and ours was
+      // never accepted — always surface that.
+      if (!/session is busy/i.test(msg)) {
+        const busyNow = await listChatSessions(projectId)
+          .then((list) => !!list.find((s) => s.id === sid)?.busy)
+          .catch(() => false);
+        if (busyNow) {
+          // The turn is real and streaming — undo the restore, nothing failed.
+          setDraft((cur) => (cur === text ? "" : cur));
+          setAttachments((cur) => (cur === pending ? [] : cur));
+          return;
+        }
+      }
+      dispatch({ type: "busy", sessionId: sid, busy: false });
+      // Surface the failure instead of swallowing it: a silently dropped send
+      // leaves the optimistic bubble unanswered and reads as "orx did nothing".
+      // Local-only — swept by upsertMessage's LOCAL_PREFIX filter when the next
+      // server user message lands (or by the reconnect reseed), and gone on
+      // reload.
+      dispatch({
+        type: "upsertMessage",
+        sessionId: sid,
+        message: {
+          id: `${LOCAL_PREFIX}senderr-${Date.now()}`,
+          role: "assistant",
+          parts: [
+            {
+              id: "p0",
+              type: "tool",
+              tool: "error",
+              state: {
+                status: "error",
+                error: `Message not sent: ${msg}`,
+              },
+            },
+          ],
+          createdAt: Date.now(),
+        },
+      });
     }
   }
 
@@ -1595,6 +2108,7 @@ export function ChatPanel({
     setSessions((cur) => cur.filter((s) => s.id !== sessionId));
     setActiveId((cur) => (cur === sessionId ? null : cur));
     loadedSessions.current.delete(sessionId);
+    seenTitles.current.delete(sessionId);
     dispatch({ type: "forget", sessionId });
   }
 
@@ -1604,6 +2118,11 @@ export function ChatPanel({
     // which could undo a concurrent authoritative update).
     const prev = session.archived;
     setSessions((cur) => cur.map((s) => (s.id === session.id ? { ...s, archived } : s)));
+    // Deselect only when the row leaves the rail's current filter — keeping it
+    // selected would leave the thread (and Agent-scoped panes) keyed to an
+    // invisible session. Kept even if the request fails; it's a no-op then.
+    if (!matchesFilter(sessionFilter, archived))
+      setActiveId((cur) => (cur === session.id ? null : cur));
     void setChatSessionArchived(session.id, archived).catch(() => {
       setSessions((cur) =>
         cur.map((s) => (s.id === session.id ? { ...s, archived: prev } : s)),
@@ -1677,9 +2196,7 @@ export function ChatPanel({
     [activeId, projectId],
   );
 
-  const visibleSessions = sessions.filter((s) =>
-    sessionFilter === "all" ? true : sessionFilter === "archived" ? s.archived : !s.archived,
-  );
+  const visibleSessions = sessions.filter((s) => matchesFilter(sessionFilter, s.archived));
 
   // Settings sections collapse under one "Settings" item — the rail leads with
   // the three things that matter: New session, Files, and Recents. Auto-open the
@@ -1768,6 +2285,7 @@ export function ChatPanel({
               busy={state.busySessions.has(s.id)}
               waiting={waitingSessions.has(s.id)}
               persona={persona}
+              revealTitle={titleReveals.get(s.id)}
               onOpen={() => {
                 setActiveId(s.id);
                 onSelectMainView("chat");
@@ -1861,7 +2379,15 @@ export function ChatPanel({
           className="title"
           title={activeSession ? activeSession.title?.trim() || "Untitled" : "New session"}
         >
-          {activeSession ? activeSession.title?.trim() || "Untitled" : "New session"}
+          {activeSession ? (
+            <TitleReveal
+              key={activeTitleReveal ?? "static"}
+              title={activeSession.title?.trim() || "Untitled"}
+              animate={activeTitleReveal !== undefined}
+            />
+          ) : (
+            "New session"
+          )}
         </div>
         {onStartTour && (
           <button
@@ -1871,6 +2397,16 @@ export function ChatPanel({
             onClick={onStartTour}
           >
             <HelpCircle size={15} />
+          </button>
+        )}
+        {onOpenWorktree && activeId && (
+          <button
+            className="icon-btn"
+            data-tip="View session worktree"
+            aria-label="View session worktree"
+            onClick={() => onOpenWorktree(activeId)}
+          >
+            <FolderGit2 size={15} />
           </button>
         )}
         <button
@@ -1907,7 +2443,14 @@ export function ChatPanel({
               className="chat-suggest mono"
               title="Prefills the composer — add the compute to run on, then send"
               onClick={() => {
-                setDraft(`/reproduce-paper ${paperId} on `);
+                const skill = skills.find((s) => s.name === "reproduce-paper");
+                if (skill) {
+                  setPickedSkill(skill);
+                  setDraft(`${paperId} on `);
+                } else {
+                  // Skills fetch failed — plain text still expands server-side.
+                  setDraft(`/reproduce-paper ${paperId} on `);
+                }
                 composerRef.current?.focus();
               }}
             >
@@ -1930,6 +2473,8 @@ export function ChatPanel({
               onOpenFile={openFileInSession}
               onRespond={respond}
               onOpenPlan={openPlan}
+              onOpenSubagent={openSubagent}
+              skills={skills}
             />
             {/* Subagent-dispatch suggestions from THIS session render inline as
                 approval cards, like plan/permission cards. Kept outside the
@@ -2014,60 +2559,115 @@ export function ChatPanel({
               ))}
             </div>
           )}
-          <textarea
-            ref={composerRef}
-            value={draft}
-            placeholder={
-              // A pending question card owns typed text (see send()); say so.
-              // Otherwise follow `composerSelection` so the name tracks the
-              // picker for a new session and the open session once one exists.
-              pendingQuestion
-                ? "Type a custom answer…"
-                : composerSelection
-                  ? `Message ${HARNESS_LABELS[composerSelection.harness]}… ( / for skills)`
-                  : "Ask the research agent… ( / for skills)"
-            }
-            rows={2}
-            onPaste={onComposerPaste}
-            onDragOver={(e) => {
-              if (e.dataTransfer.types.includes("Files")) e.preventDefault();
-            }}
-            onDrop={(e) => {
-              if (e.dataTransfer.files.length === 0) return;
-              e.preventDefault();
-              addImageFiles(Array.from(e.dataTransfer.files));
-            }}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              setSkillMenuDismissed(false);
-            }}
-            onKeyDown={(e) => {
-              if (skillMenuOpen) {
-                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                  e.preventDefault();
-                  const delta = e.key === "ArrowDown" ? 1 : -1;
-                  setSkillIdx(
-                    (activeSkillIdx + delta + skillMatches.length) % skillMatches.length,
-                  );
-                  return;
-                }
-                if (e.key === "Enter" || e.key === "Tab") {
-                  e.preventDefault();
-                  pickSkill(skillMatches[activeSkillIdx]);
-                  return;
-                }
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  setSkillMenuDismissed(true);
-                  return;
-                }
+          <div className="composer-input">
+            {pickedSkill && (
+              // Inert like inline text: clicks fall through to the textarea
+              // (pointer-events: none); Backspace at the start removes it.
+              <span ref={chipRef} className="skill-chip composer-chip">
+                /{pickedSkill.name}
+              </span>
+            )}
+            <textarea
+              ref={composerRef}
+              value={draft}
+              style={pickedSkill ? { textIndent: chipIndent } : undefined}
+              onScroll={syncChipScroll}
+              placeholder={
+                // A pending question card owns typed text (see send()); say so.
+                // With a chip active, the skill's arg hint says what to type —
+                // and when the project already has a paper attached, the paper
+                // part of the paper-reproduction skills defaults to it, so mark
+                // just that part optional (compute is still expected).
+                // Otherwise follow `composerSelection` so the name tracks the
+                // picker for a new session and the open session once one exists.
+                pendingQuestion
+                  ? "Type a custom answer…"
+                  : pickedSkill
+                    ? ["reproduce-paper", "paper-to-marimo"].includes(pickedSkill.name) &&
+                      paperId
+                      ? `[paper — optional, defaults to ${paperId}] on [compute]`
+                      : pickedSkill.argHint
+                    : composerSelection
+                      ? `Message ${HARNESS_LABELS[composerSelection.harness]}… ( / for skills)`
+                      : "Ask the research agent… ( / for skills)"
               }
-              if (e.key === "Enter" && !e.shiftKey) {
+              rows={2}
+              onPaste={onComposerPaste}
+              onDragOver={(e) => {
+                if (e.dataTransfer.types.includes("Files")) e.preventDefault();
+              }}
+              onDrop={(e) => {
+                if (e.dataTransfer.files.length === 0) return;
                 e.preventDefault();
-                void send();
-              }
-            }}
-          />
+                addImageFiles(Array.from(e.dataTransfer.files));
+              }}
+              onChange={(e) => {
+                const v = e.target.value;
+                // Auto-convert a typed/pasted full `/name ` into the chip the
+                // moment the space lands. Known names only — unknown `/foo`
+                // stays plain text (server-side pass-through contract). Not
+                // while a question card is pending (its answer is a note, never
+                // skill-expanded) and not mid-IME-composition.
+                if (!pickedSkill && !pendingQuestion && !composingRef.current) {
+                  const m = v.match(/^\/(\S+)\s([\s\S]*)$/);
+                  const hit = m && skills.find((s) => s.name === m[1].toLowerCase());
+                  if (hit) {
+                    setPickedSkill(hit);
+                    setDraft(m[2]);
+                    setSkillMenuDismissed(false);
+                    return;
+                  }
+                }
+                setDraft(v);
+                setSkillMenuDismissed(false);
+              }}
+              onCompositionStart={() => {
+                composingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                composingRef.current = false;
+              }}
+              onKeyDown={(e) => {
+                if (skillMenuOpen) {
+                  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                    e.preventDefault();
+                    const delta = e.key === "ArrowDown" ? 1 : -1;
+                    setSkillIdx(
+                      (activeSkillIdx + delta + skillMatches.length) % skillMatches.length,
+                    );
+                    return;
+                  }
+                  if (e.key === "Enter" || e.key === "Tab") {
+                    e.preventDefault();
+                    pickSkill(skillMatches[activeSkillIdx]);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setSkillMenuDismissed(true);
+                    return;
+                  }
+                }
+                // Backspace at the very start deletes the command chip.
+                // (Escape deliberately doesn't touch the chip — it's the
+                // stop-the-turn gesture, see the document listener above.)
+                if (
+                  pickedSkill &&
+                  e.key === "Backspace" &&
+                  e.currentTarget.selectionStart === 0 &&
+                  e.currentTarget.selectionEnd === 0
+                ) {
+                  e.preventDefault();
+                  removeSkillChip();
+                  return;
+                }
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  void send();
+                }
+              }}
+            />
+          </div>
           <div className="composer-actions">
             {/* Bottom-left: permission mode. */}
             <OptionPicker
@@ -2099,11 +2699,13 @@ export function ChatPanel({
               }}
             />
             <div style={{ flex: 1 }} />
-            {/* Usage window for the active harness — percent left + reset time. */}
+            {/* Plan-quota pill (our fork): percent left + reset for the active
+                harness. Sits before upstream's per-session context meter — the
+                two measure different things (plan budget vs context fill). */}
             <UsagePill harness={harnesses.find((h) => h.id === composerSelection?.harness)} />
-            {/* Bottom-right: model, then reasoning level. The picker reflects the
-                open session (harness locked once it exists); the global default
-                only applies before the first message. */}
+            {/* Bottom-right: model, reasoning level, then context meter. The
+                picker reflects the open session (harness locked once it exists);
+                the global default only applies before the first message. */}
             <ModelPicker
               value={composerSelection}
               onSelect={selectModel}
@@ -2111,15 +2713,16 @@ export function ChatPanel({
               lockHarness={!!openSession}
             />
             <OptionPicker
-              choices={opts?.reasoningLevels ?? []}
+              choices={reasoning.choices}
               value={composerSelection?.reasoningLevel ?? null}
-              defaultId={opts?.defaultReasoningLevel ?? null}
+              defaultId={reasoning.defaultId}
               header="Reasoning"
               align="right"
               variant="bare"
-              title="Reasoning level for this chat"
+              title="Reasoning level for this chat — Default sends no override, so the harness CLI's own configured effort applies"
               onSelect={setReasoningLevel}
             />
+            <ContextMeter usage={openSession?.contextUsage} />
             {busy && !pendingQuestion ? (
               // Stop whenever the turn is busy and typed text has nowhere to
               // go — actively streaming, or held on a plan/permission card
@@ -2135,7 +2738,7 @@ export function ChatPanel({
                 title="Send"
                 aria-label="Send"
                 onClick={() => void send()}
-                disabled={!draft.trim() && attachments.length === 0}
+                disabled={!pickedSkill && !draft.trim() && attachments.length === 0}
               >
                 <CornerDownLeft size={16} />
               </button>

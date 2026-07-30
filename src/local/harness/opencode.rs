@@ -18,9 +18,11 @@
 //! so they always surface regardless of mode.
 //!
 //! Detection: opencode's `auth.json` is `{provider: {type}}`; the signed-in
-//! providers are its account line, and `opencode models` is the model list.
+//! providers are its account line, and `opencode models --verbose` is the model
+//! list plus each model's reasoning `variants` (plain `opencode models` is the
+//! fallback for a CLI too old for `--verbose`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -29,11 +31,12 @@ use futures::StreamExt;
 use serde_json::{json, Value};
 
 use super::detect::{bin_version, read_json, HarnessInfo, HarnessUsage};
-use super::options::{HarnessOptions, PermissionMode};
+use super::options::{HarnessOptions, PermissionMode, REASONING_DEFAULT_ID};
 use super::{Harness, ResumeAction};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
-    PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt, WireQuestionOption, WireToolState,
+    ContextUsage, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt, WireQuestionOption,
+    WireToolState,
 };
 use crate::local::opencode::find_opencode;
 
@@ -84,15 +87,46 @@ impl Harness for OpenCode {
             });
         }
 
-        info.agent_ready = info.installed;
+        // opencode also takes provider keys straight from the environment,
+        // writing no auth.json — same fallback claude.rs has. Checked against
+        // orx's synced env too, since that's a source the harness child gets
+        // but this process may not. Measured, not assumed: `opencode models`
+        // still lists free/bundled models when signed out, so a non-empty
+        // model list can't stand in for a credential.
+        const PROVIDER_KEYS: &[&str] = &[
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GROQ_API_KEY",
+            "XAI_API_KEY",
+            "DEEPSEEK_API_KEY",
+        ];
+        if !info.authenticated
+            && PROVIDER_KEYS
+                .iter()
+                .any(|k| super::detect::api_key(k).is_some())
+        {
+            info.authenticated = true;
+            info.auth_method = Some("apiKey");
+        }
+
+        // Tightened from `installed` alone — opencode with no credential can't
+        // actually run a turn, and it was the one harness reporting Connected
+        // regardless. Behaviour change on upgrade: an install with neither
+        // auth.json nor a provider key above now reads "Not signed in", and
+        // since step 1 of onboarding gates on this, an opencode-only user is
+        // asked to sign in before continuing.
+        info.agent_ready = info.installed && info.authenticated;
         if info.agent_ready {
-            info.models = models
-                .into_iter()
-                .map(|id| super::ModelInfo { id })
-                .collect();
+            info.models = models;
+        } else if info.installed {
+            info.agent_note =
+                Some("Sign in with `opencode auth login` to chat with it here.".to_string());
         } else {
             info.agent_note = Some(
-                "Install opencode (curl -fsSL https://opencode.ai/install | bash) to chat with it here."
+                "Install opencode (curl -fsSL https://opencode.ai/install | bash), then sign in with `opencode auth login`."
                     .to_string(),
             );
         }
@@ -117,7 +151,11 @@ impl Harness for OpenCode {
         //      * Auto   → build agent, opencode's permissive default (still
         //                 surfaces those rare cards / questions).
         //      * Bypass → build agent, auto-approve even those.
-        // No reasoning control — reasoning is a model property in opencode.
+        // Reasoning IS a model property in opencode, so there is no meaningful
+        // harness-wide list: the real choices are each model's `variants`, read
+        // from `opencode models --verbose` in `detect` and attached per-model.
+        // Leaving this axis empty means a model with no variants shows no
+        // picker at all, rather than falling back to a bogus union.
         HarnessOptions::none().with_permission_modes(
             &[
                 PermissionMode::Plan,
@@ -184,25 +222,181 @@ fn opencode_providers() -> Vec<String> {
     }
 }
 
-/// `opencode models` — the ground truth for what the agent can actually run.
-async fn opencode_models(bin: &PathBuf) -> Vec<String> {
+/// `opencode models --verbose` — the ground truth for what the agent can run
+/// *and* for each model's reasoning `variants`.
+///
+/// `--verbose` prints, per model, a `provider/model` header line followed by a
+/// pretty-printed JSON object. We parse it for the `variants` map because
+/// reasoning in opencode is a genuine per-model property (issue #123):
+/// `gemini-3-flash` offers `minimal…high`, `deepseek-v4-flash` offers
+/// `low…max`, and plenty of models offer none at all.
+///
+/// Falls back to the plain `opencode models` id list if `--verbose` is
+/// unavailable or unparseable, so an older/newer opencode still yields models
+/// (just without per-model variants).
+async fn opencode_models(bin: &PathBuf) -> Vec<super::ModelInfo> {
+    let verbose = run_models(bin, &["models", "--verbose"]).await;
+    if let Some(out) = &verbose {
+        let parsed = parse_verbose_models(out);
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    let Some(plain) = run_models(bin, &["models"]).await else {
+        return Vec::new();
+    };
+    model_id_lines(&plain).map(super::ModelInfo::new).collect()
+}
+
+/// Run `opencode <args>` in the home dir, returning stdout on success.
+async fn run_models(bin: &PathBuf, args: &[&str]) -> Option<String> {
     let fut = tokio::process::Command::new(bin)
-        .arg("models")
+        .args(args)
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .stdin(std::process::Stdio::null())
         .output();
     let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(20), fut).await else {
-        return Vec::new();
+        return None;
     };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The bare `provider/model` id lines of plain `opencode models` output.
+fn model_id_lines(out: &str) -> impl Iterator<Item = &str> {
+    out.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && l.contains('/'))
-        .map(str::to_string)
-        .collect()
+}
+
+/// Parse `opencode models --verbose` into models + their variant ids.
+///
+/// The format is a repeating `header line` + `{ … }` JSON block. We walk lines,
+/// treat any non-`{`-starting line containing `/` as a header, and accumulate
+/// the following block until braces balance — brace counting (rather than
+/// "next header") keeps a `}` inside a nested object from ending the block
+/// early.
+///
+/// The counter skips braces inside JSON string literals. That is not
+/// hypothetical tidiness: a single `{` in any free-text field (a model `name`
+/// or description) would otherwise desynchronize the depth, and since it can
+/// never balance again the loop would swallow the entire rest of the output —
+/// dropping every later model, and quietly, because a partial parse doesn't
+/// trigger the plain-list fallback.
+fn parse_verbose_models(out: &str) -> Vec<super::ModelInfo> {
+    let mut models = Vec::new();
+    let mut lines = out.lines().peekable();
+    while let Some(line) = lines.next() {
+        let header = line.trim();
+        if header.is_empty() || !header.contains('/') || header.starts_with('{') {
+            continue;
+        }
+        if !lines
+            .peek()
+            .is_some_and(|l| l.trim_start().starts_with('{'))
+        {
+            continue;
+        }
+        let mut block = String::new();
+        let mut depth = 0usize;
+        let mut in_str = false;
+        let mut esc = false;
+        for body in lines.by_ref() {
+            for ch in body.chars() {
+                match ch {
+                    _ if esc => esc = false,
+                    '\\' if in_str => esc = true,
+                    '"' => in_str = !in_str,
+                    '{' if !in_str => depth += 1,
+                    '}' if !in_str => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            // Neither a string literal nor an escape spans lines in this
+            // output, so reset both: an unterminated quote would otherwise
+            // invert `in_str` for every following line, stop brace counting
+            // entirely, and swallow the rest of the output — the same silent
+            // model-dropping failure the string tracking exists to prevent.
+            esc = false;
+            in_str = false;
+            block.push_str(body);
+            block.push('\n');
+            if depth == 0 {
+                break;
+            }
+        }
+        // An unparseable block still yields the model, just without variants —
+        // never drop a model the CLI reported.
+        let parsed = serde_json::from_str::<Value>(&block).ok();
+        let variants = parsed.as_ref().and_then(variant_ids);
+        let name = parsed
+            .as_ref()
+            .and_then(|v| v.get("name"))
+            .and_then(Value::as_str);
+        let model = match variants {
+            Some(ids) => {
+                let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                super::ModelInfo::new(header).with_reasoning(&refs)
+            }
+            None => super::ModelInfo::new(header),
+        };
+        models.push(model.with_label(name, None));
+    }
+    models
+}
+
+/// The variant ids of one model's verbose JSON, ordered weakest → strongest.
+///
+/// `Some(vec![])` (an empty `variants` map) is distinct from `None` (no
+/// `variants` key at all): the former hides the picker, the latter falls back.
+///
+/// Ordering is imposed here rather than taken from the JSON: `serde_json`'s
+/// default `Map` is a `BTreeMap`, so object keys arrive alphabetically
+/// (`high, low, max, medium, xhigh`) and a picker in that order is nonsense.
+/// Sorting by `OPENCODE_VARIANTS` restores the intended ramp.
+fn variant_ids(model: &Value) -> Option<Vec<String>> {
+    let variants = model.get("variants")?;
+    let mut ids: Vec<String> = if let Some(map) = variants.as_object() {
+        map.keys().cloned().collect()
+    } else {
+        // Tolerate an array form (`[]` is what an empty map serializes to in
+        // some opencode builds — observed locally).
+        variants
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect()
+    };
+    // Known ids ramp in canonical order; anything unrecognized sorts after
+    // them, alphabetically, so a new opencode variant still shows up.
+    ids.sort_by_key(|id| {
+        let rank = OPENCODE_VARIANTS
+            .iter()
+            .position(|v| v == id)
+            .unwrap_or(OPENCODE_VARIANTS.len());
+        (rank, id.clone())
+    });
+    Some(ids)
+}
+
+/// The variant ids opencode's catalog is known to use, weakest → strongest.
+/// This ORDERS a model's variants for display (see `variant_ids`); it is not an
+/// allowlist — opencode's catalog is the authority on what exists.
+const OPENCODE_VARIANTS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Session reasoning id → opencode's top-level `variant` value.
+///
+/// Only the `default` sentinel (and an absent level) send nothing; every other
+/// value is forwarded as-is. Deliberately NOT filtered against
+/// `OPENCODE_VARIANTS`: the ids come from opencode's own catalog, and
+/// `variant_ids` goes out of its way to keep ones this build doesn't recognize
+/// so a new variant still reaches the picker. Filtering here would offer such a
+/// choice and then silently ignore it. `run_turn` has only the model id and
+/// must not re-shell `opencode models` (a 20s subprocess) per turn, so opencode
+/// itself is the validator of last resort.
+fn opencode_variant(level: Option<&str>) -> Option<&str> {
+    level.filter(|l| *l != REASONING_DEFAULT_ID)
 }
 
 /// opencode part → wire part (the shapes are already close).
@@ -217,6 +411,7 @@ fn to_wire_part(part: &Value) -> Option<WirePart> {
             tool: None,
             state: None,
             prompt: None,
+            children: Vec::new(),
         }),
         "tool" => {
             let state = part.get("state");
@@ -246,10 +441,30 @@ fn to_wire_part(part: &Value) -> Option<WirePart> {
                         .map(str::to_string),
                 }),
                 prompt: None,
+                children: Vec::new(),
             })
         }
         _ => None,
     }
+}
+
+/// The id of the most-recent top-level `task` tool part not yet linked to a
+/// child session — the row a freshly-spawned sub-agent session belongs to.
+/// opencode's `session.created` carries the child's `parentID` (our session) but
+/// not the spawning tool call, so we attribute to the latest unclaimed `task`
+/// row; in the common single-task case this is exact.
+///
+/// Only top-level `task` rows are candidates, so nesting is one level deep: a
+/// sub-agent that spawns its *own* sub-agent emits a `session.created` whose
+/// `parentID` is the child session (not ours), so the grandchild isn't
+/// registered and its events fall through to the foreign-session drop.
+fn newest_task_part_id(parts: &[WirePart], claimed: &HashMap<String, String>) -> Option<String> {
+    let taken: HashSet<&str> = claimed.values().map(String::as_str).collect();
+    parts
+        .iter()
+        .rev()
+        .find(|p| p.tool.as_deref() == Some("task") && !taken.contains(p.id.as_str()))
+        .map(|p| p.id.clone())
 }
 
 /// opencode `permission.asked` payload → a `permission` card. The permission
@@ -471,6 +686,12 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             body["model"] = json!({ "providerID": provider, "modelID": model_id });
         }
     }
+    // Reasoning → opencode's provider-specific `variant` (the serve API's
+    // session-message field, mirroring `opencode run --variant`). Omitted for
+    // `Default`, so the model's own reasoning default stands (issue #123).
+    if let Some(variant) = opencode_variant(ctx.reasoning_level.as_deref()) {
+        body["variant"] = json!(variant);
+    }
     let send = ctx
         .http()
         .post(format!("{base}/session/{native_id}/message"))
@@ -482,6 +703,10 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // before its message would be misfiled, and assistant messages are always
     // announced before their parts stream.
     let mut assistant_msgs: HashSet<String> = HashSet::new();
+    // Sub-agent child sessions spawned by a `task` tool this turn: child
+    // sessionID → the task spawn part's id. Their events (a foreign sessionID)
+    // route into that part's `children` instead of being dropped.
+    let mut sub_sessions: HashMap<String, String> = HashMap::new();
     let mut buf = String::new();
 
     loop {
@@ -500,7 +725,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                     // are handled async (emit a card, or auto-reply per mode); all
                     // other events are message/part updates handled synchronously.
                     if !handle_prompt_event(ctx, &native_id, &base, &event).await? {
-                        handle_event(ctx, &native_id, &event, &mut assistant_msgs);
+                        handle_event(ctx, &native_id, &event, &mut assistant_msgs, &mut sub_sessions);
                     }
                 }
             }
@@ -512,7 +737,10 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                     if let Some(parts) = message.get("parts").and_then(Value::as_array) {
                         for part in parts {
                             if let Some(wire) = to_wire_part(part) {
-                                ctx.upsert_part(wire);
+                                // Preserve children: the final `task` part carries
+                                // none, but its row already streamed the sub-agent
+                                // transcript into `children`.
+                                ctx.upsert_part_preserving_children(wire);
                             }
                         }
                     }
@@ -523,34 +751,103 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     }
 }
 
+/// OpenCode assistant `tokens` occupying the context window:
+/// `input + output + reasoning + cache.read + cache.write`. Returns `None` when
+/// the object is absent, and `None` (not `Some(0)`) when every field is zero —
+/// the early `message.updated` events carry an all-zero placeholder.
+fn opencode_used_tokens(tokens: Option<&Value>) -> Option<u64> {
+    let tokens = tokens?;
+    let field = |v: &Value, name: &str| v.get(name).and_then(Value::as_u64).unwrap_or(0);
+    let cache = tokens.get("cache").unwrap_or(&Value::Null);
+    let total = field(tokens, "input")
+        + field(tokens, "output")
+        + field(tokens, "reasoning")
+        + field(cache, "read")
+        + field(cache, "write");
+    (total > 0).then_some(total)
+}
+
+/// Whether a `session.updated` title is opencode's placeholder rather than a
+/// real summary. The server seeds every session with `New session - <ISO
+/// timestamp>` at creation and overwrites it once its own summarizer answers,
+/// so the seed is a title to skip, not adopt.
+fn is_opencode_seed_title(title: &str) -> bool {
+    title.trim_start().starts_with("New session - ")
+}
+
 fn handle_event(
     ctx: &mut TurnCtx,
     native_id: &str,
     event: &Value,
     assistant_msgs: &mut HashSet<String>,
+    sub_sessions: &mut HashMap<String, String>,
 ) {
     let props = event.get("properties").unwrap_or(&Value::Null);
     match event.get("type").and_then(Value::as_str) {
+        // A `task` tool spawns a sub-agent in a child session; opencode announces
+        // it with `session.created` carrying the child's `parentID` = our
+        // session. Link that child session to the spawning `task` tool row so its
+        // events stream into that row's `children`.
+        Some("session.created") => {
+            let info = props.get("info").unwrap_or(&Value::Null);
+            if info.get("parentID").and_then(Value::as_str) == Some(native_id) {
+                if let Some(child_id) = info.get("id").and_then(Value::as_str) {
+                    if let Some(spawn) = newest_task_part_id(&ctx.assistant.parts, sub_sessions) {
+                        sub_sessions.insert(child_id.to_string(), spawn);
+                    }
+                }
+            }
+        }
         Some("message.updated") => {
             let info = props.get("info").unwrap_or(&Value::Null);
-            if info.get("sessionID").and_then(Value::as_str) == Some(native_id)
-                && info.get("role").and_then(Value::as_str) == Some("assistant")
-            {
+            let session = info.get("sessionID").and_then(Value::as_str);
+            let is_assistant = info.get("role").and_then(Value::as_str) == Some("assistant");
+            // Record assistant message ids for the main session AND registered
+            // sub-sessions, so a session's user parts (e.g. the task prompt echo)
+            // can be filtered out — for both the transcript and sub-agent nesting.
+            let ours =
+                session == Some(native_id) || session.is_some_and(|s| sub_sessions.contains_key(s));
+            if ours && is_assistant {
                 if let Some(id) = info.get("id").and_then(Value::as_str) {
                     assistant_msgs.insert(id.to_string());
+                }
+            }
+            // Only the MAIN session's tokens drive the context meter; a
+            // sub-agent's smaller counts must not overwrite it.
+            if session == Some(native_id) && is_assistant {
+                // Several `message.updated` fire per message; the early ones have
+                // no tokens yet, so skip a report until real numbers land. The
+                // context window isn't in this event (provider config only), so
+                // report the token count without one.
+                if let Some(used) = opencode_used_tokens(info.get("tokens")) {
+                    ctx.report_usage(ContextUsage {
+                        used_tokens: used,
+                        context_window: None,
+                    });
                 }
             }
         }
         Some("message.part.updated") => {
             let part = props.get("part").unwrap_or(&Value::Null);
-            if part.get("sessionID").and_then(Value::as_str) != Some(native_id) {
-                return;
-            }
+            let session = part.get("sessionID").and_then(Value::as_str);
             let owned_by_assistant = part
                 .get("messageID")
                 .and_then(Value::as_str)
                 .is_some_and(|mid| assistant_msgs.contains(mid));
-            if !owned_by_assistant {
+            // A sub-agent's part (foreign sessionID we've registered) streams
+            // into its owning `task` row's children, with a namespaced id — but
+            // only assistant-owned parts (skip the child's user prompt echo).
+            if let Some(spawn) = session.and_then(|s| sub_sessions.get(s)).cloned() {
+                if owned_by_assistant {
+                    if let Some(mut wire) = to_wire_part(part) {
+                        wire.id = format!("{spawn}:{}", wire.id);
+                        ctx.upsert_child(&spawn, wire);
+                        ctx.maybe_flush();
+                    }
+                }
+                return;
+            }
+            if session != Some(native_id) || !owned_by_assistant {
                 return;
             }
             if let Some(wire) = to_wire_part(part) {
@@ -559,25 +856,43 @@ fn handle_event(
             }
         }
         Some("message.part.delta") => {
-            if props.get("sessionID").and_then(Value::as_str) != Some(native_id) {
-                return;
-            }
             if props.get("field").and_then(Value::as_str) != Some("text") {
                 return;
             }
-            if let (Some(part_id), Some(delta)) = (
+            let session = props.get("sessionID").and_then(Value::as_str);
+            let (Some(part_id), Some(delta)) = (
                 props.get("partID").and_then(Value::as_str),
                 props.get("delta").and_then(Value::as_str),
-            ) {
-                ctx.append_part_text(part_id, delta);
+            ) else {
+                return;
+            };
+            // Route a sub-agent's text delta into the owning task row's child.
+            if let Some(spawn) = session.and_then(|s| sub_sessions.get(s)).cloned() {
+                let child_id = format!("{spawn}:{part_id}");
+                ctx.append_child_text(&spawn, &child_id, delta, || {
+                    WirePart::text(child_id.clone(), "")
+                });
                 ctx.maybe_flush();
+                return;
             }
+            if session != Some(native_id) {
+                return;
+            }
+            ctx.append_part_text(part_id, delta);
+            ctx.maybe_flush();
         }
         Some("session.updated") => {
-            // Adopt opencode's auto-generated titles.
+            // Adopt opencode's auto-generated titles. The creation seed arrives
+            // in the first `session.updated` and the real title in a later one;
+            // adopting the seed would latch it as 'generated' and permanently
+            // reject the real one.
             let info = props.get("info").unwrap_or(&Value::Null);
             if info.get("id").and_then(Value::as_str) == Some(native_id) {
-                if let Some(title) = info.get("title").and_then(Value::as_str) {
+                if let Some(title) = info
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|t| !is_opencode_seed_title(t))
+                {
                     ctx.set_title(title);
                 }
             }
@@ -670,6 +985,195 @@ async fn handle_prompt_event(
 mod tests {
     use super::*;
 
+    /// Trimmed-down real `opencode models --verbose` output (1.17.15): a header
+    /// line per model followed by its pretty-printed JSON. Covers the three
+    /// cases that matter — a rich variants map, a *different* one on another
+    /// model, and an empty one.
+    const VERBOSE_SAMPLE: &str = r#"opencode/claude-fable-5
+{
+  "id": "claude-fable-5",
+  "providerID": "opencode",
+  "capabilities": {
+    "reasoning": true,
+    "input": { "text": true }
+  },
+  "variants": {
+    "low": { "effort": "low" },
+    "medium": { "effort": "medium" },
+    "high": { "effort": "high" },
+    "xhigh": { "effort": "xhigh" },
+    "max": { "effort": "max" }
+  }
+}
+opencode/gemini-3-flash
+{
+  "id": "gemini-3-flash",
+  "providerID": "opencode",
+  "variants": {
+    "minimal": { "effort": "minimal" },
+    "low": { "effort": "low" },
+    "medium": { "effort": "medium" },
+    "high": { "effort": "high" }
+  }
+}
+opencode/glm-5
+{
+  "id": "glm-5",
+  "providerID": "opencode",
+  "variants": {}
+}
+"#;
+
+    fn ids(m: &super::super::ModelInfo) -> Option<Vec<&str>> {
+        m.reasoning_levels
+            .as_ref()
+            .map(|c| c.iter().map(|c| c.id.as_str()).collect())
+    }
+
+    /// The core of issue #123 for opencode: variants are genuinely per-model,
+    /// so each model gets its own list rather than a hard-coded union.
+    #[test]
+    fn verbose_models_parse_per_model_variants() {
+        let models = parse_verbose_models(VERBOSE_SAMPLE);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            [
+                "opencode/claude-fable-5",
+                "opencode/gemini-3-flash",
+                "opencode/glm-5"
+            ]
+        );
+        // Nested `{ … }` inside the variants map must not end the block early.
+        assert_eq!(
+            ids(&models[0]),
+            Some(vec!["default", "low", "medium", "high", "xhigh", "max"])
+        );
+        // A different model, a genuinely different set (note `minimal`, and no
+        // `xhigh`/`max`) — the whole point of being model-aware.
+        assert_eq!(
+            ids(&models[1]),
+            Some(vec!["default", "minimal", "low", "medium", "high"])
+        );
+    }
+
+    /// Regression: `serde_json`'s default map is a `BTreeMap`, so raw key order
+    /// is alphabetical (`high, low, max, medium, xhigh`) — a meaningless ramp
+    /// in the picker. Variants must come out weakest → strongest regardless of
+    /// the order they appear in the JSON.
+    #[test]
+    fn variants_are_ordered_weakest_to_strongest() {
+        let model = serde_json::json!({
+            "variants": { "max": {}, "low": {}, "xhigh": {}, "high": {}, "medium": {} }
+        });
+        assert_eq!(
+            variant_ids(&model).unwrap(),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        // Unknown ids still survive, sorted after the known ramp.
+        let odd = serde_json::json!({ "variants": { "zzz": {}, "high": {}, "aaa": {} } });
+        assert_eq!(variant_ids(&odd).unwrap(), ["high", "aaa", "zzz"]);
+    }
+
+    /// A native variant literally named `default` must not produce a second
+    /// row identical to the sentinel — that row would read as "no override" and
+    /// make the real variant unselectable.
+    #[test]
+    fn a_native_default_variant_does_not_duplicate_the_sentinel() {
+        let out = "prov/a\n{\n  \"variants\": { \"default\": {}, \"high\": {} }\n}\n";
+        let models = parse_verbose_models(out);
+        assert_eq!(ids(&models[0]), Some(vec!["default", "high"]));
+    }
+
+    /// An empty `variants` map means "checked, none supported" → an empty list,
+    /// which hides the picker. It must NOT be `None`, which would fall back to
+    /// the harness-wide list.
+    #[test]
+    fn empty_variants_map_hides_the_picker() {
+        let models = parse_verbose_models(VERBOSE_SAMPLE);
+        assert_eq!(ids(&models[2]), Some(vec![]));
+        assert!(models[2].reasoning_levels.is_some());
+    }
+
+    /// Garbage or a `--verbose` flag the installed CLI doesn't support yields
+    /// no models, which sends `opencode_models` to the plain-list fallback.
+    #[test]
+    fn unparseable_verbose_output_yields_nothing() {
+        assert!(parse_verbose_models("").is_empty());
+        assert!(parse_verbose_models("error: unknown flag --verbose").is_empty());
+        // Header with no JSON block is skipped, not half-parsed.
+        assert!(parse_verbose_models("opencode/foo\nnot json\n").is_empty());
+    }
+
+    /// The plain-list fallback still yields models, just without variants.
+    #[test]
+    fn plain_model_lines_have_no_variants() {
+        let list: Vec<_> = model_id_lines("opencode/a\n\n  github-copilot/b  \njunk\n").collect();
+        assert_eq!(list, ["opencode/a", "github-copilot/b"]);
+        assert!(super::super::ModelInfo::new("opencode/a")
+            .reasoning_levels
+            .is_none());
+    }
+
+    /// A `{` inside a JSON string value must not desynchronize the brace
+    /// counter. Before this was handled, one such brace consumed the rest of
+    /// the output and every later model vanished — silently, since a partial
+    /// parse is non-empty and so never reaches the plain-list fallback.
+    #[test]
+    fn brace_inside_a_string_does_not_swallow_later_models() {
+        let out = concat!(
+            "prov/a\n{\n  \"name\": \"Weird { name\",\n  \"variants\": { \"high\": {} }\n}\n",
+            "prov/b\n{\n  \"name\": \"esc \\\" and } brace\",\n  \"variants\": {}\n}\n",
+            "prov/c\n{\n  \"variants\": { \"low\": {}, \"max\": {} }\n}\n",
+        );
+        let models = parse_verbose_models(out);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["prov/a", "prov/b", "prov/c"]
+        );
+        assert_eq!(ids(&models[0]), Some(vec!["default", "high"]));
+        assert_eq!(ids(&models[1]), Some(vec![]));
+        assert_eq!(ids(&models[2]), Some(vec!["default", "low", "max"]));
+    }
+
+    /// Only the sentinel is withheld. An unrecognized id is forwarded, because
+    /// `variant_ids` deliberately keeps unknown variants so a new one still
+    /// reaches the picker — offering it and then dropping it here would ignore
+    /// the user's selection.
+    #[test]
+    fn variant_is_sent_unless_it_is_the_default_sentinel() {
+        assert_eq!(opencode_variant(Some("high")), Some("high"));
+        assert_eq!(opencode_variant(Some("minimal")), Some("minimal"));
+        assert_eq!(opencode_variant(Some("none")), Some("none"));
+        assert_eq!(opencode_variant(Some("brand-new")), Some("brand-new"));
+        assert_eq!(opencode_variant(Some(REASONING_DEFAULT_ID)), None);
+        assert_eq!(opencode_variant(None), None);
+    }
+
+    /// Every variant id detection advertises must survive the mapper — the
+    /// picker can never offer a value `run_turn` would silently drop. Includes
+    /// an unknown id, which is exactly the case a mapper-side allowlist broke.
+    #[test]
+    fn advertised_variants_all_map_back() {
+        let unknown = "prov/x\n{\n  \"variants\": { \"high\": {}, \"turbo\": {} }\n}\n";
+        for model in parse_verbose_models(VERBOSE_SAMPLE)
+            .into_iter()
+            .chain(parse_verbose_models(unknown))
+        {
+            for choice in model.reasoning_levels.into_iter().flatten() {
+                if choice.id == REASONING_DEFAULT_ID {
+                    continue;
+                }
+                assert_eq!(
+                    opencode_variant(Some(&choice.id)),
+                    Some(choice.id.as_str()),
+                    "{} advertises {} but the mapper drops it",
+                    model.id,
+                    choice.id
+                );
+            }
+        }
+    }
+
     #[test]
     fn plan_mode_uses_the_plan_agent_others_build() {
         assert_eq!(opencode_agent(Some(PermissionMode::Plan)), "plan");
@@ -743,5 +1247,153 @@ mod tests {
         assert!(!question_card(&claude_shaped).unwrap().multi_select);
         // No questions → no card.
         assert!(question_card(&json!({ "id": "que_1" })).is_none());
+    }
+
+    #[test]
+    fn message_updated_reports_summed_tokens_without_window() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut msgs = HashSet::new();
+        let event = json!({
+            "type": "message.updated",
+            "properties": { "info": {
+                "id": "msg_1",
+                "sessionID": "ses_x",
+                "role": "assistant",
+                "tokens": { "input": 1200, "output": 340, "reasoning": 50, "cache": { "read": 8000, "write": 200 } }
+            }}
+        });
+        handle_event(&mut ctx, "ses_x", &event, &mut msgs, &mut HashMap::new());
+        let usage = ctx.context_usage.expect("usage reported");
+        assert_eq!(usage.used_tokens, 1200 + 340 + 50 + 8000 + 200);
+        assert_eq!(usage.context_window, None);
+    }
+
+    #[test]
+    fn message_updated_without_tokens_reports_nothing() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut msgs = HashSet::new();
+        // Early message.updated: assistant role, but no tokens yet.
+        let no_tokens = json!({
+            "type": "message.updated",
+            "properties": { "info": { "id": "msg_1", "sessionID": "ses_x", "role": "assistant" }}
+        });
+        handle_event(
+            &mut ctx,
+            "ses_x",
+            &no_tokens,
+            &mut msgs,
+            &mut HashMap::new(),
+        );
+        assert!(ctx.context_usage.is_none());
+        // All-zero placeholder tokens must also be ignored.
+        let zero_tokens = json!({
+            "type": "message.updated",
+            "properties": { "info": { "id": "msg_1", "sessionID": "ses_x", "role": "assistant",
+                "tokens": { "input": 0, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } }}}
+        });
+        handle_event(
+            &mut ctx,
+            "ses_x",
+            &zero_tokens,
+            &mut msgs,
+            &mut HashMap::new(),
+        );
+        assert!(ctx.context_usage.is_none());
+    }
+
+    #[test]
+    fn seed_title_is_recognized_but_real_titles_pass() {
+        // The exact shape opencode stamps at session creation.
+        assert!(is_opencode_seed_title(
+            "New session - 2026-07-09T23:50:40.501Z"
+        ));
+        assert!(is_opencode_seed_title(
+            "  New session - 2026-07-09T23:50:40.501Z"
+        ));
+        // What the summarizer actually produces — must reach `set_title`.
+        assert!(!is_opencode_seed_title("Fix the login redirect"));
+        assert!(!is_opencode_seed_title("New session handling in the store"));
+        assert!(!is_opencode_seed_title(""));
+    }
+
+    /// A `task` tool spawns a child session (announced via `session.created` with
+    /// `parentID` = our session); the sub-agent's parts stream into the task
+    /// row's `children`, not the top-level transcript.
+    #[test]
+    fn subagent_parts_stream_into_the_task_row_children() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut msgs: HashSet<String> = HashSet::new();
+        let mut subs: HashMap<String, String> = HashMap::new();
+        // The main assistant message + its `task` tool call (top-level).
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"message.updated","properties":{"info":{"id":"msg_1","sessionID":"ses_main","role":"assistant"}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"message.part.updated","properties":{"part":{
+                "id":"prt_task","type":"tool","tool":"task","sessionID":"ses_main","messageID":"msg_1",
+                "state":{"status":"running","input":{"description":"analyze"}}}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        // opencode announces the spawned child session (parentID = our session).
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"session.created","properties":{"info":{"id":"ses_child","parentID":"ses_main"}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        assert_eq!(subs.get("ses_child").map(String::as_str), Some("prt_task"));
+        // The child session's assistant message + a tool part → nests under task.
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"message.updated","properties":{"info":{"id":"msg_c","sessionID":"ses_child","role":"assistant"}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"message.part.updated","properties":{"part":{
+                "id":"prt_bash","type":"tool","tool":"bash","sessionID":"ses_child","messageID":"msg_c",
+                "state":{"status":"completed","input":{"command":"ls"},"output":"a.rs"}}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        // Only the task row is top-level; the sub bash nested under it (namespaced).
+        assert_eq!(ctx.assistant.parts.len(), 1, "{:?}", ctx.assistant.parts);
+        let task = &ctx.assistant.parts[0];
+        assert_eq!(task.id, "prt_task");
+        assert_eq!(task.tool.as_deref(), Some("task"));
+        let bash = task
+            .children
+            .iter()
+            .find(|p| p.id == "prt_task:prt_bash")
+            .expect("sub bash nested under the task row");
+        assert_eq!(bash.state.as_ref().unwrap().output.as_deref(), Some("a.rs"));
+
+        // The turn-end merge re-upserts the main message's parts (incl. the task
+        // row, rebuilt with empty children) authoritatively. It MUST preserve the
+        // accrued children — a plain upsert would wipe the sub-agent transcript.
+        let final_task = to_wire_part(&json!({
+            "id":"prt_task","type":"tool","tool":"task","sessionID":"ses_main","messageID":"msg_1",
+            "state":{"status":"completed","input":{"description":"analyze"},"output":"done"}
+        }))
+        .unwrap();
+        assert!(
+            final_task.children.is_empty(),
+            "rebuilt part has no children"
+        );
+        ctx.upsert_part_preserving_children(final_task);
+        let task = &ctx.assistant.parts[0];
+        assert_eq!(task.state.as_ref().unwrap().status, "completed");
+        assert_eq!(task.children.len(), 1, "children survive the final merge");
     }
 }

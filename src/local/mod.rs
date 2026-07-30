@@ -11,6 +11,7 @@
 
 pub mod agent_skills;
 pub mod chat;
+pub mod claude;
 pub mod codex;
 pub mod datadir;
 pub mod experiments;
@@ -32,6 +33,7 @@ pub mod resolve;
 pub mod skills;
 pub mod slurm;
 pub mod ssh;
+pub mod ssh_identity;
 
 use crate::error::{anyhow, Error, Result};
 use crate::store::{now_ms, Store, StoredRun};

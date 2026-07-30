@@ -627,6 +627,7 @@ impl ControlPlane for ServerPlane {
                     title,
                     description,
                     parent_experiment_id: parent,
+                    chat_session_id: crate::local::chat::launching_chat_session(),
                 },
             )
             .await?;
@@ -643,6 +644,7 @@ impl ControlPlane for ServerPlane {
                     title: Some(title),
                     description,
                     run_command,
+                    chat_session_id: crate::local::chat::launching_chat_session(),
                 },
             )
             .await?;
@@ -942,6 +944,7 @@ impl ServerPlane {
             verdict: None,
             verdict_notes: None,
             verdict_at: None,
+            chat_session_id: crate::local::chat::launching_chat_session(),
         })?;
         if let Err(err) = crate::client::update_external_run(
             creds,
@@ -1088,6 +1091,7 @@ impl ServerPlane {
             verdict: None,
             verdict_notes: None,
             verdict_at: None,
+            chat_session_id: crate::local::chat::launching_chat_session(),
         })?;
         if let Err(err) = crate::client::update_external_run(
             creds,

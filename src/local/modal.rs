@@ -194,6 +194,7 @@ pub async fn submit_local_modal(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         verdict: None,
         verdict_notes: None,
         verdict_at: None,
+        chat_session_id: crate::local::chat::launching_chat_session(),
     };
     store.upsert_run(&run)?;
 

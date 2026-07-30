@@ -53,10 +53,42 @@ fn cap_tool_text(text: &mut String) {
     text.push_str(TOOL_TEXT_TRUNCATION_MARKER);
 }
 
+/// Find a part by id anywhere in the tree (depth-first), returning `&mut` to it.
+/// Shared by the harnesses that route sub-agent events into a spawn part's
+/// `children`.
+pub fn find_part_mut<'a>(parts: &'a mut [WirePart], id: &str) -> Option<&'a mut WirePart> {
+    for part in parts.iter_mut() {
+        if part.id == id {
+            return Some(part);
+        }
+        if let Some(found) = find_part_mut(&mut part.children, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Upsert by id, carrying forward the existing part's `children`. Used for spawn
+/// parts: a fresh build has empty children, but the sub-agent transcript already
+/// streamed into the on-transcript part — replacing the whole part would drop it.
+/// Non-spawn parts have no children, so this is equivalent to a plain upsert.
+pub fn upsert_preserving_children(parts: &mut Vec<WirePart>, mut part: WirePart) {
+    match parts.iter_mut().find(|p| p.id == part.id) {
+        Some(existing) => {
+            if part.children.is_empty() {
+                part.children = std::mem::take(&mut existing.children);
+            }
+            *existing = part;
+        }
+        None => parts.push(part),
+    }
+}
+
 /// Cap every tool part's `output`/`error` in place. Applied on each flush —
 /// this covers every adapter (they all land parts on the turn's
 /// `assistant.parts`, some by direct mutation); an adapter that re-upserts a
-/// part with the full output just gets re-capped on the next flush.
+/// part with the full output just gets re-capped on the next flush. Recurses
+/// into `children` so a nested sub-agent transcript's output is bounded too.
 fn cap_tool_parts(parts: &mut [WirePart]) {
     for part in parts.iter_mut() {
         if let Some(state) = part.state.as_mut() {
@@ -67,6 +99,7 @@ fn cap_tool_parts(parts: &mut [WirePart]) {
                 cap_tool_text(error);
             }
         }
+        cap_tool_parts(&mut part.children);
     }
 }
 
@@ -183,6 +216,13 @@ pub struct WirePart {
     /// Present only on `prompt` parts — the interactive request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<WirePrompt>,
+    /// Nested parts belonging to a sub-agent this part spawned (Codex
+    /// collaboration). A spawn part streams the sub-agent's own transcript here;
+    /// arbitrary depth for sub-agents that spawn their own. `default` +
+    /// `skip_serializing_if` keeps old `parts_json` rows and childless parts
+    /// byte-identical on the wire — no migration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<WirePart>,
 }
 
 impl WirePart {
@@ -194,6 +234,7 @@ impl WirePart {
             tool: None,
             state: None,
             prompt: None,
+            children: Vec::new(),
         }
     }
 
@@ -212,6 +253,32 @@ impl WirePart {
         }
     }
 
+    /// A synthetic tool part — a status row (`error`, `interrupted`, …) that
+    /// isn't a real tool call. The UI renders it through the same tool-row path
+    /// as harness tools.
+    pub fn tool(
+        id: impl Into<String>,
+        tool: impl Into<String>,
+        status: impl Into<String>,
+        error: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            kind: "tool".into(),
+            text: None,
+            tool: Some(tool.into()),
+            state: Some(WireToolState {
+                status: status.into(),
+                input: None,
+                output: None,
+                error,
+                title: None,
+            }),
+            prompt: None,
+            children: Vec::new(),
+        }
+    }
+
     /// An interactive prompt part (plan / permission / question).
     pub fn prompt(id: impl Into<String>, prompt: WirePrompt) -> Self {
         Self {
@@ -221,6 +288,7 @@ impl WirePart {
             tool: None,
             state: None,
             prompt: Some(prompt),
+            children: Vec::new(),
         }
     }
 }
@@ -284,6 +352,20 @@ fn save_images(images: &[ImageAttachment]) -> Result<Vec<(String, std::path::Pat
     Ok(saved)
 }
 
+/// How much of the model's context window a session has consumed, measured off
+/// the most recent API request the harness reported. Latest report wins (not
+/// cumulative), so auto-compaction naturally drops the number.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    /// Tokens occupying the context window after the most recent API request
+    /// (input + cache read + cache write + output of that request).
+    pub used_tokens: u64,
+    /// Total context window of the model, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireMessage {
@@ -294,11 +376,18 @@ pub struct WireMessage {
 }
 
 pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
+    let context_usage = s
+        .context_usage_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<Value>(j).ok());
     json!({
         "id": s.id,
         "projectId": s.project_id,
         "harness": s.harness,
         "title": s.title,
+        // The UI animates the reveal of a harness-generated title, so it needs
+        // to tell one from a placeholder or a user rename.
+        "titleSource": s.title_source,
         "model": s.model,
         "permissionMode": s.permission_mode,
         "reasoningLevel": s.reasoning_level,
@@ -308,6 +397,7 @@ pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
         "createdAt": s.created_at,
         "updatedAt": s.updated_at,
         "busy": busy,
+        "contextUsage": context_usage,
     })
 }
 
@@ -436,6 +526,9 @@ pub struct ChatHost {
     pub opencode: Arc<AgentHost>,
     /// Lazy codex app-server manager (only the codex adapter spawns it).
     pub codex: Arc<crate::local::codex::CodexHost>,
+    /// Persistent Claude Code child manager (one resident child per session;
+    /// only the claude adapter spawns it).
+    pub claude: Arc<crate::local::claude::ClaudeHost>,
     http: reqwest::Client,
     events: broadcast::Sender<(&'static str, Value)>,
     /// Sessions with a turn in flight. A key present means busy; the value is
@@ -463,9 +556,11 @@ pub struct ChatHost {
     /// Outstanding permission-bridge requests, keyed by the prompt part id the
     /// card was surfaced under. Sync mutex, never held across an await.
     pending_permissions: std::sync::Mutex<HashMap<String, PendingPermission>>,
-    /// Per-session bridge token, minted fresh each plan-mode turn. The rest of
-    /// the localhost API is unauthenticated, but this endpoint *grants tool
-    /// permissions*, so the bridge must echo the token the turn was spawned with.
+    /// Per-session bridge token, minted once per plan-mode child spawn (the
+    /// resident bridge carries it for the child's whole life — re-minting
+    /// mid-child would strand it). The rest of the localhost API is
+    /// unauthenticated, but this endpoint *grants tool permissions*, so the
+    /// bridge must echo the token its child was spawned with.
     gate_tokens: std::sync::Mutex<HashMap<String, String>>,
     /// Sessions whose running turn surfaced a bridge card — checked (and
     /// cleared) by the synthesized-plan-card fallback so it never double-cards
@@ -531,11 +626,16 @@ impl Drop for TurnGuard {
 }
 
 impl ChatHost {
-    pub fn new(opencode: Arc<AgentHost>, codex: Arc<crate::local::codex::CodexHost>) -> Self {
+    pub fn new(
+        opencode: Arc<AgentHost>,
+        codex: Arc<crate::local::codex::CodexHost>,
+        claude: Arc<crate::local::claude::ClaudeHost>,
+    ) -> Self {
         let (events, _) = broadcast::channel(256);
         Self {
             opencode,
             codex,
+            claude,
             http: reqwest::Client::new(),
             events,
             turns: Mutex::new(HashMap::new()),
@@ -560,9 +660,15 @@ impl ChatHost {
         self.up_port.get().copied()
     }
 
-    /// Mint (and remember) the bridge token for a session's plan-mode turn.
-    /// One token per session, refreshed each turn; the previous turn's bridge
-    /// child dies with its turn, so overwriting is correct.
+    /// Mint (and remember) the bridge token for a session's plan-mode child.
+    /// One token per *child* now, minted at spawn (not per turn): the resident
+    /// claude child — and its bridge — live across turns, so a live plan child
+    /// keeps its token until a config-change/interrupt/crash respawn mints a new
+    /// one. Overwriting on each mint is still correct (a respawn's old child is
+    /// killed first), but the mint site moved to `claude::spawn_client`;
+    /// re-minting while a plan child is live would strand its held bridge
+    /// requests, since `request_permission` equality-checks the token with no
+    /// expiry.
     pub fn mint_gate_token(&self, session_id: &str) -> String {
         let token = uuid::Uuid::new_v4().to_string();
         self.gate_tokens
@@ -592,7 +698,7 @@ impl ChatHost {
     ) -> Result<PermissionDecision> {
         // The endpoint grants tool permissions, so unlike the rest of the
         // localhost API it authenticates: the bridge must echo the token its
-        // turn was spawned with.
+        // child was spawned with.
         let token_ok = self
             .gate_tokens
             .lock()
@@ -731,6 +837,18 @@ impl ChatHost {
         Ok(())
     }
 
+    /// Whether a bridge approval card of this session is still awaiting the
+    /// user. The claude turn watchdog consults this: a child held on the
+    /// mcp-gate long-poll is silently blocked *by design* (user think-time is
+    /// unbounded), so the no-output timeout must not kill it.
+    pub fn has_pending_permission(&self, session_id: &str) -> bool {
+        self.pending_permissions
+            .lock()
+            .unwrap()
+            .values()
+            .any(|p| p.session_id == session_id)
+    }
+
     /// Deny-and-unblock every pending bridge request of a session. Called when
     /// its turn ends or is interrupted: the bridge child dies with the turn,
     /// and a card left pending would strand its long-poll forever.
@@ -785,6 +903,7 @@ impl ChatHost {
     pub async fn shutdown_harnesses(&self) {
         self.opencode.shutdown().await;
         self.codex.shutdown().await;
+        self.claude.shutdown().await;
     }
 
     pub async fn busy_sessions(&self) -> Vec<String> {
@@ -878,8 +997,22 @@ impl ChatHost {
         }
         let saved_images = save_images(&images)?;
         let display_text = transcript_text.as_deref().unwrap_or(&text);
+        // The input auto-titling runs on — set only on the first message.
+        // Owned because `skills::expand` moves `text` below, ending the borrow
+        // `display_text` may hold on it; and it carries what the user typed,
+        // not the expanded harness prompt.
+        let mut title_seed = None;
         if session.title.is_none() {
-            let first_line = display_text.lines().next().unwrap_or("").trim();
+            // First *non-empty* line: a message that opens with a blank line
+            // would otherwise write no placeholder at all, leaving `title` NULL
+            // so every later message re-ran the whole first-message path.
+            let first_line = display_text
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim();
+            // Text only: an image-only message has nothing to name from.
+            title_seed = (!first_line.is_empty()).then(|| display_text.to_string());
             let mut title: String = first_line.chars().take(64).collect();
             if first_line.chars().count() > 64 {
                 title = title.trim_end().to_string();
@@ -889,7 +1022,7 @@ impl ChatHost {
                 title = "Image".into();
             }
             if !title.is_empty() {
-                store.set_chat_session_title(&session.id, &title)?;
+                store.set_chat_session_title(&session.id, &title, "fallback")?;
                 session.title = Some(title);
             }
         }
@@ -979,6 +1112,13 @@ impl ChatHost {
                 parts: Vec::new(),
                 created_at: now_ms(),
             },
+            // Seed from the persisted value so mid-turn reports (which carry a
+            // token count but often no window) inherit last turn's window and
+            // the meter keeps its percent while the turn streams.
+            context_usage: session
+                .context_usage_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str(json).ok()),
             last_flush: Instant::now() - FLUSH_INTERVAL,
         };
         let task = tokio::spawn(async move {
@@ -990,6 +1130,13 @@ impl ChatHost {
                 ctx.push_error(format!("{err}"));
             }
             let _ = ctx.flush();
+            // Persist the turn's final context usage so it survives a backend
+            // restart and rides on the `chat.session` emit below.
+            if let Some(usage) = &ctx.context_usage {
+                if let (Ok(store), Ok(json)) = (Store::open(), serde_json::to_string(usage)) {
+                    let _ = store.set_chat_session_context_usage(&ctx.session_id, &json);
+                }
+            }
             ctx.host.finish_turn(&ctx.session_id).await;
         });
         // Upgrade the reservation None→Some(handle), atomically re-checking that
@@ -1001,6 +1148,13 @@ impl ChatHost {
             let mut turns = self.turns.lock().await;
             if matches!(turns.get(&sid), Some(None)) {
                 turns.insert(sid, Some(task.abort_handle()));
+                // Inside the success arm so an interrupt that killed the turn
+                // mid-prologue doesn't still launch a title child. Runs parallel
+                // with the turn: naming the session must never delay the first
+                // answer.
+                if let Some(seed) = title_seed {
+                    self.spawn_title_generation(session.id.clone(), session.harness.clone(), seed);
+                }
             } else {
                 // Reservation gone (interrupted) or already replaced — honor the
                 // interrupt: abort the task (its finish_turn won't run) and leave
@@ -1038,12 +1192,13 @@ impl ChatHost {
 
     /// Abort an in-flight turn. Child processes die via kill_on_drop; the
     /// opencode adapter additionally gets a native abort so the serve process
-    /// stops generating.
-    pub async fn interrupt(&self, session_id: &str) -> Result<()> {
+    /// stops generating. Returns whether a turn (or a reservation) was
+    /// actually aborted — `false` means the session was already idle.
+    pub async fn interrupt(&self, session_id: &str) -> Result<bool> {
         // Outer None: not busy. Inner None: reserved but not yet spawned — the
         // reservation is now cleared, so send_message's guard will abort setup.
         let Some(handle) = self.turns.lock().await.remove(session_id) else {
-            return Ok(());
+            return Ok(false);
         };
         if let Ok(store) = Store::open() {
             if let Ok(Some(session)) = store.get_chat_session(session_id) {
@@ -1060,6 +1215,15 @@ impl ChatHost {
                     // (and settles the turn as "interrupted" in its rollout)
                     // instead of only losing its orx-side listener.
                     self.codex.interrupt_session(session_id).await;
+                } else if session.harness == "claude-code" {
+                    // The load-bearing change: a resident claude child survives
+                    // task-abort/kill_on_drop, so aborting the turn task leaves
+                    // it generating with no listener. Kill it — v1 has no
+                    // reliable native interrupt (the control request gave no
+                    // response). The next turn respawns with `--resume`,
+                    // recovering this session's context (today-identical
+                    // semantics).
+                    self.claude.kill_session(session_id).await;
                 }
             }
         }
@@ -1067,6 +1231,50 @@ impl ChatHost {
             handle.abort();
         }
         self.finish_turn(session_id).await;
+        Ok(true)
+    }
+
+    /// User-facing interrupt (the Stop button / Escape): abort like
+    /// [`Self::interrupt`], and when a turn was actually in flight persist a
+    /// visible "Interrupted" marker in the transcript. An aborted turn that had
+    /// streamed nothing would otherwise vanish without a trace — the user's
+    /// message sits unanswered and the stop reads as "orx did nothing".
+    /// Internal interrupts (plan-approval resume, session/project delete) stay
+    /// markerless on purpose: their stories are told elsewhere (the resolved
+    /// card, the row disappearing).
+    pub async fn interrupt_by_user(&self, session_id: &str) -> Result<()> {
+        // Stamped before the abort: a fast resend can claim the freed slot and
+        // persist its user message before this runs, and a later timestamp
+        // would sort the marker after that new bubble. (The live broadcast can
+        // still paint them in arrival order for a few ms; a reload converges
+        // on the stored order.)
+        let created_at = now_ms();
+        if !self.interrupt(session_id).await? {
+            return Ok(());
+        }
+        let msg = WireMessage {
+            id: format!("msg_{}", uuid::Uuid::new_v4()),
+            role: "assistant".into(),
+            parts: vec![WirePart::tool(
+                "interrupted",
+                "interrupted",
+                "completed",
+                None,
+            )],
+            created_at,
+        };
+        // Marker persistence is best-effort: the abort already happened, and an
+        // Err here would surface as a failed Stop on a turn that IS stopped.
+        if let (Ok(store), Ok(json)) = (Store::open(), serde_json::to_string(&msg.parts)) {
+            let _ = store.upsert_chat_message(&StoredChatMessage {
+                id: msg.id.clone(),
+                session_id: session_id.to_string(),
+                role: "assistant".into(),
+                parts_json: json,
+                created_at: msg.created_at,
+            });
+        }
+        self.emit("chat.message", message_json(&msg, session_id));
         Ok(())
     }
 
@@ -1211,6 +1419,34 @@ impl ChatHost {
         }
     }
 
+    /// Broadcast a freshly re-read session row, resolving `busy` live from the
+    /// turn map.
+    ///
+    /// For the mutations that *don't* know `busy` — rename, archive, auto-title
+    /// — which is why they have to ask. The turn-transition sites
+    /// (`send_message`'s prologue, `finish_turn`, `respond`,
+    /// `TurnCtx::set_title`) hard-code the busy value they are establishing and
+    /// emit inline instead.
+    ///
+    /// Callers pass the row they re-read *after* their write: re-reading keeps
+    /// the broadcast from clobbering a concurrent title/archive/`updated_at`
+    /// change with a stale snapshot. `None` in means the row is genuinely gone
+    /// (deleted mid-flight) and nothing is emitted; `None` comes back out, for
+    /// the HTTP handlers that answer 404 on it.
+    ///
+    /// Takes the row rather than a `&Store`: `Store` is `!Sync`, so a `&Store`
+    /// held across the await would make the spawned auto-title future
+    /// non-`Send`. Callers do the read (propagating store errors).
+    async fn emit_session(&self, session: Option<StoredChatSession>) -> Option<StoredChatSession> {
+        let session = session?;
+        let busy = self.is_busy(&session.id).await;
+        self.emit(
+            "chat.session",
+            json!({ "session": session_json(&session, busy) }),
+        );
+        Some(session)
+    }
+
     /// Archive/unarchive a session and broadcast the updated row so every open
     /// dashboard's Recents list re-filters. Returns None for an unknown id.
     pub async fn set_archived(
@@ -1220,18 +1456,40 @@ impl ChatHost {
     ) -> Result<Option<StoredChatSession>> {
         let store = Store::open()?;
         store.set_chat_session_archived(session_id, archived)?;
-        // Re-read after the write (finish_turn's pattern): the broadcast must
-        // not clobber a concurrent title/updated_at change with a stale
-        // snapshot, and a session deleted mid-flight must not be resurrected.
-        let Some(session) = store.get_chat_session(session_id)? else {
-            return Ok(None);
-        };
-        let busy = self.is_busy(session_id).await;
-        self.emit(
-            "chat.session",
-            json!({ "session": session_json(&session, busy) }),
-        );
-        Ok(Some(session))
+        Ok(self.emit_session(store.get_chat_session(session_id)?).await)
+    }
+
+    /// Fire-and-forget auto-title: run the harness's one-shot title child in
+    /// parallel with the first turn, then adopt the result only while the title
+    /// is still unset or the first-line placeholder (a user Rename always
+    /// wins). Failures are silent — the placeholder is a perfectly good title.
+    fn spawn_title_generation(
+        self: &Arc<Self>,
+        session_id: String,
+        harness_id: String,
+        first_message: String,
+    ) {
+        let host = self.clone();
+        tokio::spawn(async move {
+            let Some(harness) = crate::local::harness::chat_harness(&harness_id) else {
+                return;
+            };
+            let Some(title) = harness.generate_title(&first_message).await else {
+                return;
+            };
+            let Ok(store) = Store::open() else { return };
+            if !matches!(
+                store.set_chat_session_title_if_placeholder(&session_id, &title),
+                Ok(true)
+            ) {
+                return;
+            }
+            // `emit_session` resolves busy live rather than assuming the turn is
+            // still running: generation can outlive a fast turn, and a stale
+            // `busy: true` would strand the UI.
+            let session = store.get_chat_session(&session_id).ok().flatten();
+            host.emit_session(session).await;
+        });
     }
 
     /// Rename a session and broadcast the updated row. Returns `None` for an
@@ -1242,27 +1500,18 @@ impl ChatHost {
         title: &str,
     ) -> Result<Option<StoredChatSession>> {
         let store = Store::open()?;
-        store.set_chat_session_title(session_id, title)?;
-        // Re-read after the write (finish_turn's pattern): broadcast the fresh
-        // snapshot so a concurrent archive/updated_at change isn't clobbered,
-        // and a session deleted mid-flight isn't resurrected.
-        let Some(session) = store.get_chat_session(session_id)? else {
-            return Ok(None);
-        };
-        let busy = self.is_busy(session_id).await;
-        self.emit(
-            "chat.session",
-            json!({ "session": session_json(&session, busy) }),
-        );
-        Ok(Some(session))
+        store.set_chat_session_title(session_id, title, "user")?;
+        Ok(self.emit_session(store.get_chat_session(session_id)?).await)
     }
 
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let _ = self.interrupt(session_id).await;
         // A live opencode serve child would keep running in (and lock) the
-        // session's worktree.
+        // session's worktree; the resident claude child's cwd is that worktree
+        // too, so reap it before `cleanup_session_worktree` below.
         self.opencode.kill_session(session_id).await;
         self.codex.kill_session(session_id).await;
+        self.claude.kill_session(session_id).await;
         // Drop the session's respond lock so the map doesn't retain an entry for
         // a session that no longer exists.
         self.respond_locks.lock().await.remove(session_id);
@@ -1541,6 +1790,9 @@ pub struct TurnCtx {
     pub project: LocalProject,
     pub text: String,
     pub assistant: WireMessage,
+    /// Latest context-window usage the harness reported this turn. Persisted at
+    /// turn end; `report_usage` also streams it live over `chat.usage`.
+    pub context_usage: Option<ContextUsage>,
     last_flush: Instant,
 }
 
@@ -1558,6 +1810,7 @@ impl TurnCtx {
             host: Arc::new(ChatHost::new(
                 Arc::new(AgentHost::new(None)),
                 Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
             )),
             session_id: "test-session".into(),
             harness: "test".into(),
@@ -1590,6 +1843,7 @@ impl TurnCtx {
                 parts: Vec::new(),
                 created_at: 0,
             },
+            context_usage: None,
             last_flush: Instant::now(),
         }
     }
@@ -1611,13 +1865,13 @@ impl TurnCtx {
             return;
         }
         if let Ok(store) = Store::open() {
-            // Only adopt a harness-generated title when the session has none
-            // yet — mirrors the first-message auto-title guard. Otherwise a
-            // later `session.updated` (e.g. opencode re-titling) would silently
-            // overwrite a title the user set via Rename. The check-and-set is a
-            // single conditional UPDATE so a concurrent Rename can't slip in
-            // between a read and the write.
-            match store.set_chat_session_title_if_empty(&self.session_id, title) {
+            // A harness-native title replaces the first-line placeholder but
+            // never a title the user set via Rename, and never a title already
+            // generated (so a later `session.updated` from opencode can't
+            // re-title mid-conversation). The check-and-set is a single
+            // conditional UPDATE so a concurrent Rename can't slip in between a
+            // read and the write.
+            match store.set_chat_session_title_if_placeholder(&self.session_id, title) {
                 Ok(true) => {}
                 _ => return,
             }
@@ -1630,12 +1884,37 @@ impl TurnCtx {
         }
     }
 
+    /// Record the latest context-window usage a harness reported and stream it
+    /// live over `chat.usage`. Merging: a report that omits `context_window`
+    /// inherits the previously-known value (an `assistant` event carries the
+    /// token count but not the window; the `result` event fills the window).
+    pub fn report_usage(&mut self, mut usage: ContextUsage) {
+        if let Some(prev) = &self.context_usage {
+            if usage.context_window.is_none() {
+                usage.context_window = prev.context_window;
+            }
+        }
+        self.context_usage = Some(usage.clone());
+        self.host.emit(
+            "chat.usage",
+            json!({ "sessionId": self.session_id, "usage": usage }),
+        );
+    }
+
     /// Insert or replace a part by id, preserving arrival order.
     pub fn upsert_part(&mut self, part: WirePart) {
         match self.assistant.parts.iter_mut().find(|p| p.id == part.id) {
             Some(existing) => *existing = part,
             None => self.assistant.parts.push(part),
         }
+    }
+
+    /// Like `upsert_part`, but carries forward an existing part's `children` when
+    /// the incoming part has none — so re-upserting a spawn row (e.g. an
+    /// authoritative final-message merge) doesn't drop the sub-agent transcript
+    /// that streamed into it.
+    pub fn upsert_part_preserving_children(&mut self, part: WirePart) {
+        upsert_preserving_children(&mut self.assistant.parts, part);
     }
 
     pub fn append_part_text(&mut self, part_id: &str, delta: &str) {
@@ -1645,22 +1924,42 @@ impl TurnCtx {
         }
     }
 
+    /// Upsert a part into the `children` of the part with `parent_id` (anywhere
+    /// in the tree), carrying forward existing children — for a sub-agent's
+    /// transcript hung under its spawn row. No-op if the parent isn't found yet.
+    /// Shared by every harness that streams sub-agent activity (Codex threadId,
+    /// Claude parent_tool_use_id, OpenCode child sessionID).
+    pub fn upsert_child(&mut self, parent_id: &str, part: WirePart) {
+        if let Some(parent) = find_part_mut(&mut self.assistant.parts, parent_id) {
+            upsert_preserving_children(&mut parent.children, part);
+        }
+    }
+
+    /// Append streamed text to a child part (creating it via `make` on the first
+    /// delta) inside `parent_id`'s children. No-op if the parent isn't found.
+    pub fn append_child_text(
+        &mut self,
+        parent_id: &str,
+        child_id: &str,
+        delta: &str,
+        make: impl FnOnce() -> WirePart,
+    ) {
+        let Some(parent) = find_part_mut(&mut self.assistant.parts, parent_id) else {
+            return;
+        };
+        if !parent.children.iter().any(|p| p.id == child_id) {
+            parent.children.push(make());
+        }
+        if let Some(child) = parent.children.iter_mut().find(|p| p.id == child_id) {
+            child.text.get_or_insert_with(String::new).push_str(delta);
+        }
+    }
+
     pub fn push_error(&mut self, message: String) {
         let id = format!("err-{}", self.assistant.parts.len());
-        self.assistant.parts.push(WirePart {
-            id,
-            kind: "tool".into(),
-            text: None,
-            tool: Some("error".into()),
-            state: Some(WireToolState {
-                status: "error".into(),
-                input: None,
-                output: None,
-                error: Some(message),
-                title: None,
-            }),
-            prompt: None,
-        });
+        self.assistant
+            .parts
+            .push(WirePart::tool(id, "error", "error", Some(message)));
     }
 
     /// Persist + broadcast the assistant message, rate-limited mid-turn.
@@ -1765,11 +2064,30 @@ fn is_terminal(status: &str) -> bool {
     matches!(status, "done" | "failed" | "cancelled")
 }
 
-/// Poke a project's chat when a run completes while no turn is in flight —
-/// the local stand-in for the cloud agent staying online inside a blocking
-/// `orx exp wait`. The first pass only seeds the cursor, so a server restart
-/// doesn't replay old completions. Busy sessions are skipped (the agent is
-/// awake — likely in its wait loop — and will see the completion itself).
+/// The chat session a completed run should notify: the one that *launched* it
+/// (recorded on the run), provided it still exists and has history. Returns
+/// `None` for an orphan run (no owning session — CLI-launched or pre-migration)
+/// or a launcher since deleted/emptied. Store-only (the busy check and send stay
+/// in `watch_runs`), which also keeps the routing decision unit-testable.
+fn notify_target(store: &Store, run: &crate::store::StoredRun) -> Option<String> {
+    let session_id = run.chat_session_id.clone()?;
+    let session = store.get_chat_session(&session_id).ok().flatten()?;
+    let has_history = store
+        .list_chat_messages(&session.id)
+        .map(|m| !m.is_empty())
+        .unwrap_or(false);
+    has_history.then_some(session.id)
+}
+
+/// Poke the chat session that *launched* a run when it completes while no turn
+/// is in flight — the local stand-in for the cloud agent staying online inside
+/// a blocking `orx exp wait`. Routing is by the run's recorded
+/// `chat_session_id` (stamped from the harness child's `ORX_CHAT_SESSION_ID`),
+/// never a project-wide guess, so a second idle agent in the same project is
+/// never handed another agent's run. The first pass only seeds the cursor, so a
+/// server restart doesn't replay old completions. A busy owner is skipped (the
+/// agent is awake — likely in its wait loop — and will see the completion
+/// itself); a run with no owning session (CLI-launched) pokes nothing.
 pub async fn watch_runs(chat: Arc<ChatHost>) {
     let mut seen: HashMap<String, String> = HashMap::new();
     let mut first = true;
@@ -1787,20 +2105,13 @@ pub async fn watch_runs(chat: Arc<ChatHost>) {
             if first || !newly_terminal {
                 continue;
             }
-            let Ok(sessions) = store.list_chat_sessions_by_project(&run.project_id) else {
+            // The launching session (see `notify_target`); `None` skips.
+            let Some(session_id) = notify_target(&store, &run) else {
                 continue;
             };
-            // Most recently touched session that already has history — never
-            // mint or retitle a fresh one.
-            let Some(session) = sessions.into_iter().find(|s| {
-                store
-                    .list_chat_messages(&s.id)
-                    .map(|m| !m.is_empty())
-                    .unwrap_or(false)
-            }) else {
-                continue;
-            };
-            if chat.is_busy(&session.id).await {
+            if chat.is_busy(&session_id).await {
+                // The owner is awake — likely blocking in its own `orx exp
+                // wait` — and will observe the completion itself.
                 continue;
             }
             // Every automatic prompt is opt-in per project (Persona tab) —
@@ -1856,7 +2167,7 @@ pub async fn watch_runs(chat: Arc<ChatHost>) {
                 ),
             };
             if let Err(err) = chat
-                .send_message(&session.id, text, TurnOverrides::default(), Vec::new())
+                .send_message(&session_id, text, TurnOverrides::default(), Vec::new())
                 .await
             {
                 eprintln!("orx up: run watcher: {err}");
@@ -1886,6 +2197,45 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// Env var carrying the launching chat session's id into a harness child. The
+/// agent shells out `orx exp run`, a fresh `orx` subprocess that inherits this,
+/// so run creation can stamp `StoredRun::chat_session_id` (see
+/// `launching_chat_session`) and the run watcher can route the completion
+/// notification back to exactly the session that started it.
+pub const CHAT_SESSION_ENV: &str = "ORX_CHAT_SESSION_ID";
+
+/// Marks a process as a child of a local `orx up` harness. Separate from
+/// [`CHAT_SESSION_ENV`], which the cloud box's opencode plugin also exports for
+/// attribution — presence of a session id alone no longer implies local.
+pub const LOCAL_SESSION_ENV: &str = "ORX_LOCAL_SESSION";
+
+/// Stamp the launching session id onto a harness child's env. Call *after*
+/// `prepare_env` so a dashboard-synced value can't shadow it. Harness children
+/// are one-per-session, so this is unambiguous.
+pub fn set_chat_session_env(cmd: &mut tokio::process::Command, session_id: &str) {
+    cmd.env(CHAT_SESSION_ENV, session_id);
+    cmd.env(LOCAL_SESSION_ENV, "1");
+}
+
+/// The chat session that launched this run, read from the env the harness child
+/// exported (see [`set_chat_session_env`]). `None` for CLI-launched or server
+/// runs — those intentionally poke no chat session on completion.
+pub fn launching_chat_session() -> Option<String> {
+    std::env::var(CHAT_SESSION_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Whether this process is running inside a local `orx up` session.
+/// [`LOCAL_SESSION_ENV`] is exported only by [`set_chat_session_env`] onto
+/// `orx up` harness children, so its presence means this process is one (or a
+/// subprocess of one). Commands that take a project or run id should prefer
+/// `…is_local()` on the resolved entity; this is for the ones that take
+/// neither (e.g. `orx skill <name>`).
+pub fn in_local_session() -> bool {
+    std::env::var(LOCAL_SESSION_ENV).is_ok_and(|v| !v.is_empty())
+}
+
 /// Append-only stderr sink for a harness child (startup/debug diagnostics).
 pub fn harness_log(name: &str) -> Result<std::fs::File> {
     let path = crate::store::data_dir().join(format!("agent-{name}.log"));
@@ -1898,6 +2248,65 @@ pub fn harness_log(name: &str) -> Result<std::fs::File> {
         .append(true)
         .open(&path)
         .map_err(|e| anyhow!("Could not open {}: {}", path.display(), e))
+}
+
+#[cfg(test)]
+mod session_env_tests {
+    use super::{in_local_session, CHAT_SESSION_ENV, LOCAL_SESSION_ENV};
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(vars: &[&'static str]) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = vars
+                .iter()
+                .map(|k| (*k, std::env::var(k).ok()))
+                .collect::<Vec<_>>();
+            for k in vars {
+                std::env::remove_var(k);
+            }
+            EnvGuard { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    /// The cloud box's opencode plugin exports CHAT_SESSION_ENV for experiment
+    /// attribution. That must not read as a local `orx up` session, or
+    /// `orx skill` serves the Local skill bodies on every cloud box.
+    #[test]
+    fn chat_session_alone_is_not_a_local_session() {
+        let _guard = EnvGuard::new(&[CHAT_SESSION_ENV, LOCAL_SESSION_ENV]);
+
+        std::env::set_var(CHAT_SESSION_ENV, "ses_cloud_box");
+        assert!(!in_local_session());
+
+        std::env::set_var(LOCAL_SESSION_ENV, "1");
+        assert!(in_local_session());
+    }
+
+    #[test]
+    fn empty_local_marker_is_not_a_local_session() {
+        let _guard = EnvGuard::new(&[CHAT_SESSION_ENV, LOCAL_SESSION_ENV]);
+        std::env::set_var(LOCAL_SESSION_ENV, "");
+        assert!(!in_local_session());
+    }
 }
 
 #[cfg(test)]
@@ -1928,25 +2337,32 @@ mod cap_tests {
     }
 
     /// The per-flush pass caps `output` and `error` on tool parts and leaves
-    /// text parts alone.
+    /// text parts alone. Nested sub-agent parts (`children`) are capped too.
     #[test]
     fn cap_tool_parts_caps_output_and_error() {
+        let bloated_tool = |id: &str| WirePart {
+            id: id.into(),
+            kind: "tool".into(),
+            text: None,
+            tool: Some("Bash".into()),
+            state: Some(WireToolState {
+                status: "completed".into(),
+                input: None,
+                output: Some("y".repeat(1_000_000)),
+                error: Some("e".repeat(1_000_000)),
+                title: None,
+            }),
+            prompt: None,
+            children: Vec::new(),
+        };
+        // A spawn part whose sub-agent transcript (a child) has huge output.
+        let mut spawn = bloated_tool("spawn");
+        spawn.tool = Some("subagent".into());
+        spawn.children = vec![bloated_tool("sub-t1")];
         let mut parts = vec![
             WirePart::text("t0", "z".repeat(TOOL_TEXT_CAP * 2)),
-            WirePart {
-                id: "t1".into(),
-                kind: "tool".into(),
-                text: None,
-                tool: Some("Bash".into()),
-                state: Some(WireToolState {
-                    status: "completed".into(),
-                    input: None,
-                    output: Some("y".repeat(1_000_000)),
-                    error: Some("e".repeat(1_000_000)),
-                    title: None,
-                }),
-                prompt: None,
-            },
+            bloated_tool("t1"),
+            spawn,
         ];
         cap_tool_parts(&mut parts);
         // Assistant prose is never capped — only tool payloads.
@@ -1957,6 +2373,12 @@ mod cap_tests {
             TOOL_TEXT_CAP
         );
         assert_eq!(state.error.as_ref().unwrap().chars().count(), TOOL_TEXT_CAP);
+        // The nested sub-agent part's output is bounded by the recursion.
+        let child_state = parts[2].children[0].state.as_ref().unwrap();
+        assert_eq!(
+            child_state.output.as_ref().unwrap().chars().count(),
+            TOOL_TEXT_CAP
+        );
     }
 }
 
@@ -2087,5 +2509,171 @@ mod bridge_tests {
         assert!(prompt.resolved);
         assert_eq!(prompt.answers, vec!["A"]);
         assert_eq!(prompt.approved, Some(true));
+    }
+
+    fn bare_session() -> StoredChatSession {
+        StoredChatSession {
+            id: "chat_1".into(),
+            project_id: "proj_1".into(),
+            harness: "claude-code".into(),
+            native_session_id: None,
+            title: None,
+            title_source: None,
+            model: Some("claude-haiku-4-5".into()),
+            permission_mode: None,
+            reasoning_level: None,
+            persona: None,
+            parent_session_id: None,
+            archived: false,
+            context_usage_json: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn session_json_includes_context_usage_when_set_null_otherwise() {
+        // No usage stored → the field is JSON null.
+        let session = bare_session();
+        assert!(session_json(&session, false)["contextUsage"].is_null());
+
+        // Stored usage is inlined as a parsed object, not a string.
+        let mut with_usage = bare_session();
+        with_usage.context_usage_json =
+            Some(r#"{"usedTokens":27564,"contextWindow":200000}"#.into());
+        let value = session_json(&with_usage, false);
+        assert_eq!(value["contextUsage"]["usedTokens"], 27564);
+        assert_eq!(value["contextUsage"]["contextWindow"], 200000);
+    }
+
+    #[test]
+    fn session_json_carries_title_source() {
+        // The UI keys its title-reveal animation off this field, so it has to
+        // survive to the wire — null on a legacy row, verbatim otherwise.
+        assert!(session_json(&bare_session(), false)["titleSource"].is_null());
+
+        let mut generated = bare_session();
+        generated.title_source = Some("generated".into());
+        assert_eq!(session_json(&generated, false)["titleSource"], "generated");
+    }
+
+    #[test]
+    fn context_usage_serde_camel_cases_and_skips_none() {
+        let usage = ContextUsage {
+            used_tokens: 100,
+            context_window: None,
+        };
+        // Only usedTokens survives; the None window is skipped.
+        assert_eq!(
+            serde_json::to_value(&usage).unwrap(),
+            json!({ "usedTokens": 100 })
+        );
+    }
+}
+
+#[cfg(test)]
+mod notify_target_tests {
+    use super::*;
+    use crate::store::{Store, StoredChatMessage, StoredChatSession, StoredRun};
+
+    fn session(store: &Store, id: &str, project: &str, updated_at: i64, msgs: usize) {
+        store
+            .create_chat_session(&StoredChatSession {
+                id: id.into(),
+                project_id: project.into(),
+                harness: "codex".into(),
+                native_session_id: None,
+                title: None,
+                title_source: None,
+                model: None,
+                permission_mode: None,
+                reasoning_level: None,
+                persona: None,
+                parent_session_id: None,
+                archived: false,
+                context_usage_json: None,
+                created_at: 1,
+                updated_at,
+            })
+            .unwrap();
+        for i in 0..msgs {
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: format!("{id}-m{i}"),
+                    session_id: id.into(),
+                    role: "user".into(),
+                    parts_json: "[]".into(),
+                    created_at: 1,
+                })
+                .unwrap();
+        }
+    }
+
+    fn run(project: &str, owner: Option<&str>) -> StoredRun {
+        StoredRun {
+            id: "run_x".into(),
+            experiment_id: "exp_1".into(),
+            project_id: project.into(),
+            status: "failed".into(),
+            backend_json: "{}".into(),
+            command: "echo hi".into(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            supervisor_heartbeat_ms: None,
+            kind: "job".into(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
+            chat_session_id: owner.map(str::to_string),
+        }
+    }
+
+    fn temp_store(tag: &str) -> (Store, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("orx-notify-{tag}-{}", uuid::Uuid::new_v4()));
+        (Store::open_at(dir.clone()).unwrap(), dir)
+    }
+
+    /// The reported bug: an idle bystander is the *most recently updated*
+    /// session in the project, while an older session actually launched the
+    /// run. Routing must follow ownership, not recency.
+    #[test]
+    fn routes_to_launcher_not_the_newest_bystander() {
+        let (store, dir) = temp_store("owner");
+        let proj = "p1";
+        // Owner is older; bystander is the newest — what the old project-wide
+        // heuristic would have wrongly picked.
+        session(&store, "owner", proj, 100, 3);
+        session(&store, "bystander", proj, 999, 3);
+
+        let target = notify_target(&store, &run(proj, Some("owner")));
+        assert_eq!(target.as_deref(), Some("owner"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run with no recorded owner (CLI-launched / pre-migration) pokes no one
+    /// — never a project-wide guess.
+    #[test]
+    fn orphan_run_notifies_no_one() {
+        let (store, dir) = temp_store("orphan");
+        session(&store, "bystander", "p1", 999, 3);
+        assert_eq!(notify_target(&store, &run("p1", None)), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The owner must still exist and have history; an empty (or vanished)
+    /// launcher is skipped rather than poked.
+    #[test]
+    fn empty_or_missing_owner_is_skipped() {
+        let (store, dir) = temp_store("empty");
+        session(&store, "empty_owner", "p1", 100, 0);
+        assert_eq!(notify_target(&store, &run("p1", Some("empty_owner"))), None);
+        assert_eq!(notify_target(&store, &run("p1", Some("ghost"))), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

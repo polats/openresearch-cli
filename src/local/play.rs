@@ -152,6 +152,7 @@ pub fn start_play_build(
         verdict: None,
         verdict_notes: None,
         verdict_at: None,
+        chat_session_id: crate::local::chat::launching_chat_session(),
     };
     store.upsert_run(&run)?;
     crate::commands::exp::spawn_detached_supervise(&run_id)?;

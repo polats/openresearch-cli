@@ -20,8 +20,10 @@
 //! multi-turn via `codex exec resume <session>`, playbook injected as tagged
 //! context on the first turn. `ORX_CODEX_EXEC=1` forces the fallback.
 //!
-//! Detection: `~/.codex/auth.json` holds either an `OPENAI_API_KEY` or an OAuth
-//! `id_token` JWT we decode (unverified) for the account email and plan.
+//! Detection follows the active provider in `$CODEX_HOME/config.toml`. A custom
+//! provider authenticates with its declared `env_key`; otherwise
+//! `auth.json` holds either an `OPENAI_API_KEY` or an OAuth `id_token` JWT we
+//! decode (unverified) for the account email and plan.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,41 +31,288 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
-    bin_version, find_on_path, jwt_payload, nonempty_str, read_json, resolve_symlinks, title_case,
-    HarnessInfo, HarnessUsage, UsageWindow,
+    bin_version, find_on_path, jwt_payload, nonempty_str, parse_version, read_json,
+    resolve_symlinks, title_case, HarnessInfo, HarnessUsage, ModelInfo, UsageWindow,
 };
-use super::options::{HarnessOptions, PermissionMode};
-use super::{should_synthesize_plan, synthesize_resume, Harness, ResumeAction};
+use super::options::{resolve_reasoning, HarnessOptions, PermissionMode, REASONING_DEFAULT_ID};
+use super::{should_synthesize_plan, synthesize_resume, Harness, ResumeAction, TURN_WATCHDOG};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
-    prepare_env, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt, WireQuestionOption,
-    WireToolState,
+    find_part_mut, prepare_env, set_chat_session_env, upsert_preserving_children, ContextUsage,
+    PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt, WireQuestionOption, WireToolState,
 };
 use crate::local::codex::{CodexClient, ServerReqKind, TurnEvent};
 use crate::local::opencode::ensure_playbook;
 
-// The 5.6 variants (Sol = frontier, Terra = balanced, Luna = fast) plus 5.5;
-// ChatGPT-account codex rejects bare `gpt-5.6`. Verified against codex-cli
-// 0.144 via `codex exec -m` (5.6 needs >= 0.143; older CLIs get a 400).
-const CODEX_MODELS: [&str; 4] = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"];
-
-/// Codex's own reasoning vocabulary (id == the `model_reasoning_effort` config
-/// value) — the common set across CODEX_MODELS (Sol/Terra also take max/ultra;
-/// Luna and 5.5 don't). Reasoning is per-harness (see `options.rs`). Verified
-/// against codex-cli 0.144.
-const CODEX_REASONING_LEVELS: [(&str, &str); 4] = [
-    ("low", "Low"),
-    ("medium", "Medium"),
-    ("high", "High"),
-    ("xhigh", "XHigh"),
+// FALLBACK model table, used only when the app-server catalog is unreachable
+// (codex < 0.144's legacy exec path, or a failed/timed-out `model/list`). The
+// primary source is `codex_model_list`: the app-server's `model/list` reports
+// every model with its `supportedReasoningEfforts`, exactly like opencode's
+// `models --verbose` — so models and tiers are normally *queried*, not curated.
+//
+// Each entry is `(model id, the `model_reasoning_effort` values it accepts)`,
+// mirroring the catalog as of codex-cli 0.144. Sol/Terra reach `ultra`; Luna
+// stops at `max`; 5.5 stops at `xhigh`. (A live `codex exec` turn on Luna
+// tolerated `ultra`, but the catalog is what codex's own picker offers — the
+// catalog wins for what WE offer.) Getting a tier wrong is not cosmetic: codex
+// forwards the value unvalidated and an unsupported one comes back as a 400
+// that kills the turn (observed: 5.5 + `max`).
+const CODEX_MODELS: [(&str, &[&str]); 4] = [
+    (
+        "gpt-5.6-sol",
+        &["low", "medium", "high", "xhigh", "max", "ultra"],
+    ),
+    (
+        "gpt-5.6-terra",
+        &["low", "medium", "high", "xhigh", "max", "ultra"],
+    ),
+    ("gpt-5.6-luna", &["low", "medium", "high", "xhigh", "max"]),
+    ("gpt-5.5", &["low", "medium", "high", "xhigh"]),
 ];
 
+/// Codex usage occupying the context window: `input_tokens + output_tokens`
+/// (`cached_input_tokens` is a subset of `input_tokens`, not additive). Returns
+/// `None` when the object is absent, or when the sum is zero (an all-zero
+/// payload isn't real occupancy and must not render "0%").
+fn codex_used_tokens(usage: Option<&Value>) -> Option<u64> {
+    let usage = usage?;
+    let field = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or(0);
+    let total = field("input_tokens") + field("output_tokens");
+    (total > 0).then_some(total)
+}
+
+/// Read a legacy-exec `token_count` `info` object into (occupancy, window).
+/// `last_token_usage` is the most recent request, whose `input_tokens` already
+/// contains the full resent context — that IS the context occupancy (what the
+/// codex TUI shows), and it matches the app-server's per-turn `turn.usage`.
+/// `total_token_usage` is a running sum across every request in the session (it
+/// only grows), so it's the fallback, not the preference.
+fn token_count_usage(info: &Value) -> (Option<u64>, Option<u64>) {
+    let usage = info
+        .get("last_token_usage")
+        .filter(|v| !v.is_null())
+        .or_else(|| info.get("total_token_usage"));
+    let window = info.get("model_context_window").and_then(Value::as_u64);
+    (codex_used_tokens(usage), window)
+}
+
+/// The harness-wide fallback list — the conservative intersection, used for a
+/// model that isn't in `CODEX_MODELS` (a `-c model=…` override, or a newer id
+/// this build doesn't know).
+const CODEX_REASONING_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
+
+/// The effort ids a given codex model accepts per the FALLBACK table, or the
+/// conservative intersection. Send-time validation only — detection prefers
+/// the live catalog (`codex_model_list`).
+fn codex_model_reasoning(model: &str) -> Option<&'static [&'static str]> {
+    CODEX_MODELS
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map(|(_, levels)| *levels)
+}
+
+/// Query the app-server's `model/list` — codex's own catalog, the same data its
+/// TUI picker renders: every model with its `supportedReasoningEfforts` and
+/// default. This is the primary model source (the static table is only the
+/// fallback), for the same reason opencode parses `models --verbose`: the
+/// installed CLI knows its catalog and we don't — a curated table here shipped
+/// missing three models and a wrong Luna tier before this existed.
+///
+/// Protocol: spawn `codex app-server`, `initialize` → `initialized` (the same
+/// handshake `local::codex` uses, incl. `experimentalApi` — `model/list` is
+/// part of the v2 surface), then one `model/list` request. Any failure —
+/// spawn, timeout, old codex without the method — returns `None` and the
+/// caller falls back to the static table. Hidden catalog entries are skipped
+/// (the server already filters them by default; the guard is belt-and-braces).
+async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option<Vec<ModelInfo>> {
+    let fut = async {
+        let mut child = Command::new(bin)
+            .arg("app-server")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .ok()?;
+        let mut stdin = child.stdin.take()?;
+        let mut lines = BufReader::new(child.stdout.take()?).lines();
+
+        use tokio::io::AsyncWriteExt;
+        async fn send(stdin: &mut tokio::process::ChildStdin, v: Value) -> Option<()> {
+            let mut line = v.to_string();
+            line.push('\n');
+            stdin.write_all(line.as_bytes()).await.ok()
+        }
+        // Read until the response with this id (skipping notifications).
+        async fn recv(
+            lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+            id: u64,
+        ) -> Option<Value> {
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    if v.get("id").and_then(Value::as_u64) == Some(id) {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        }
+
+        send(
+            &mut stdin,
+            serde_json::json!({
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "orx",
+                        "title": "OpenResearch",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                    "capabilities": { "experimentalApi": true },
+                },
+            }),
+        )
+        .await?;
+        recv(&mut lines, 1).await?;
+        send(&mut stdin, serde_json::json!({ "method": "initialized" })).await?;
+        send(
+            &mut stdin,
+            serde_json::json!({ "id": 2, "method": "model/list", "params": {} }),
+        )
+        .await?;
+        let resp = recv(&mut lines, 2).await?;
+        let models = parse_model_list(resp.get("result")?, configured_effort);
+        (!models.is_empty()).then_some(models)
+    };
+    tokio::time::timeout(Duration::from_secs(15), fut)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// `model/list` result → per-model `ModelInfo`, efforts attached in catalog
+/// order. Split from the transport for testability.
+///
+/// Each model gets a *concrete* preselected tier rather than a "no override"
+/// sentinel: the tier that actually runs when the user picks nothing, which
+/// codex resolves as the `config.toml` `model_reasoning_effort` override when
+/// that's set (and supported by the model), else the catalog's own
+/// `defaultReasoningEffort`. Preselecting-and-sending that tier is equivalent
+/// to sending nothing, and the picker shows a real value instead of "Default".
+fn parse_model_list(result: &Value, configured_effort: Option<&str>) -> Vec<ModelInfo> {
+    let Some(data) = result.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    data.iter()
+        .filter(|m| !m.get("hidden").and_then(Value::as_bool).unwrap_or(false))
+        .filter_map(|m| {
+            // `model` is the slug the turn passes as `-m`/`model`; `id` equals
+            // it in practice but `model` is the documented carrier.
+            let id = m
+                .get("model")
+                .or_else(|| m.get("id"))
+                .and_then(Value::as_str)?;
+            let efforts: Vec<&str> = m
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| e.get("reasoningEffort").and_then(Value::as_str))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let catalog_default = m.get("defaultReasoningEffort").and_then(Value::as_str);
+            let default = configured_effort
+                .filter(|e| efforts.contains(e))
+                .or(catalog_default);
+            let info = ModelInfo::new(id).with_label(
+                m.get("displayName").and_then(Value::as_str),
+                m.get("description").and_then(Value::as_str),
+            );
+            Some(match default {
+                Some(default) => info.with_reasoning_default(&efforts, default),
+                // No reported default (an older catalog shape) → keep the
+                // sentinel-led list, where "no override" is the safe lead.
+                None => info.with_reasoning(&efforts),
+            })
+        })
+        .collect()
+}
+
 pub struct Codex;
+
+/// Only the fields detection needs off `config.toml`; codex has many more.
+#[derive(Deserialize)]
+struct CodexConfig {
+    model: Option<String>,
+    model_provider: Option<String>,
+    /// The user's configured effort override. Codex resolves it above the
+    /// catalog's per-model `defaultReasoningEffort`, so the picker's
+    /// preselected tier must too.
+    model_reasoning_effort: Option<String>,
+    #[serde(default)]
+    model_providers: HashMap<String, CodexProvider>,
+}
+
+/// The `model_reasoning_effort` the user configured in `config.toml`, if any.
+fn parse_configured_effort(raw: &str) -> Option<String> {
+    toml::from_str::<CodexConfig>(raw)
+        .ok()?
+        .model_reasoning_effort
+}
+
+#[derive(Deserialize)]
+struct CodexProvider {
+    env_key: Option<String>,
+    #[serde(default)]
+    requires_openai_auth: bool,
+}
+
+struct CustomProvider {
+    model: Option<String>,
+    env_key: Option<String>,
+}
+
+impl CustomProvider {
+    /// A provider that declares no `env_key` carries its credential elsewhere
+    /// (or needs none), so treat it as usable rather than blocking on a var we
+    /// were never told the name of.
+    fn is_ready(&self) -> bool {
+        match self.env_key.as_deref() {
+            Some(key) => super::detect::api_key(key).is_some(),
+            None => true,
+        }
+    }
+}
+
+/// The active provider, when it is a custom one that bypasses OpenAI auth.
+/// `None` means first-party detection (auth.json) applies.
+fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
+    let cfg: CodexConfig = toml::from_str(raw).ok()?;
+    let provider = cfg.model_providers.get(cfg.model_provider.as_deref()?)?;
+    if provider.requires_openai_auth {
+        return None;
+    }
+    Some(CustomProvider {
+        model: cfg.model.filter(|model| !model.trim().is_empty()),
+        env_key: provider.env_key.clone(),
+    })
+}
+
+/// `$CODEX_HOME` when set (the same two env sources the harness child sees),
+/// else `~/.codex`.
+fn codex_home() -> Option<PathBuf> {
+    super::detect::api_key("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+}
 
 /// `codex` on PATH, symlinks resolved (see `resolve_symlinks` — codex needs to
 /// find its `codex-code-mode-host` helper next to the real binary).
@@ -77,6 +326,86 @@ pub(crate) fn find_codex_required() -> Result<PathBuf> {
     find_codex().ok_or_else(|| {
         anyhow!("codex not found on PATH — install Codex and run `codex login` first")
     })
+}
+
+/// One-shot session title from the first user message: a throwaway
+/// `codex exec` child in a read-only sandbox, at `low` reasoning effort so the
+/// one-sentence answer stays cheap. Deliberately *not* the session's own thread
+/// — a title request there would pollute the real conversation history.
+///
+/// No `-m`: the user's default model at `low` effort is the cheap pin, and the
+/// session's own (possibly expensive) model selection is irrelevant to naming a
+/// chat. Like Codex desktop's own hidden titling thread, this leaves a throwaway
+/// rollout behind in `~/.codex/sessions`.
+///
+/// Any failure — spawn, non-zero exit, timeout, garbage output — returns `None`
+/// and the caller keeps the placeholder title.
+async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String> {
+    let fut = async {
+        let mut cmd = Command::new(bin);
+        cmd.args(["exec", "--json", "--skip-git-repo-check"])
+            .args(["-c", "sandbox_mode=\"read-only\""])
+            .args(["-c", "approval_policy=\"never\""])
+            .args(["-c", "model_reasoning_effort=\"low\""])
+            // Naming a chat needs no MCP: booting the user's servers for a
+            // one-line request would cost far more than the request itself.
+            .args(["-c", "mcp_servers={}"])
+            // Nor skills: the plugin catalog alone injected ~6k prompt tokens
+            // (24.3k → 18k input measured) into a request that ignores it.
+            .args(["-c", "features.plugins=false"])
+            .arg(super::title::title_prompt(first_message))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            // Hermetic: run outside any repo so the child doesn't ingest the
+            // server cwd's AGENTS.md into a request that only needs a title.
+            .current_dir(std::env::temp_dir());
+        prepare_env(&mut cmd);
+        // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
+        // would otherwise write escape codes straight into the title column.
+        cmd.env("NO_COLOR", "1");
+        let mut child = cmd.spawn().ok()?;
+        let mut lines = BufReader::new(child.stdout.take()?).lines();
+        // Keep the last agent message: a chatty run may narrate before it
+        // answers, and the title is what it settled on.
+        let mut last = None;
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(text) = exec_line_agent_message(&line) {
+                last = Some(text);
+            }
+        }
+        if !child.wait().await.ok()?.success() {
+            return None;
+        }
+        super::title::sanitize_title(&last?)
+    };
+    tokio::time::timeout(super::title::TITLE_TIMEOUT, fut)
+        .await
+        .ok()?
+}
+
+/// One `codex exec --json` stdout line → its agent message text, if it carries
+/// one. Handles both JSONL shapes the turn parser already covers: the legacy
+/// `msg.type == "agent_message"` event and the item-style `item.completed`
+/// wrapper. Split from the transport so it can be tested without a CLI.
+fn exec_line_agent_message(line: &str) -> Option<String> {
+    let event = serde_json::from_str::<Value>(line).ok()?;
+    let msg = event.get("msg").unwrap_or(&event);
+    match msg.get("type").and_then(Value::as_str)? {
+        "agent_message" => msg
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        "item.completed" => {
+            let item = msg.get("item")?;
+            if item.get("type").and_then(Value::as_str) != Some("agent_message") {
+                return None;
+            }
+            item.get("text").and_then(Value::as_str).map(str::to_string)
+        }
+        _ => None,
+    }
 }
 
 #[async_trait]
@@ -100,9 +429,25 @@ impl Harness for Codex {
             info.version = bin_version(&bin).await;
             info.bin_path = Some(bin.to_string_lossy().into_owned());
         }
-        if let Some(auth) =
-            dirs::home_dir().and_then(|h| read_json(h.join(".codex").join("auth.json")))
-        {
+        let home = codex_home();
+        let config_raw = home
+            .as_ref()
+            .and_then(|home| std::fs::read_to_string(home.join("config.toml")).ok());
+        let custom_provider = config_raw.as_deref().and_then(parse_custom_provider);
+        let configured_effort = config_raw.as_deref().and_then(parse_configured_effort);
+
+        if let Some(provider) = custom_provider.as_ref() {
+            // A provider with `requires_openai_auth = false` never writes
+            // auth.json; its declared `env_key` is the credential.
+            if provider.is_ready() {
+                info.authenticated = true;
+                info.auth_method = provider.env_key.as_ref().map(|_| "apiKey");
+            } else if let Some(key) = provider.env_key.as_deref() {
+                info.agent_note = Some(format!(
+                    "Set `{key}` for the configured Codex model provider."
+                ));
+            }
+        } else if let Some(auth) = home.and_then(|home| read_json(home.join("auth.json"))) {
             if nonempty_str(&auth, "OPENAI_API_KEY").is_some() {
                 info.authenticated = true;
                 info.auth_method = Some("apiKey");
@@ -124,14 +469,47 @@ impl Harness for Codex {
 
         info.agent_ready = info.installed && info.authenticated;
         if info.agent_ready {
-            info = info.with_models(&CODEX_MODELS);
+            // The first-party catalog is meaningless for a custom provider, so
+            // offer only the model that provider is configured with (the
+            // picker's "Default model" entry covers the unset case).
+            //
+            // A custom provider's model gets no reasoning list of its own: the
+            // curated tiers below describe OpenAI's models, and we know nothing
+            // about what an arbitrary provider accepts. `ModelInfo::new` leaves
+            // `reasoning_levels` absent, so the composer falls back to the
+            // conservative harness-wide list rather than offering `ultra` to a
+            // provider that would reject it.
+            match custom_provider
+                .as_ref()
+                .map(|provider| provider.model.as_deref())
+            {
+                Some(Some(model)) => info = info.with_models(vec![ModelInfo::new(model)]),
+                Some(None) => info = info.with_models(Vec::new()),
+                None => {
+                    // First-party account: ask the installed CLI for its own
+                    // catalog (models + per-model efforts, the data codex's TUI
+                    // picker renders). The static table only covers a codex too
+                    // old to answer `model/list`.
+                    let bin = info.bin_path.as_deref().map(Path::new);
+                    let models = match bin {
+                        Some(bin) => codex_model_list(bin, configured_effort.as_deref()).await,
+                        None => None,
+                    };
+                    info = info.with_models(models.unwrap_or_else(|| {
+                        CODEX_MODELS
+                            .iter()
+                            .map(|(id, levels)| ModelInfo::new(*id).with_reasoning(levels))
+                            .collect()
+                    }));
+                }
+            }
             // Old CLIs still work via the legacy exec path, but miss the
             // app-server wins (permission prompts on sandbox escalations;
             // thread resume).
             let too_old = info
                 .version
                 .as_deref()
-                .and_then(parse_codex_version)
+                .and_then(parse_version)
                 .is_some_and(|v| v < MIN_APP_SERVER_VERSION);
             if too_old {
                 info.agent_note = Some(
@@ -151,9 +529,16 @@ impl Harness for Codex {
                 ),
                 manage_url: None,
             }));
+        } else if info.agent_note.is_some() {
+            // A configured custom provider already said which env var to set;
+            // `codex login` is the wrong instruction for it.
+        } else if info.installed {
+            info.agent_note = Some("Sign in with `codex login` to chat with it here.".to_string());
         } else {
-            info.agent_note =
-                Some("Install Codex and sign in (`codex login`) to chat with it here.".to_string());
+            info.agent_note = Some(
+                "Install Codex (developers.openai.com/codex), then sign in with `codex login`."
+                    .to_string(),
+            );
         }
         Some(info)
     }
@@ -167,6 +552,10 @@ impl Harness for Codex {
             return run_turn_exec(ctx).await;
         }
         run_turn_app_server(ctx).await
+    }
+
+    async fn generate_title(&self, first_message: &str) -> Option<String> {
+        codex_generate_title(&find_codex()?, first_message).await
     }
 
     fn options(&self) -> HarnessOptions {
@@ -197,8 +586,12 @@ impl Harness for Codex {
                 ],
                 PermissionMode::Auto,
             )
-            // Codex's own reasoning tiers via `-c model_reasoning_effort`.
-            .with_reasoning_levels(&CODEX_REASONING_LEVELS, "high")
+            // Harness-wide fallback only — the real per-model lists ride on each
+            // `ModelInfo` (see `CODEX_MODELS`). The default is
+            // `Default`, so a configured `model_reasoning_effort` in
+            // `~/.codex/config.toml` is no longer overridden by an implicit
+            // per-turn `high` (issue #123).
+            .with_reasoning_levels(&CODEX_REASONING_LEVELS)
     }
 
     /// Three prompt kinds resume differently:
@@ -301,7 +694,7 @@ impl Harness for Codex {
     }
 
     fn config_home(&self) -> Option<PathBuf> {
-        Some(dirs::home_dir()?.join(".codex"))
+        codex_home()
     }
 
     fn skill_target(&self) -> Option<PathBuf> {
@@ -326,11 +719,8 @@ impl Harness for Codex {
     fn extra_skill_targets(&self) -> Vec<(PathBuf, &'static str)> {
         // Keep the legacy `/orx` prompt for codex versions that don't yet read
         // `~/.agents/skills/`.
-        match dirs::home_dir() {
-            Some(home) => vec![(
-                home.join(".codex").join("prompts").join("orx.md"),
-                super::CODEX_PROMPT,
-            )],
+        match codex_home() {
+            Some(home) => vec![(home.join("prompts").join("orx.md"), super::CODEX_PROMPT)],
             None => Vec::new(),
         }
     }
@@ -346,32 +736,6 @@ impl Harness for Codex {
 /// live spike). Older CLIs take the exec fallback below.
 const MIN_APP_SERVER_VERSION: (u64, u64, u64) = (0, 144, 0);
 
-/// A turn with NO events for this long is treated as wedged and interrupted
-/// rather than held busy forever. Known false positive: a command that is
-/// legitimately silent this long (a quiet build, a training step with
-/// buffered output) is indistinguishable from a hang — hence the generous
-/// bound; the interruption is a clear, recoverable error either way.
-const TURN_WATCHDOG: Duration = Duration::from_secs(30 * 60);
-
-/// `codex --version` output → (major, minor, patch). The first token that
-/// parses wins, so "codex-cli 0.144.0", bare "0.144.0", and a future
-/// "codex-cli 0.150.0 (abc123)" all resolve; a `-suffix` on the patch is
-/// tolerated.
-fn parse_codex_version(version: &str) -> Option<(u64, u64, u64)> {
-    version.split_whitespace().find_map(|token| {
-        let mut parts = token.splitn(3, '.');
-        let major = parts.next()?.parse().ok()?;
-        let minor = parts.next()?.parse().ok()?;
-        let patch = parts
-            .next()?
-            .split(|c: char| !c.is_ascii_digit())
-            .next()?
-            .parse()
-            .ok()?;
-        Some((major, minor, patch))
-    })
-}
-
 /// Whether the installed codex speaks the validated app-server protocol.
 /// Probed once per process (a codex upgrade mid-run takes an `orx up` restart
 /// to notice — acceptable).
@@ -385,7 +749,7 @@ async fn app_server_supported() -> bool {
             bin_version(&bin)
                 .await
                 .as_deref()
-                .and_then(parse_codex_version)
+                .and_then(parse_version)
                 .is_some_and(|v| v >= MIN_APP_SERVER_VERSION)
         })
         .await
@@ -680,6 +1044,22 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
         }
         "turn/completed" => {
             let turn = params.get("turn").unwrap_or(&Value::Null);
+            // Usage may sit under `turn.usage` or top-level `params.usage`
+            // depending on the app-server version; probe both.
+            let usage = turn
+                .get("usage")
+                .filter(|v| !v.is_null())
+                .or_else(|| params.get("usage"));
+            if let Some(used) = codex_used_tokens(usage) {
+                let context_window = turn
+                    .get("model_context_window")
+                    .or_else(|| params.get("model_context_window"))
+                    .and_then(Value::as_u64);
+                ctx.report_usage(ContextUsage {
+                    used_tokens: used,
+                    context_window,
+                });
+            }
             let status = turn.get("status").and_then(Value::as_str).unwrap_or("");
             if status == "failed" {
                 return Some(TurnEnd::Failed(error_message(turn.get("error"))));
@@ -740,6 +1120,7 @@ fn tool_part(
             title: None,
         }),
         prompt: None,
+        children: Vec::new(),
     }
 }
 
@@ -754,25 +1135,63 @@ fn tool_status(completed: bool, failed: bool) -> &'static str {
     }
 }
 
-/// A ThreadItem (from `item/started` / `item/completed`) → WirePart.
+/// A ThreadItem (from `item/started` / `item/completed`) → WirePart, applied to
+/// the parent transcript. Thin wrapper over the pure [`item_to_part`]: it owns
+/// the streaming-merge guards that need `ctx` (never wipe a streamed part with
+/// an empty final text), then upserts. The sub-agent path calls `item_to_part`
+/// directly against its own bucket (see the turn loop's routing).
 fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
-    let Some(id) = item.get("id").and_then(Value::as_str).map(str::to_string) else {
+    let Some(part) = item_to_part(item, completed, &ctx.assistant.parts) else {
         return;
     };
+    // agentMessage / reasoning / plan stream via deltas before the completed
+    // item lands; a completed item with empty text must not wipe what the
+    // deltas built. `item_to_part` produces the part with its final id (plan
+    // uses `plan_part_id`), so the guard keys off that id.
+    if completed
+        && streamed_text_kind(item)
+        && part_text_is_empty(&part)
+        && part_exists(ctx, &part.id)
+    {
+        return;
+    }
+    upsert_preserving_children(&mut ctx.assistant.parts, part);
+}
+
+/// The three item types whose text streams token-by-token via `item/*/delta`
+/// before the completed item arrives (agentMessage, reasoning, plan). For these,
+/// a completed item carrying empty text must not clobber the streamed part.
+fn streamed_text_kind(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("agentMessage") | Some("reasoning") | Some("plan")
+    )
+}
+
+/// Whether a built part carries no display text (its `text` is absent/empty).
+fn part_text_is_empty(part: &WirePart) -> bool {
+    part.text.as_deref().unwrap_or("").is_empty()
+}
+
+/// A ThreadItem → WirePart, **pure** (no `ctx`, no streaming merge). Returns
+/// `None` for items that render nothing (userMessage / hookPrompt). `prior` is
+/// the parts the result will land among — only `commandExecution` reads it, to
+/// preserve streamed `outputDelta` text a completed item without
+/// `aggregatedOutput` would otherwise drop; callers with no prior pass `&[]`.
+///
+/// The returned part carries its **final** id: plain item id for most types,
+/// the derived `plan_part_id` for `plan`. Callers namespacing sub-agent ids
+/// prefix `part.id` after the fact.
+fn item_to_part(item: &Value, completed: bool, prior: &[WirePart]) -> Option<WirePart> {
+    let id = item.get("id").and_then(Value::as_str).map(str::to_string)?;
     match item.get("type").and_then(Value::as_str) {
         Some("agentMessage") => {
             let text = item.get("text").and_then(Value::as_str).unwrap_or("");
-            // The completed item is authoritative — but never wipe streamed
-            // deltas with an empty final text.
-            if !completed || !text.is_empty() || !part_exists(ctx, &id) {
-                ctx.upsert_part(WirePart::text(id, text));
-            }
+            Some(WirePart::text(id, text))
         }
         Some("reasoning") => {
             let text = reasoning_text(item);
-            if !completed || !text.is_empty() || !part_exists(ctx, &id) {
-                ctx.upsert_part(WirePart::reasoning(id, &text));
-            }
+            Some(WirePart::reasoning(id, &text))
         }
         Some("commandExecution") => {
             let failed = completed
@@ -790,8 +1209,7 @@ fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .or_else(|| {
-                    ctx.assistant
-                        .parts
+                    prior
                         .iter()
                         .find(|p| p.id == id)
                         .and_then(|p| p.state.as_ref())
@@ -800,13 +1218,13 @@ fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
             let input = serde_json::json!({
                 "command": item.get("command").map(command_string).unwrap_or_default(),
             });
-            ctx.upsert_part(tool_part(
+            Some(tool_part(
                 id,
                 "bash",
                 tool_status(completed, failed),
                 Some(input),
                 output,
-            ));
+            ))
         }
         Some("fileChange") => {
             let failed = completed
@@ -818,24 +1236,20 @@ fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
                 .get("changes")
                 .cloned()
                 .map(|c| serde_json::json!({ "changes": c }));
-            ctx.upsert_part(tool_part(
+            Some(tool_part(
                 id,
                 "edit",
                 tool_status(completed, failed),
                 input,
                 None,
-            ));
+            ))
         }
         Some("plan") => {
-            // The completed plan item's `text` is authoritative — but never
-            // wipe streamed `item/plan/delta` text with an empty final (same
-            // guard as agentMessage). Keyed on the derived plan part id so the
-            // completed item upserts the part the deltas built.
+            // Keyed on the derived plan part id so the streamed
+            // `item/plan/delta` parts and this completed item upsert the same
+            // part (and `plan_card` can find the authoritative plan text).
             let text = item.get("text").and_then(Value::as_str).unwrap_or("");
-            let part_id = plan_part_id(&id);
-            if !completed || !text.is_empty() || !part_exists(ctx, &part_id) {
-                ctx.upsert_part(WirePart::text(part_id, text));
-            }
+            Some(WirePart::text(plan_part_id(&id), text))
         }
         Some("webSearch") => {
             // No status field on webSearch — it only fails if the whole turn
@@ -852,13 +1266,13 @@ fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
             if !query.is_empty() || !input.contains_key("query") {
                 input.insert("query".into(), Value::String(query.to_string()));
             }
-            ctx.upsert_part(tool_part(
+            Some(tool_part(
                 id,
                 "WebSearch",
                 tool_status(completed, false),
                 Some(Value::Object(input)),
                 None,
-            ));
+            ))
         }
         Some("mcpToolCall") => {
             let status = item.get("status").and_then(Value::as_str);
@@ -881,13 +1295,13 @@ fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
             } else {
                 None
             };
-            ctx.upsert_part(tool_part(
+            Some(tool_part(
                 id,
                 &name,
                 tool_status(completed, failed),
                 Some(input),
                 output,
-            ));
+            ))
         }
         Some("dynamicToolCall") => {
             let status = item.get("status").and_then(Value::as_str);
@@ -902,22 +1316,29 @@ fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
                 "arguments": item.get("arguments").cloned().unwrap_or(Value::Null),
             });
             let output = item.get("contentItems").map(value_to_pretty);
-            ctx.upsert_part(tool_part(
+            Some(tool_part(
                 id,
                 &name,
                 tool_status(completed, failed),
                 Some(input),
                 output,
-            ));
+            ))
+        }
+        // The Codex collaboration items that spawn / drive a sub-agent. Rendered
+        // as a first-class "subagent" spawn part; the turn loop hangs the
+        // sub-agent's own streamed transcript under its `children`, and the UI
+        // labels the row from `state.input` (tool/prompt/kind).
+        Some("collabAgentToolCall") | Some("subAgentActivity") => {
+            Some(subagent_spawn_part(&id, item, completed))
         }
         // userMessage / hookPrompt echo *input* (the user's own message / the
         // hook-injected prompt fragments), not model activity — rendering them
         // would duplicate the user bubble.
-        Some("userMessage") | Some("hookPrompt") => {}
+        Some("userMessage") | Some("hookPrompt") => None,
         // Generic fallback so nothing is silently swallowed: any other item
-        // type (collabAgentToolCall, subAgentActivity, imageView, sleep,
-        // imageGeneration, review mode, contextCompaction, or a future
-        // protocol addition) renders as a tool part named after its raw type.
+        // type (imageView, sleep, imageGeneration, review mode,
+        // contextCompaction, or a future protocol addition) renders as a tool
+        // part named after its raw type.
         other => {
             let tool = other.unwrap_or("item");
             let status = item.get("status").and_then(Value::as_str);
@@ -935,14 +1356,319 @@ fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
                 })
                 .filter(|m| !m.is_empty())
                 .map(Value::Object);
-            ctx.upsert_part(tool_part(
+            Some(tool_part(
                 id,
                 tool,
                 tool_status(completed, failed),
                 input,
                 None,
-            ));
+            ))
         }
+    }
+}
+
+/// Thread ids of the sub-agents a `collabAgentToolCall` / `subAgentActivity`
+/// item references. Spawn/send/etc. carry the target(s) in `receiverThreadIds`;
+/// `subAgentActivity` carries the single `agentThreadId`.
+fn subagent_thread_ids(item: &Value) -> Vec<String> {
+    if let Some(arr) = item.get("receiverThreadIds").and_then(Value::as_array) {
+        return arr
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+    }
+    item.get("agentThreadId")
+        .and_then(Value::as_str)
+        .map(|t| vec![t.to_string()])
+        .unwrap_or_default()
+}
+
+/// Build the "subagent" spawn part for a collab/sub-activity item. The UI reads
+/// `state.input` to label the row ("Spawned agent", "Sub-agent started", …); the
+/// sub-agent's streamed transcript is hung under `children` by the turn loop,
+/// and the UI locates it via this part's id, not any thread id in the payload.
+fn subagent_spawn_part(id: &str, item: &Value, completed: bool) -> WirePart {
+    // collabAgentToolCall carries a `status` (inProgress|completed|failed);
+    // subAgentActivity has no status — treat it as a completed marker row.
+    let status = item.get("status").and_then(Value::as_str);
+    let failed = status == Some("failed");
+    let running = status == Some("inProgress")
+        || (!completed && status.is_none() && item.get("kind").is_none());
+    let wire_status = if running {
+        "running"
+    } else if failed {
+        "error"
+    } else {
+        "completed"
+    };
+    // Surface only what the UI labels the row from (`toolLine`'s subagent arm
+    // reads `tool` / `prompt` / `kind`) — the transcript is located via the
+    // spawn part id + `children`, not via any thread id in the payload.
+    let mut input = serde_json::Map::new();
+    for key in ["tool", "prompt", "kind"] {
+        if let Some(v) = item.get(key) {
+            input.insert(key.into(), v.clone());
+        }
+    }
+    tool_part(
+        id.to_string(),
+        "subagent",
+        wire_status,
+        Some(Value::Object(input)),
+        None,
+    )
+    // NB: `children` starts empty here. When this spawn part is re-upserted
+    // (item/started → item/completed), the upsert must carry forward any
+    // children the sub-agent transcript accrued — see `upsert_preserving_children`.
+}
+
+// --- sub-agent event routing ---------------------------------------------------
+//
+// A Codex sub-agent runs as its own thread but streams over the same app-server
+// connection, during the parent turn, with its own `turnId`. The parent turn
+// loop drops foreign-turn events (see `event_turn_mismatch`) — which is correct
+// for an aborted *predecessor parent* turn, but would also drop a live
+// sub-agent's transcript. We keep that drop for the predecessor case and, for a
+// thread we know is a sub-agent spawned this turn, route its items/deltas into
+// the spawning part's `children` instead.
+
+/// A sub-agent thread discovered this parent turn, keyed by its threadId.
+struct SubThread {
+    /// The `subagent` spawn part (anywhere in the tree) that owns this thread's
+    /// transcript. Its `children` is the bucket the thread's parts stream into.
+    spawn_part_id: String,
+}
+
+/// Where an incoming notification/request should be routed.
+enum EventScope {
+    /// Belongs to the parent turn — the existing path.
+    Parent,
+    /// Belongs to a known sub-agent thread — route into its bucket.
+    SubAgent(String),
+    /// Foreign turn we don't track (an aborted predecessor's tail) — drop.
+    Stale,
+}
+
+/// Classify an event by its `threadId`/`turnId`. Parent-turn events are
+/// `Parent`; events on a registered sub-agent thread are `SubAgent`; everything
+/// else is `Stale` (dropped, exactly as before this feature).
+fn classify_event_thread(
+    parent_turn: Option<&str>,
+    sub_threads: &HashMap<String, SubThread>,
+    params: &Value,
+) -> EventScope {
+    // Fast path: same turn as the parent → Parent (unchanged behavior, and it
+    // also covers events with no turnId, which `event_turn_mismatch` passed).
+    if !event_turn_mismatch(parent_turn, params) {
+        return EventScope::Parent;
+    }
+    // Foreign turn: a sub-agent we spawned, or a stale predecessor?
+    match params.get("threadId").and_then(Value::as_str) {
+        Some(tid) if sub_threads.contains_key(tid) => EventScope::SubAgent(tid.to_string()),
+        _ => EventScope::Stale,
+    }
+}
+
+/// The sub-agent equivalent of `apply_notification`, routing into `bucket` (the
+/// spawning part's `children`). Returns the discovered grandchild thread ids (a
+/// sub-agent spawning its own sub-agents) and their owning spawn part id, so the
+/// caller can register them. Never ends the parent turn, never reports usage.
+fn apply_sub_notification(
+    bucket: &mut Vec<WirePart>,
+    tid: &str,
+    method: &str,
+    params: &Value,
+) -> Vec<(String, String)> {
+    let mut discovered = Vec::new();
+    match method {
+        "item/started" | "item/completed" => {
+            if let Some(item) = params.get("item") {
+                let completed = method == "item/completed";
+                if let Some(mut part) = item_to_part(item, completed, bucket) {
+                    part.id = namespaced_part_id(tid, &part.id);
+                    // A grandchild spawn: register its threads under this part.
+                    if part.tool.as_deref() == Some("subagent") {
+                        for gtid in subagent_thread_ids(item) {
+                            discovered.push((gtid, part.id.clone()));
+                        }
+                    }
+                    let completed_streamed =
+                        completed && streamed_text_kind(item) && part_text_is_empty(&part);
+                    if completed_streamed && bucket.iter().any(|p| p.id == part.id) {
+                        // Don't wipe streamed deltas with an empty final.
+                    } else {
+                        upsert_preserving_children(bucket, part);
+                    }
+                }
+            }
+        }
+        "item/agentMessage/delta" => {
+            append_delta_into(bucket, tid, params, |id| WirePart::text(id, ""));
+        }
+        "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+            append_delta_into(bucket, tid, params, |id| WirePart::reasoning(id, ""));
+        }
+        "item/commandExecution/outputDelta" => {
+            if let (Some(item_id), Some(delta)) = (
+                params.get("itemId").and_then(Value::as_str),
+                params.get("delta").and_then(Value::as_str),
+            ) {
+                let pid = namespaced_part_id(tid, item_id);
+                if !bucket.iter().any(|p| p.id == pid) {
+                    bucket.push(tool_part(
+                        pid.clone(),
+                        "bash",
+                        "running",
+                        Some(serde_json::json!({ "command": "" })),
+                        None,
+                    ));
+                }
+                if let Some(part) = bucket.iter_mut().find(|p| p.id == pid) {
+                    if let Some(state) = part.state.as_mut() {
+                        state.output.get_or_insert_with(String::new).push_str(delta);
+                    }
+                }
+            }
+        }
+        // A sub-agent's own turn/completed / error / other notifications don't
+        // add transcript parts here (the spawn part's status is driven from the
+        // parent's collab item), and crucially never end the parent turn.
+        _ => {}
+    }
+    discovered
+}
+
+/// Namespace a sub-agent's part id by its threadId — codex item ids restart per
+/// thread, so a bare id could collide with a parent-thread part.
+fn namespaced_part_id(thread_id: &str, item_id: &str) -> String {
+    format!("{thread_id}:{item_id}")
+}
+
+/// Register any sub-agent threads a `collabAgentToolCall`/`subAgentActivity`
+/// item references, keyed to the spawn part (the item's own id). Idempotent —
+/// re-seeing the item (started→completed) just re-points to the same part.
+/// `spawn_part_id` is namespaced when the collab item itself belongs to a
+/// sub-agent (a grandchild spawn), plain for a top-level parent spawn.
+fn register_sub_threads_from(
+    method: &str,
+    params: &Value,
+    sub_threads: &mut HashMap<String, SubThread>,
+) {
+    if method != "item/started" && method != "item/completed" {
+        return;
+    }
+    let Some(item) = params.get("item") else {
+        return;
+    };
+    if !matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("collabAgentToolCall") | Some("subAgentActivity")
+    ) {
+        return;
+    }
+    let Some(spawn_id) = item.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    // Re-point (not just first-write): a later collab item on the same thread —
+    // `sendInput`/`resumeAgent` after the initial spawn — should own the
+    // thread's continued transcript, so its activity streams under the new row
+    // rather than the original (already-completed) spawn row. Re-firing the same
+    // spawn item (started→completed) re-points to the same id: a harmless no-op.
+    for tid in subagent_thread_ids(item) {
+        sub_threads.insert(
+            tid,
+            SubThread {
+                spawn_part_id: spawn_id.to_string(),
+            },
+        );
+    }
+}
+
+/// Route a sub-agent-thread event into its spawn part's `children`. Resolves the
+/// bucket, applies the event, and registers any grandchild threads discovered
+/// (a sub-agent spawning its own). On the sub thread's `turn/completed`, stamps
+/// the spawn part's status terminal so the UI spinner stops.
+fn route_sub_event(
+    ctx: &mut TurnCtx,
+    sub_threads: &mut HashMap<String, SubThread>,
+    tid: &str,
+    method: &str,
+    params: &Value,
+) {
+    let Some(spawn_part_id) = sub_threads.get(tid).map(|s| s.spawn_part_id.clone()) else {
+        return;
+    };
+    // A sub-agent's turn/completed → mark the spawn part terminal (don't add a
+    // transcript part for it, and never end the parent turn).
+    if method == "turn/completed" {
+        if let Some(part) = find_part_mut(&mut ctx.assistant.parts, &spawn_part_id) {
+            let interrupted = params
+                .get("turn")
+                .and_then(|t| t.get("status"))
+                .and_then(Value::as_str)
+                == Some("failed");
+            if let Some(state) = part.state.as_mut() {
+                if state.status == "running" {
+                    state.status = if interrupted { "error" } else { "completed" }.into();
+                }
+            }
+        }
+        return;
+    }
+    let Some(spawn_part) = find_part_mut(&mut ctx.assistant.parts, &spawn_part_id) else {
+        return;
+    };
+    let discovered = apply_sub_notification(&mut spawn_part.children, tid, method, params);
+    for (gtid, spawn_id) in discovered {
+        // Re-point, same as `register_sub_threads_from` for top-level threads: a
+        // later collab item on this grandchild thread (sendInput/resumeAgent)
+        // owns its continued transcript.
+        sub_threads.insert(
+            gtid,
+            SubThread {
+                spawn_part_id: spawn_id,
+            },
+        );
+    }
+}
+
+/// Stamp any still-`running` `subagent` spawn parts (at any depth) to
+/// `completed` — called on parent-turn exit so a sub-agent whose completion we
+/// never saw doesn't leave a permanent spinner.
+fn settle_running_subagents(parts: &mut [WirePart]) {
+    for part in parts.iter_mut() {
+        if part.tool.as_deref() == Some("subagent") {
+            if let Some(state) = part.state.as_mut() {
+                if state.status == "running" {
+                    state.status = "completed".into();
+                }
+            }
+        }
+        settle_running_subagents(&mut part.children);
+    }
+}
+
+/// Delta-append into a sub-agent bucket, creating the (empty) part on the first
+/// delta. Mirrors `append_delta` but targets `bucket` with namespaced ids.
+fn append_delta_into(
+    bucket: &mut Vec<WirePart>,
+    tid: &str,
+    params: &Value,
+    make: impl FnOnce(String) -> WirePart,
+) {
+    let (Some(item_id), Some(delta)) = (
+        params.get("itemId").and_then(Value::as_str),
+        params.get("delta").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    let pid = namespaced_part_id(tid, item_id);
+    if !bucket.iter().any(|p| p.id == pid) {
+        bucket.push(make(pid.clone()));
+    }
+    if let Some(part) = bucket.iter_mut().find(|p| p.id == pid) {
+        part.text.get_or_insert_with(String::new).push_str(delta);
     }
 }
 
@@ -1084,7 +1810,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(model) = &ctx.model {
         turn_params["model"] = Value::String(model.clone());
     }
-    let effort = codex_reasoning(ctx.reasoning_level.as_deref());
+    let effort = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref());
     if let Some(effort) = effort {
         turn_params["effort"] = Value::String(effort.to_string());
     }
@@ -1164,6 +1890,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // resolves whatever survived.)
     let mut open_requests: HashMap<String, (Value, ServerReqKind)> = HashMap::new();
 
+    // Sub-agent threads spawned this turn (Codex collaboration). Their events
+    // stream on this same connection with a foreign turnId; we route them into
+    // the spawning part's `children` instead of dropping them.
+    let mut sub_threads: HashMap<String, SubThread> = HashMap::new();
+
     loop {
         // Watchdog (see TURN_WATCHDOG for the false-positive trade-off).
         // Suspended while a card is pending — user think-time is unbounded by
@@ -1178,6 +1909,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                         "codex produced no output for {} minutes — turn interrupted",
                         TURN_WATCHDOG.as_secs() / 60
                     ));
+                    settle_running_subagents(&mut ctx.assistant.parts);
                     let _ = ctx.flush();
                     return Ok(());
                 }
@@ -1186,6 +1918,8 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             rx.recv().await
         };
         let Some(event) = event else {
+            settle_running_subagents(&mut ctx.assistant.parts);
+            let _ = ctx.flush();
             return Err(anyhow!("codex app-server event stream ended mid-turn"));
         };
         match event {
@@ -1194,8 +1928,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 // notifications; persist the freshest snapshot for the Settings
                 // usage row before any turn-scoping short-circuits below.
                 capture_codex_usage(&method, &params);
-                if event_turn_mismatch(turn_id.as_deref(), &params) {
-                    continue;
+                match classify_event_thread(turn_id.as_deref(), &sub_threads, &params) {
+                    EventScope::Stale => continue,
+                    EventScope::SubAgent(tid) => {
+                        route_sub_event(ctx, &mut sub_threads, &tid, &method, &params);
+                        ctx.maybe_flush();
+                        continue;
+                    }
+                    EventScope::Parent => {}
                 }
                 // Codex settled a request itself (its approval deadline hit,
                 // or our reply raced this notification): the card must not
@@ -1210,9 +1950,16 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                         }
                     }
                 }
+                // A parent collab item spawns/drives sub-agents — register the
+                // thread ids it references so their (foreign-turn) events route
+                // into this spawn part's `children` from here on.
+                register_sub_threads_from(&method, &params, &mut sub_threads);
                 match apply_notification(ctx, &method, &params) {
                     Some(TurnEnd::Done { interrupted }) => {
                         sweep_open_requests(ctx, &client, &mut open_requests).await;
+                        // A sub-agent whose `turn/completed` never arrived before
+                        // the parent turn ended would otherwise spin forever.
+                        settle_running_subagents(&mut ctx.assistant.parts);
                         // Synthesize the end-turn plan card (Plan mode, not
                         // interrupted). Attach before the final flush so the
                         // PlanStrip appears atomically with the finished turn.
@@ -1226,6 +1973,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                     }
                     Some(TurnEnd::Failed(message)) => {
                         sweep_open_requests(ctx, &client, &mut open_requests).await;
+                        settle_running_subagents(&mut ctx.assistant.parts);
                         // A terminal `error` notification may have already
                         // pushed this exact message — don't render it twice.
                         if !has_error_part(ctx, &message) {
@@ -1306,10 +2054,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 }
             }
             TurnEvent::Closed => {
-                // Child gone: nothing to settle with codex; just close cards.
+                // Child gone: nothing to settle with codex; just close cards and
+                // stamp any orphaned running sub-agent rows so they don't spin
+                // forever in the persisted transcript.
                 for part_id in std::mem::take(&mut open_requests).into_keys() {
                     resolve_card(ctx, &part_id);
                 }
+                settle_running_subagents(&mut ctx.assistant.parts);
+                let _ = ctx.flush();
                 return Err(anyhow!(
                     "codex app-server exited mid-turn; see {}",
                     crate::store::data_dir().join("agent-codex.log").display()
@@ -1684,15 +2436,29 @@ pub(crate) fn ensure_orx_data_dir() -> Option<PathBuf> {
     dir.canonicalize().ok()
 }
 
-/// Session reasoning id → Codex `model_reasoning_effort` value. The composer only
-/// offers ids from `CODEX_REASONING_LEVELS`; an unrecognized/absent value omits
-/// the override and lets Codex apply its configured default.
-fn codex_reasoning(level: Option<&str>) -> Option<&str> {
-    let level = level?;
-    CODEX_REASONING_LEVELS
-        .iter()
-        .any(|(id, _)| *id == level)
-        .then_some(level)
+/// Session reasoning id → Codex `model_reasoning_effort` value. See
+/// [`resolve_reasoning`] for what a `None` result means.
+///
+/// Validation is per model, from the fallback table:
+///   * a model the table knows → validate against its tiers;
+///   * a model it doesn't (the catalog is discovered live now, so this is any
+///     model outside the frozen four) → forward the value. The composer only
+///     offered what `model/list` reported for that model, so an allowlist here
+///     would drop genuinely supported tiers — the same reasoning as
+///     `opencode_variant`. A stale/wrong value comes back as a codex 400,
+///     which is surfaced to the chat, not swallowed;
+///   * no model at all → the CLI's own configured default model, whose tiers
+///     we can't know. Conservative intersection; matches what the composer
+///     offers in that state, so nothing advertised is dropped.
+fn codex_reasoning<'a>(level: Option<&'a str>, model: Option<&str>) -> Option<&'a str> {
+    match model {
+        Some(m) => match codex_model_reasoning(m) {
+            Some(allowed) => resolve_reasoning(level, allowed),
+            // Catalog-discovered model: forward anything but the sentinel.
+            None => level.filter(|l| *l != REASONING_DEFAULT_ID),
+        },
+        None => resolve_reasoning(level, &CODEX_REASONING_LEVELS),
+    }
 }
 
 fn command_string(v: &Value) -> String {
@@ -1838,7 +2604,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
         }
     };
     // Reasoning level → Codex's own `model_reasoning_effort` config override.
-    if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref()) {
+    if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref()) {
         cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
     }
     if let Some(model) = &ctx.model {
@@ -1855,6 +2621,10 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     };
     cmd.arg(prompt);
     prepare_env(&mut cmd);
+    // Tag the run this sandboxed turn may launch (`orx exp run`) with the
+    // session, so the run watcher notifies this chat. After prepare_env so it
+    // isn't shadowed by a synced value.
+    set_chat_session_env(&mut cmd, &ctx.session_id);
     // Pin the sandboxed turn's store to the exact path granted above. The
     // grant was resolved from the host's env, but the child could resolve a
     // different data dir — `prepare_env` injects dashboard-synced vars (a
@@ -1957,6 +2727,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
                         title: None,
                     }),
                     prompt: None,
+                    children: Vec::new(),
                 });
             }
             "exec_command_end" => {
@@ -1990,6 +2761,16 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             "item.completed" | "item.updated" => {
                 if let Some(item) = msg.get("item") {
                     handle_item(ctx, item, &mut next_id);
+                }
+            }
+            "token_count" => {
+                let (used, context_window) =
+                    token_count_usage(msg.get("info").unwrap_or(&Value::Null));
+                if let Some(used) = used {
+                    ctx.report_usage(ContextUsage {
+                        used_tokens: used,
+                        context_window,
+                    });
                 }
             }
             _ => {}
@@ -2046,6 +2827,7 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
                     title: None,
                 }),
                 prompt: None,
+                children: Vec::new(),
             });
         }
         _ => {}
@@ -2054,7 +2836,81 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
 
 #[cfg(test)]
 mod tests {
+    use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn custom_provider_uses_its_env_key_and_configured_model() {
+        // The exact shape from the bug report: a gateway provider that opts out
+        // of OpenAI auth, so there is deliberately no auth.json to find.
+        let provider = parse_custom_provider(
+            r#"
+model = "gateway-model"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://gateway.example/v1"
+env_key = "CUSTOM_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(provider.model.as_deref(), Some("gateway-model"));
+        assert_eq!(provider.env_key.as_deref(), Some("CUSTOM_API_KEY"));
+
+        // A provider that still wants OpenAI auth falls through to auth.json.
+        assert!(parse_custom_provider(
+            r#"
+model_provider = "openai"
+[model_providers.openai]
+requires_openai_auth = true
+"#
+        )
+        .is_none());
+
+        // So does a config that names no provider at all.
+        assert!(parse_custom_provider("model = \"gpt-5.6-sol\"").is_none());
+    }
+
+    #[test]
+    fn custom_provider_is_read_off_disk_without_an_auth_json() {
+        // End-to-end over the same file read `detect` performs: a CODEX_HOME
+        // holding only config.toml (no auth.json, as the bug report describes)
+        // still yields a provider whose env_key gates readiness.
+        let dir = std::env::temp_dir().join("orx-codex-detect-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.toml");
+        std::fs::write(
+            &config,
+            r#"
+model = "gateway-model"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://gateway.example/v1"
+env_key = "ORX_TEST_UNSET_CREDENTIAL"
+requires_openai_auth = false
+"#,
+        )
+        .unwrap();
+
+        assert!(!dir.join("auth.json").exists());
+        let provider = std::fs::read_to_string(&config)
+            .ok()
+            .as_deref()
+            .and_then(parse_custom_provider)
+            .expect("config.toml should yield a custom provider");
+
+        assert_eq!(provider.model.as_deref(), Some("gateway-model"));
+        // The credential is absent, so detection reports not-ready and the note
+        // names the variable to set instead of telling the user to run
+        // `codex login` (which would be the wrong instruction here).
+        assert!(!provider.is_ready());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn codex_windows_parses_primary_and_secondary() {
@@ -2099,17 +2955,14 @@ mod tests {
 
     #[test]
     fn version_parses_cli_output_and_gates() {
-        assert_eq!(parse_codex_version("codex-cli 0.144.0"), Some((0, 144, 0)));
-        assert_eq!(parse_codex_version("0.150.2"), Some((0, 150, 2)));
-        assert_eq!(
-            parse_codex_version("codex-cli 1.0.3-nightly"),
-            Some((1, 0, 3))
-        );
-        assert_eq!(parse_codex_version("codex-cli"), None);
-        assert_eq!(parse_codex_version(""), None);
+        assert_eq!(parse_version("codex-cli 0.144.0"), Some((0, 144, 0)));
+        assert_eq!(parse_version("0.150.2"), Some((0, 150, 2)));
+        assert_eq!(parse_version("codex-cli 1.0.3-nightly"), Some((1, 0, 3)));
+        assert_eq!(parse_version("codex-cli"), None);
+        assert_eq!(parse_version(""), None);
         // The gate itself: tuple ordering does the right thing.
-        assert!(parse_codex_version("codex-cli 0.143.9").unwrap() < MIN_APP_SERVER_VERSION);
-        assert!(parse_codex_version("codex-cli 0.144.0").unwrap() >= MIN_APP_SERVER_VERSION);
+        assert!(parse_version("codex-cli 0.143.9").unwrap() < MIN_APP_SERVER_VERSION);
+        assert!(parse_version("codex-cli 0.144.0").unwrap() >= MIN_APP_SERVER_VERSION);
     }
 
     #[test]
@@ -2317,6 +3170,201 @@ mod tests {
             None,
             &serde_json::json!({"turnId": "turn1"})
         ));
+    }
+
+    /// The 3-way classifier: parent-turn events are Parent, a registered
+    /// sub-agent thread's foreign-turn events are SubAgent, and an *unregistered*
+    /// foreign turn (an aborted predecessor's tail) is still Stale — the
+    /// load-bearing behavior `event_turn_mismatch` guarded before this feature.
+    #[test]
+    fn classify_routes_subagents_but_still_drops_stale_predecessors() {
+        let mut subs: HashMap<String, SubThread> = HashMap::new();
+        subs.insert(
+            "sub".into(),
+            SubThread {
+                spawn_part_id: "spawn1".into(),
+            },
+        );
+        // Same turn as parent → Parent.
+        assert!(matches!(
+            classify_event_thread(Some("turn1"), &subs, &json!({"turnId":"turn1"})),
+            EventScope::Parent
+        ));
+        // Foreign turn, known sub thread → SubAgent.
+        assert!(matches!(
+            classify_event_thread(
+                Some("turn1"),
+                &subs,
+                &json!({"turnId":"subturn","threadId":"sub"})
+            ),
+            EventScope::SubAgent(tid) if tid == "sub"
+        ));
+        // Foreign turn, UNKNOWN thread (stale predecessor) → Stale, dropped.
+        assert!(matches!(
+            classify_event_thread(
+                Some("turn1"),
+                &subs,
+                &json!({"turnId":"turn0","threadId":"other"})
+            ),
+            EventScope::Stale
+        ));
+    }
+
+    /// A spawned sub-agent's items stream into the spawn part's `children`, and
+    /// its `turn/completed` settles the spawn row without ending the parent turn.
+    #[test]
+    fn subagent_transcript_streams_into_spawn_part_children() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut subs: HashMap<String, SubThread> = HashMap::new();
+        // Parent emits the collab spawn item (parent turn) → spawn part + register.
+        let spawn = json!({"item":{"type":"collabAgentToolCall","id":"spawn1",
+            "tool":"spawnAgent","status":"inProgress","receiverThreadIds":["sub"],
+            "prompt":"go"},"threadId":"parent","turnId":"turn1"});
+        register_sub_threads_from("item/started", &spawn, &mut subs);
+        apply_notification(&mut ctx, "item/started", &spawn);
+        assert_eq!(subs.get("sub").unwrap().spawn_part_id, "spawn1");
+        assert_eq!(ctx.assistant.parts[0].tool.as_deref(), Some("subagent"));
+        assert_eq!(
+            ctx.assistant.parts[0].state.as_ref().unwrap().status,
+            "running"
+        );
+
+        // Sub-agent's own bash item streams into children (foreign turn).
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "sub",
+            "item/completed",
+            &json!({"item":{"type":"commandExecution","id":"c1","command":"ls",
+                "status":"completed","exitCode":0,"aggregatedOutput":"out"},
+                "threadId":"sub","turnId":"subturn"}),
+        );
+        let children = &ctx.assistant.parts[0].children;
+        assert_eq!(children.len(), 1, "sub bash lands under the spawn part");
+        assert_eq!(children[0].id, "sub:c1", "child id is namespaced by thread");
+        assert_eq!(
+            children[0].state.as_ref().unwrap().output.as_deref(),
+            Some("out")
+        );
+
+        // Sub-agent turn/completed settles the spawn row (parent turn unaffected).
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "sub",
+            "turn/completed",
+            &json!({"turn":{"id":"subturn","status":"completed"},"threadId":"sub"}),
+        );
+        assert_eq!(
+            ctx.assistant.parts[0].state.as_ref().unwrap().status,
+            "completed"
+        );
+    }
+
+    /// A sub-agent that spawns its own sub-agent: the grandchild's transcript
+    /// nests under the child spawn part (which itself lives in the parent's
+    /// children), and orphan-settle stamps any still-running spawn part.
+    #[test]
+    fn nested_subagents_nest_and_orphans_settle() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut subs: HashMap<String, SubThread> = HashMap::new();
+        let spawn = json!({"item":{"type":"collabAgentToolCall","id":"spawn1",
+            "tool":"spawnAgent","status":"inProgress","receiverThreadIds":["child"]},
+            "threadId":"parent","turnId":"turn1"});
+        register_sub_threads_from("item/started", &spawn, &mut subs);
+        apply_notification(&mut ctx, "item/started", &spawn);
+
+        // Child spawns a grandchild — a collab item on the CHILD thread.
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "child",
+            "item/started",
+            &json!({"item":{"type":"collabAgentToolCall","id":"spawn2",
+                "tool":"spawnAgent","status":"inProgress","receiverThreadIds":["grand"]},
+                "threadId":"child","turnId":"childturn"}),
+        );
+        // Grandchild registered, its spawn part namespaced under the child.
+        assert_eq!(subs.get("grand").unwrap().spawn_part_id, "child:spawn2");
+
+        // Grandchild does work → nests two levels deep.
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "grand",
+            "item/completed",
+            &json!({"item":{"type":"agentMessage","id":"m1","text":"hi"},
+                "threadId":"grand","turnId":"grandturn"}),
+        );
+        let child_spawn = &ctx.assistant.parts[0].children[0];
+        assert_eq!(child_spawn.id, "child:spawn2");
+        assert_eq!(child_spawn.children[0].id, "grand:m1");
+
+        // Orphan-settle: both spawn parts still "running" → stamped completed.
+        settle_running_subagents(&mut ctx.assistant.parts);
+        assert_eq!(
+            ctx.assistant.parts[0].state.as_ref().unwrap().status,
+            "completed"
+        );
+        assert_eq!(
+            ctx.assistant.parts[0].children[0]
+                .state
+                .as_ref()
+                .unwrap()
+                .status,
+            "completed"
+        );
+    }
+
+    /// A later collab item (`sendInput`) on an already-spawned thread re-points
+    /// the thread to the new spawn row, so its continued activity streams under
+    /// the new row — not the original, already-completed spawn.
+    #[test]
+    fn send_input_repoints_thread_to_the_new_spawn_row() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut subs: HashMap<String, SubThread> = HashMap::new();
+        let spawn = json!({"item":{"type":"collabAgentToolCall","id":"spawn1",
+            "tool":"spawnAgent","status":"completed","receiverThreadIds":["sub"]},
+            "threadId":"parent","turnId":"turn1"});
+        register_sub_threads_from("item/completed", &spawn, &mut subs);
+        apply_notification(&mut ctx, "item/completed", &spawn);
+        assert_eq!(subs.get("sub").unwrap().spawn_part_id, "spawn1");
+
+        // Parent sends more input to the same thread → a new collab item/row.
+        let send = json!({"item":{"type":"collabAgentToolCall","id":"spawn2",
+            "tool":"sendInput","status":"inProgress","receiverThreadIds":["sub"]},
+            "threadId":"parent","turnId":"turn1"});
+        register_sub_threads_from("item/started", &send, &mut subs);
+        apply_notification(&mut ctx, "item/started", &send);
+        // Thread now owned by the new row.
+        assert_eq!(subs.get("sub").unwrap().spawn_part_id, "spawn2");
+
+        // The sub-agent's fresh activity streams under spawn2, not spawn1.
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "sub",
+            "item/completed",
+            &json!({"item":{"type":"agentMessage","id":"m2","text":"more"},
+                "threadId":"sub","turnId":"subturn2"}),
+        );
+        let spawn1 = ctx
+            .assistant
+            .parts
+            .iter()
+            .find(|p| p.id == "spawn1")
+            .unwrap();
+        let spawn2 = ctx
+            .assistant
+            .parts
+            .iter()
+            .find(|p| p.id == "spawn2")
+            .unwrap();
+        assert!(
+            spawn1.children.is_empty(),
+            "original row gets no new activity"
+        );
+        assert_eq!(spawn2.children[0].id, "sub:m2");
     }
 
     #[test]
@@ -2544,6 +3592,36 @@ mod tests {
     }
 
     #[test]
+    fn exec_line_agent_message_reads_both_jsonl_shapes() {
+        // Legacy shape: the message nests under "msg".
+        assert_eq!(
+            exec_line_agent_message(
+                r#"{"msg":{"type":"agent_message","message":"Fix the login redirect"}}"#
+            )
+            .as_deref(),
+            Some("Fix the login redirect")
+        );
+        // Item shape: the message rides an `item.completed` wrapper.
+        assert_eq!(
+            exec_line_agent_message(
+                r#"{"type":"item.completed","item":{"type":"agent_message","id":"m1","text":"Fix the login redirect"}}"#
+            )
+            .as_deref(),
+            Some("Fix the login redirect")
+        );
+        // Everything else is not the answer.
+        for line in [
+            "",
+            "not json",
+            r#"{"msg":{"type":"agent_reasoning","text":"thinking"}}"#,
+            r#"{"type":"item.completed","item":{"type":"reasoning","text":"thinking"}}"#,
+            r#"{"type":"token_count","info":{}}"#,
+        ] {
+            assert!(exec_line_agent_message(line).is_none(), "line: {line}");
+        }
+    }
+
+    #[test]
     fn git_dir_resolves_relative_and_absolute_rev_parse_answers() {
         let base = std::env::temp_dir().join(format!("orx-codex-test-{}", std::process::id()));
         let workspace = base.join("worktree");
@@ -2591,14 +3669,170 @@ mod tests {
 
     #[test]
     fn reasoning_accepts_only_codex_ids() {
-        assert_eq!(codex_reasoning(Some("low")), Some("low"));
-        assert_eq!(codex_reasoning(Some("high")), Some("high"));
-        assert_eq!(codex_reasoning(Some("xhigh")), Some("xhigh"));
-        // Tiers outside the common set and junk are dropped (the flag is
-        // omitted → CLI default), never forwarded as an invalid
-        // `model_reasoning_effort`.
-        assert_eq!(codex_reasoning(Some("max")), None);
-        assert_eq!(codex_reasoning(None), None);
+        let sol = Some("gpt-5.6-sol");
+        assert_eq!(codex_reasoning(Some("low"), sol), Some("low"));
+        assert_eq!(codex_reasoning(Some("high"), sol), Some("high"));
+        assert_eq!(codex_reasoning(Some("xhigh"), sol), Some("xhigh"));
+        // Junk is dropped (the flag is omitted → CLI default), never forwarded
+        // as an invalid `model_reasoning_effort`.
+        assert_eq!(codex_reasoning(Some("nonsense"), sol), None);
+        assert_eq!(codex_reasoning(None, sol), None);
+    }
+
+    /// The point of issue #123: the top tiers are model-specific, so the same
+    /// stored level resolves differently per model rather than being clamped to
+    /// one hard-coded intersection.
+    #[test]
+    fn reasoning_is_model_specific() {
+        // Sol/Terra reach `ultra`; Luna stops at `max` (the catalog's word —
+        // codex's own picker doesn't offer Luna `ultra`, so neither do we).
+        for model in ["gpt-5.6-sol", "gpt-5.6-terra"] {
+            assert_eq!(codex_reasoning(Some("ultra"), Some(model)), Some("ultra"));
+        }
+        assert_eq!(
+            codex_reasoning(Some("max"), Some("gpt-5.6-luna")),
+            Some("max")
+        );
+        assert_eq!(codex_reasoning(Some("ultra"), Some("gpt-5.6-luna")), None);
+        // 5.5 stops at `xhigh`. An unsupported tier is dropped rather than sent
+        // — this is the "changing models clears a stale effort" guarantee,
+        // enforced backend-side too, and it matters because codex answers an
+        // unsupported effort with a 400 that kills the turn.
+        assert_eq!(
+            codex_reasoning(Some("xhigh"), Some("gpt-5.5")),
+            Some("xhigh")
+        );
+        assert_eq!(codex_reasoning(Some("max"), Some("gpt-5.5")), None);
+        // A model outside the fallback table is catalog-discovered: the
+        // composer offered only what `model/list` reported for it, so the value
+        // is forwarded rather than clamped (same reasoning as opencode).
+        assert_eq!(codex_reasoning(Some("ultra"), Some("gpt-9")), Some("ultra"));
+        assert_eq!(
+            codex_reasoning(Some(REASONING_DEFAULT_ID), Some("gpt-9")),
+            None
+        );
+        // No model at all → the conservative fallback intersection.
+        assert_eq!(codex_reasoning(Some("xhigh"), None), Some("xhigh"));
+        assert_eq!(codex_reasoning(Some("max"), None), None);
+    }
+
+    /// The `model/list` parser against the live 0.144 response shape (headers
+    /// trimmed to the fields we read). Efforts come out in catalog order,
+    /// hidden entries are skipped, and every model leads with the sentinel.
+    #[test]
+    fn model_list_parses_catalog_models_and_efforts() {
+        let result = serde_json::json!({
+            "data": [
+                {
+                    "id": "gpt-5.6-sol", "model": "gpt-5.6-sol",
+                    "displayName": "GPT-5.6 Sol", "hidden": false, "isDefault": true,
+                    "defaultReasoningEffort": "low",
+                    "supportedReasoningEfforts": [
+                        { "reasoningEffort": "low", "description": "" },
+                        { "reasoningEffort": "medium", "description": "" },
+                        { "reasoningEffort": "high", "description": "" },
+                        { "reasoningEffort": "xhigh", "description": "" },
+                        { "reasoningEffort": "max", "description": "" },
+                        { "reasoningEffort": "ultra", "description": "" },
+                    ],
+                },
+                {
+                    "id": "gpt-5.4-mini", "model": "gpt-5.4-mini",
+                    "displayName": "GPT-5.4 mini", "hidden": false, "isDefault": false,
+                    "defaultReasoningEffort": "medium",
+                    "supportedReasoningEfforts": [
+                        { "reasoningEffort": "low", "description": "" },
+                        { "reasoningEffort": "medium", "description": "" },
+                        { "reasoningEffort": "high", "description": "" },
+                        { "reasoningEffort": "xhigh", "description": "" },
+                    ],
+                },
+                {
+                    "id": "secret", "model": "secret", "displayName": "hidden one",
+                    "hidden": true, "isDefault": false,
+                    "defaultReasoningEffort": "medium",
+                    "supportedReasoningEfforts": [],
+                },
+            ],
+        });
+        let models = parse_model_list(&result, None);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["gpt-5.6-sol", "gpt-5.4-mini"]
+        );
+        let ids = |m: &ModelInfo| {
+            m.reasoning_levels
+                .as_ref()
+                .map(|c| c.iter().map(|c| c.id.clone()).collect::<Vec<_>>())
+        };
+        // A reported default means a concrete preselected tier and NO sentinel
+        // row — the picker shows the value that actually runs.
+        assert_eq!(
+            ids(&models[0]).unwrap(),
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(models[0].default_reasoning_level.as_deref(), Some("low"));
+        assert_eq!(ids(&models[1]).unwrap(), ["low", "medium", "high", "xhigh"]);
+        assert_eq!(models[1].default_reasoning_level.as_deref(), Some("medium"));
+        // The catalog's display name rides along for the picker.
+        assert_eq!(models[0].display_name.as_deref(), Some("GPT-5.6 Sol"));
+
+        // A config.toml `model_reasoning_effort` outranks the catalog default —
+        // codex resolves it that way, so the preselect must too. A configured
+        // value the model doesn't support falls back to the catalog default
+        // rather than preselecting something the model rejects.
+        let configured = parse_model_list(&result, Some("xhigh"));
+        assert_eq!(
+            configured[0].default_reasoning_level.as_deref(),
+            Some("xhigh")
+        );
+        let unsupported = parse_model_list(&result, Some("ultra"));
+        assert_eq!(
+            unsupported[1].default_reasoning_level.as_deref(),
+            Some("medium"),
+            "gpt-5.4-mini has no ultra; the catalog default stands"
+        );
+        // Junk shapes parse to nothing rather than panicking.
+        assert!(parse_model_list(&serde_json::json!({}), None).is_empty());
+        assert!(parse_model_list(&serde_json::json!({ "data": "nope" }), None).is_empty());
+    }
+
+    #[test]
+    fn configured_effort_reads_config_toml() {
+        assert_eq!(
+            parse_configured_effort("model_reasoning_effort = \"max\"").as_deref(),
+            Some("max")
+        );
+        assert_eq!(parse_configured_effort("model = \"gpt-5.6-sol\""), None);
+        assert_eq!(parse_configured_effort("not toml ==="), None);
+    }
+
+    /// `Default` must send no `model_reasoning_effort` at all — otherwise a
+    /// user's configured `max` in `~/.codex/config.toml` is silently overridden
+    /// by the composer (the concrete bug in issue #123).
+    #[test]
+    fn reasoning_default_sends_no_override() {
+        for model in [Some("gpt-5.6-sol"), Some("gpt-5.5"), None] {
+            assert_eq!(codex_reasoning(Some(REASONING_DEFAULT_ID), model), None);
+        }
+    }
+
+    /// Every advertised per-model choice must survive the mapper for that same
+    /// model — the picker can never offer an effort `run_turn` would drop.
+    /// Iterating `CODEX_MODELS` also means a model added without tiers fails
+    /// here rather than silently degrading to the fallback.
+    #[test]
+    fn advertised_model_choices_all_map_back() {
+        for (model, levels) in CODEX_MODELS {
+            assert!(!levels.is_empty(), "{model} has no reasoning tiers");
+            for level in levels {
+                assert_eq!(
+                    codex_reasoning(Some(level), Some(model)),
+                    Some(*level),
+                    "{model} advertises {level} but the mapper drops it"
+                );
+            }
+        }
     }
 
     fn answer(
@@ -2852,6 +4086,7 @@ mod tests {
             host: std::sync::Arc::new(crate::local::chat::ChatHost::new(
                 std::sync::Arc::new(crate::local::opencode::AgentHost::new(None)),
                 std::sync::Arc::new(crate::local::codex::CodexHost::new()),
+                std::sync::Arc::new(crate::local::claude::ClaudeHost::new()),
             )),
             session_id: "s".into(),
             native_session_id: None,
@@ -2942,6 +4177,73 @@ mod tests {
         assert_eq!(
             server_req_kind("item/permissions/requestApproval"),
             ServerReqKind::Other
+        );
+    }
+
+    #[test]
+    fn turn_completed_reports_input_plus_output_tokens() {
+        // Real shape captured 2026-07-22 from codex 0.144.0 exec, here delivered
+        // over the app-server as `turn/completed` with the usage nested.
+        let mut ctx = TurnCtx::test_stub();
+        ctx.model = Some("gpt-5.6-sol".into());
+        let params = serde_json::json!({
+            "turn": {
+                "status": "completed",
+                "usage": {"input_tokens":21498,"cached_input_tokens":9984,"output_tokens":5,"reasoning_output_tokens":0},
+                "model_context_window": 272000
+            }
+        });
+        let end = apply_notification(&mut ctx, "turn/completed", &params);
+        assert!(matches!(end, Some(TurnEnd::Done { interrupted: false })));
+        let usage = ctx.context_usage.expect("usage reported");
+        // cached_input_tokens is a subset of input_tokens, not additive.
+        assert_eq!(usage.used_tokens, 21498 + 5);
+        assert_eq!(usage.context_window, Some(272000));
+    }
+
+    #[test]
+    fn turn_completed_reads_top_level_usage_when_turn_lacks_it() {
+        let mut ctx = TurnCtx::test_stub();
+        let params = serde_json::json!({
+            "turn": {"status": "completed"},
+            "usage": {"input_tokens":100,"output_tokens":20}
+        });
+        apply_notification(&mut ctx, "turn/completed", &params);
+        assert_eq!(ctx.context_usage.unwrap().used_tokens, 120);
+    }
+
+    #[test]
+    fn legacy_token_count_prefers_last_usage_and_reads_window() {
+        // The `token_count` legacy-exec info the loop's arm folds via
+        // `token_count_usage`: `last_token_usage` (the latest request, whose
+        // input already carries the full context) wins over `total_token_usage`
+        // (a running session-wide sum). model_context_window comes along.
+        let info = serde_json::json!({
+            "total_token_usage": {"input_tokens":999999,"cached_input_tokens":9984,"output_tokens":50,"reasoning_output_tokens":0},
+            "last_token_usage": {"input_tokens":21498,"cached_input_tokens":9984,"output_tokens":5,"reasoning_output_tokens":0},
+            "model_context_window": 272000
+        });
+        // cached_input_tokens is a subset of input_tokens, not additive.
+        assert_eq!(token_count_usage(&info), (Some(21498 + 5), Some(272000)));
+
+        // No last → fall back to total.
+        let total_only = serde_json::json!({
+            "total_token_usage": {"input_tokens":100,"output_tokens":20},
+            "model_context_window": 272000
+        });
+        assert_eq!(token_count_usage(&total_only), (Some(120), Some(272000)));
+    }
+
+    #[test]
+    fn codex_used_tokens_is_none_when_absent_or_all_zero() {
+        assert_eq!(codex_used_tokens(None), None);
+        assert_eq!(codex_used_tokens(Some(&serde_json::json!({}))), None);
+        // An all-zero payload isn't real occupancy — must not render "0%".
+        assert_eq!(
+            codex_used_tokens(Some(
+                &serde_json::json!({"input_tokens":0,"output_tokens":0})
+            )),
+            None
         );
     }
 }

@@ -419,6 +419,7 @@ mod tests {
             verdict: None,
             verdict_notes: None,
             verdict_at: None,
+            chat_session_id: None,
         }
     }
 

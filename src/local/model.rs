@@ -108,6 +108,9 @@ pub struct LocalExperiment {
     /// into this one at creation (`create-experiment --merge`). Drawn as a
     /// dashed extra edge in the tree.
     pub merge_parent_experiment_id: Option<String>,
+    /// Chat session that created this experiment. NULL for dashboard-created,
+    /// legacy and out-of-session rows. Immutable once stamped.
+    pub chat_session_id: Option<String>,
 }
 
 impl LocalExperiment {
@@ -130,6 +133,7 @@ impl LocalExperiment {
             verdict_at: row.get(13)?,
             play_entry: row.get(14)?,
             merge_parent_experiment_id: row.get(15)?,
+            chat_session_id: row.get(16)?,
         })
     }
 
