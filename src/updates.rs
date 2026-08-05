@@ -26,7 +26,15 @@ use serde::{Deserialize, Serialize};
 use crate::error::{anyhow, Result};
 
 /// GitHub repo the released binaries come from.
-pub const REPO_URL: &str = "https://github.com/alphaXiv/openresearch-cli";
+///
+/// Must be *this fork's* repo, not upstream's. It was inherited pointing at
+/// `alphaXiv/openresearch-cli`, which made `crux update` download upstream's
+/// `orx` build and install it over the user's `crux` — a silent swap of one
+/// product for another, since both binaries land at the same
+/// `install-path = "CARGO_HOME"` under the same `openresearch-cli` app name.
+/// The outdated-version warning had the same origin, which is why it used to
+/// advise upgrading from a Crux version to an upstream release number.
+pub const REPO_URL: &str = "https://github.com/trinity-asylum/crux";
 
 /// The cargo-dist app name (the *package* name, not the `orx` bin name) — used
 /// in release asset names and the receipt path.
@@ -106,6 +114,16 @@ pub async fn fetch_latest(timeout: Duration) -> Result<LatestRelease> {
             )
         })?;
     let status = res.status();
+    // The `releases/latest/download/…` permalink 404s both when a repo has no
+    // releases at all and when the newest release lacks the manifest asset. For
+    // a fork that hasn't cut its first release yet the former is the norm, so
+    // say so plainly rather than reporting a bare 404 the user can't act on.
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(anyhow!(
+            "No published release found at {} — nothing to update to yet. Build from source with `cargo build --release`.",
+            REPO_URL
+        ));
+    }
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
         return Err(anyhow!(
