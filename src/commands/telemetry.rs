@@ -95,9 +95,7 @@ fn status() -> Result<()> {
             // The fork default deserves a pointer, not just a reason string:
             // there's nothing wrong to fix, there's simply no destination yet.
             if matches!(reason, telemetry::DisabledReason::NoKey) {
-                println!(
-                    "  Crux ships no PostHog key, so nothing is sent anywhere. Point it at"
-                );
+                println!("  Crux ships no PostHog key, so nothing is sent anywhere. Point it at");
                 println!("  your own project with `orx telemetry key phc_...` if you want it.");
             }
         }

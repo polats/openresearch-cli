@@ -41,7 +41,10 @@ use serde_json::json;
 /// cannot read data or change settings, exactly as PostHog intends for
 /// client-side keys. Never a personal (`phx_`) key.
 fn posthog_key() -> Option<String> {
-    if let Some(key) = std::env::var("CRUX_POSTHOG_KEY").ok().filter(|k| !k.is_empty()) {
+    if let Some(key) = std::env::var("CRUX_POSTHOG_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+    {
         return Some(key);
     }
     if let SettingsState::Loaded(s) = read_settings_state() {
@@ -853,7 +856,10 @@ mod tests {
 
         assert!(posthog_key().is_none(), "no key must resolve to None");
         assert!(!is_enabled(false));
-        assert!(matches!(disabled_reason(false), Some(DisabledReason::NoKey)));
+        assert!(matches!(
+            disabled_reason(false),
+            Some(DisabledReason::NoKey)
+        ));
 
         // A key in settings.json is enough to turn it on, without any env var.
         mutate_settings(|s| s.posthog_key = Some(TEST_KEY.to_string())).unwrap();

@@ -85,9 +85,7 @@ impl Harness for OpenCode {
             info.usage = Some(stored_go_usage().unwrap_or_else(|| HarnessUsage {
                 windows: Vec::new(),
                 observed_at_ms: None,
-                note: Some(
-                    "Go spend appears here after your first opencode-go turn.".to_string(),
-                ),
+                note: Some("Go spend appears here after your first opencode-go turn.".to_string()),
                 manage_url: Some("https://opencode.ai/auth".to_string()),
             }));
         } else if providers.iter().any(|p| p == "opencode") {
@@ -992,7 +990,8 @@ fn capture_go_usage(native_session: &str, info: &Value) {
     let mut log = stored_go_log().unwrap_or_default();
     let last = *log.last_cost_by_session.get(native_session).unwrap_or(&0.0);
     let delta = cost - last;
-    log.last_cost_by_session.insert(native_session.to_string(), cost);
+    log.last_cost_by_session
+        .insert(native_session.to_string(), cost);
     if delta > 0.0 {
         log.events.push((now, delta));
         let cutoff = now - 31 * 24 * 60 * 60 * 1000;
@@ -1636,16 +1635,21 @@ opencode/glm-5
     /// with a cost, so its spend never leaks into the Go plan's windows.
     #[test]
     fn capture_skips_non_go_provider() {
-        assert!(!go_info("opencode", 5.0)
-            .get("model")
-            .and_then(|m| m.get("providerID"))
-            .and_then(Value::as_str)
-            .is_some_and(|p| p == "opencode-go"));
-        let is_go = go_info("opencode-go", 5.0)
-            .get("model")
-            .and_then(|m| m.get("providerID"))
-            .and_then(Value::as_str)
-            == Some("opencode-go");
-        assert!(is_go);
+        // Same discriminator `capture_go_usage` uses, applied to both providers.
+        let provider_of = |info: &Value| {
+            info.get("model")
+                .and_then(|m| m.get("providerID"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        assert_eq!(
+            provider_of(&go_info("opencode", 5.0)).as_deref(),
+            Some("opencode"),
+            "a zen session must not read as opencode-go"
+        );
+        assert_eq!(
+            provider_of(&go_info("opencode-go", 5.0)).as_deref(),
+            Some("opencode-go")
+        );
     }
 }
