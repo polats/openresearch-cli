@@ -829,6 +829,15 @@ pub enum TelemetryCommand {
         #[arg(long, conflicts_with = "value")]
         clear: bool,
     },
+    /// Show or set this fork's PostHog project key. Crux ships no key, so
+    /// analytics stay off until one is set here (or via `CRUX_POSTHOG_KEY`).
+    Key {
+        /// Public, write-only `phc_` key to persist (omit to show the current one).
+        value: Option<String>,
+        /// Clear the persisted key (analytics go back to off).
+        #[arg(long, conflicts_with = "value")]
+        clear: bool,
+    },
 }
 
 #[derive(Args, Debug)]

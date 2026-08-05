@@ -1,7 +1,8 @@
-//! `orx telemetry status | on | off | context` — inspect and control anonymous
-//! usage analytics. The discoverable, persistent opt-out (also toggleable from
-//! the `orx up` onboarding step), plus the machine-context tag used by fleet
-//! provisioning to mark automated installs.
+//! `orx telemetry status | on | off | context | key` — inspect and control
+//! anonymous usage analytics. The discoverable, persistent opt-out (also
+//! toggleable from the `orx up` onboarding step), the machine-context tag used
+//! by fleet provisioning to mark automated installs, and this fork's PostHog
+//! key — which Crux ships empty, so analytics are off until you set one.
 
 use crate::error::{anyhow, Result};
 use crate::telemetry;
@@ -12,7 +13,43 @@ pub async fn run(args: crate::TelemetryArgs) -> Result<()> {
         crate::TelemetryCommand::On => set_enabled(true).await,
         crate::TelemetryCommand::Off => set_enabled(false).await,
         crate::TelemetryCommand::Context { value, clear } => context(value, clear),
+        crate::TelemetryCommand::Key { value, clear } => key(value, clear),
     }
+}
+
+/// Show or set this fork's PostHog project key. Crux deliberately ships none —
+/// inheriting upstream's key would report every install into upstream's
+/// analytics — so this (or `CRUX_POSTHOG_KEY`) is what turns analytics on.
+fn key(value: Option<String>, clear: bool) -> Result<()> {
+    if clear {
+        telemetry::set_posthog_key(None)
+            .map_err(|e| anyhow!("Could not clear PostHog key: {e}"))?;
+        println!("\u{2713} PostHog key cleared (analytics are off).");
+        return Ok(());
+    }
+    let Some(value) = value else {
+        match telemetry::configured_posthog_key() {
+            Some(k) => println!("PostHog key: {k}"),
+            None => println!("PostHog key: (none — analytics are off)"),
+        }
+        return Ok(());
+    };
+    let value = value.trim();
+    // A `phx_` personal key can read data and change project settings; shipping
+    // one in a client would be a credential leak, so refuse it outright.
+    if !value.starts_with("phc_") {
+        return Err(anyhow!(
+            "expected a public, write-only project key starting with `phc_` (never a personal `phx_` key)"
+        ));
+    }
+    if value.chars().any(char::is_whitespace) {
+        return Err(anyhow!("a PostHog key cannot contain whitespace"));
+    }
+    telemetry::set_posthog_key(Some(value.to_string()))
+        .map_err(|e| anyhow!("Could not save PostHog key: {e}"))?;
+    println!("\u{2713} PostHog key saved. Analytics will report to your project.");
+    println!("  Turn it off any time with `orx telemetry off` or `orx telemetry key --clear`.");
+    Ok(())
 }
 
 /// Show or set the machine context tag (`install_kind` on every event). Values
@@ -55,6 +92,14 @@ fn status() -> Result<()> {
         }
         Some(reason) => {
             println!("Anonymous usage analytics: off ({})", reason.as_str());
+            // The fork default deserves a pointer, not just a reason string:
+            // there's nothing wrong to fix, there's simply no destination yet.
+            if matches!(reason, telemetry::DisabledReason::NoKey) {
+                println!(
+                    "  Crux ships no PostHog key, so nothing is sent anywhere. Point it at"
+                );
+                println!("  your own project with `orx telemetry key phc_...` if you want it.");
+            }
         }
     }
 
