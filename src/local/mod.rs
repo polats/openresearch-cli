@@ -14,6 +14,7 @@ pub mod chat;
 pub mod claude;
 pub mod codex;
 pub mod datadir;
+pub mod evaluator;
 pub mod experiments;
 pub mod files;
 pub mod git;
@@ -29,6 +30,7 @@ pub mod opencode;
 pub mod openresearch;
 pub mod play;
 pub mod projects;
+pub mod ray;
 pub mod resolve;
 pub mod skills;
 pub mod slurm;
@@ -90,13 +92,15 @@ pub const BACKENDS: &[&str] = &[
     "k8s",
     "ssh",
     "slurm",
+    "ray",
     "openresearch",
 ];
 
 /// Backends whose launches take a `--flavor` (hf/modal/openresearch require
-/// one; slurm's is an optional GRES spec). k8s (manifest), ssh (host), and
-/// local (this machine's hardware) have no flavor axis.
-pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "slurm", "openresearch"];
+/// one; slurm's is an optional GRES spec; ray's is optional resource hints).
+/// k8s (manifest), ssh (host), and local (this machine's hardware) have no
+/// flavor axis.
+pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "slurm", "ray", "openresearch"];
 
 /// The subset whose launches FAIL without a `--flavor` — the playbook warns
 /// about these when they're the default with no saved flavor.

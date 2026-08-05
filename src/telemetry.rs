@@ -25,11 +25,37 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// Public, write-only PostHog project key (openresearch CLI project). A `phc_`
-/// key can only *ingest* events — it cannot read data or change settings — so
-/// it is safe to commit and ship in the binary, exactly as PostHog intends for
-/// client-side keys. Do NOT put a personal (`phx_`) key here.
-const POSTHOG_KEY: &str = "phc_u2i23xa8CBjcZpQprf6kdDzzR8vb2iTpRT8FmdcREBvX";
+/// The PostHog project this fork ingests into. Deliberately **not** baked in:
+/// upstream ships its own `phc_` key, and a fork that inherited it would report
+/// every Crux install into the upstream project's analytics. So Crux ships no
+/// key and no key means no telemetry (`DisabledReason::NoKey`) — the default
+/// build sends nothing, anywhere.
+///
+/// Resolution order, first hit wins:
+/// 1. `CRUX_POSTHOG_KEY` in the environment (per-run / CI override),
+/// 2. `posthogKey` in `settings.json` (persistent, via `orx telemetry key`),
+/// 3. `CRUX_POSTHOG_KEY` baked in at compile time, for release builds that want
+///    telemetry on by default without a runtime env var.
+///
+/// Only a public, write-only `phc_` key belongs here — it can ingest events but
+/// cannot read data or change settings, exactly as PostHog intends for
+/// client-side keys. Never a personal (`phx_`) key.
+fn posthog_key() -> Option<String> {
+    if let Some(key) = std::env::var("CRUX_POSTHOG_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+    {
+        return Some(key);
+    }
+    if let SettingsState::Loaded(s) = read_settings_state() {
+        if let Some(key) = s.posthog_key.filter(|k| !k.is_empty()) {
+            return Some(key);
+        }
+    }
+    option_env!("CRUX_POSTHOG_KEY")
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+}
 
 /// Prefix stamped onto EVERY event name. This PostHog project is shared with
 /// the website/cloud-agent analytics, so CLI events must be separable by name
@@ -39,10 +65,13 @@ const POSTHOG_KEY: &str = "phc_u2i23xa8CBjcZpQprf6kdDzzR8vb2iTpRT8FmdcREBvX";
 /// pass the bare name (`command`, `experiment_started`).
 const EVENT_PREFIX: &str = "cli_";
 
-/// US PostHog cloud. Overridable with `ORX_TELEMETRY_HOST` so tests can point
-/// at a throwaway local listener instead of production.
+/// US PostHog cloud. Overridable with `CRUX_TELEMETRY_HOST` (or the inherited
+/// `ORX_TELEMETRY_HOST`) so a fork can point at EU cloud or self-hosted, and so
+/// tests can point at a throwaway local listener instead of production.
 fn posthog_host() -> String {
-    std::env::var("ORX_TELEMETRY_HOST").unwrap_or_else(|_| "https://us.i.posthog.com".to_string())
+    std::env::var("CRUX_TELEMETRY_HOST")
+        .or_else(|_| std::env::var("ORX_TELEMETRY_HOST"))
+        .unwrap_or_else(|_| "https://us.i.posthog.com".to_string())
 }
 
 /// Flush window granted to an in-flight send before `#[tokio::main]` tears the
@@ -108,6 +137,11 @@ pub(crate) struct Settings {
     /// applied when a launch resolves to that same backend without a flavor.
     #[serde(default)]
     pub default_flavor: Option<String>,
+    /// Public, write-only PostHog `phc_` key for *this fork's* project. Absent =
+    /// telemetry off (see [`posthog_key`]); Crux ships no default key so nothing
+    /// is ever reported to the upstream project.
+    #[serde(default)]
+    pub posthog_key: Option<String>,
 }
 
 /// The persisted data-dir choice, if any (non-empty). Read by `store::data_dir()`
@@ -323,6 +357,8 @@ pub(crate) enum DisabledReason {
     Flag,
     Persisted,
     CorruptSettings,
+    /// No fork PostHog key configured — the default for a plain Crux build.
+    NoKey,
 }
 
 impl DisabledReason {
@@ -331,6 +367,7 @@ impl DisabledReason {
             DisabledReason::Flag => "--no-telemetry flag",
             DisabledReason::Persisted => "disabled via `orx telemetry off`",
             DisabledReason::CorruptSettings => "settings file unreadable (failing safe)",
+            DisabledReason::NoKey => "no PostHog key configured (set CRUX_POSTHOG_KEY)",
         }
     }
 }
@@ -347,6 +384,12 @@ impl DisabledReason {
 pub(crate) fn disabled_reason(cli_flag: bool) -> Option<DisabledReason> {
     if cli_flag {
         return Some(DisabledReason::Flag);
+    }
+    // No destination, no telemetry. Checked before the persisted opt-out so a
+    // keyless build reports the honest reason rather than looking merely
+    // "enabled" while every send is dropped.
+    if posthog_key().is_none() {
+        return Some(DisabledReason::NoKey);
     }
     // Persisted state is the only branch that reads disk.
     match read_settings_state() {
@@ -397,6 +440,21 @@ pub(crate) fn set_machine_context(context: Option<String>) -> std::io::Result<()
         s.machine_context = context
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
+    })
+}
+
+/// The resolved PostHog key, for `orx telemetry key` / `status`. `None` = this
+/// build has no analytics destination, which is the Crux default.
+pub(crate) fn configured_posthog_key() -> Option<String> {
+    posthog_key()
+}
+
+/// Persist this fork's PostHog key (`orx telemetry key`). `None` clears it,
+/// which turns analytics back off. Goes through the same lock as every other
+/// mutation so it can't clobber the install id or a persisted opt-out.
+pub(crate) fn set_posthog_key(key: Option<String>) -> std::io::Result<()> {
+    mutate_settings(|s| {
+        s.posthog_key = key.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     })
 }
 
@@ -468,7 +526,9 @@ fn build_payload(event: &str, distinct_id: &str, extra: serde_json::Value) -> se
         }
     }
     json!({
-        "api_key": POSTHOG_KEY,
+        // Empty only on a keyless build, where `disabled_reason` has already
+        // stopped the send — a payload with no destination is never dispatched.
+        "api_key": posthog_key().unwrap_or_default(),
         // Every CLI event name is `cli_`-prefixed so it's separable from the
         // website's events in this shared project by name alone.
         "event": format!("{EVENT_PREFIX}{event}"),
@@ -691,7 +751,7 @@ impl TelemetrySession {
 ///   an ephemeral OpenResearch box provisioned for a local-mode run, and
 ///   `local=true, target="hf"` drives the user's own HF account from local mode.
 /// - `target`: for a run, a COARSE compute label — the backend/provider name
-///   (`"hf"`, `"modal"`, `"k8s"`, `"ssh"`, `"slurm"`, `"openresearch"`,
+///   (`"hf"`, `"modal"`, `"k8s"`, `"ssh"`, `"slurm"`, `"ray"`, `"openresearch"`,
 ///   `"local"`) for local-mode runs, or the managed compute shape (`"gpu"`,
 ///   `"cpu"`, `"existing"`) for server runs. `None` for `create` (no compute).
 ///   Always a fixed enum label, never an id, name, or path.
@@ -755,7 +815,15 @@ mod tests {
         }
     }
 
-    const OPT_VARS: &[&str] = &["XDG_CONFIG_HOME", "ORX_TELEMETRY_CONTEXT"];
+    const OPT_VARS: &[&str] = &[
+        "XDG_CONFIG_HOME",
+        "ORX_TELEMETRY_CONTEXT",
+        "CRUX_POSTHOG_KEY",
+    ];
+
+    /// A stand-in fork key. Crux ships none, so every test that expects
+    /// telemetry *enabled* has to supply one — see `no_key_disables_telemetry`.
+    const TEST_KEY: &str = "phc_test_key_not_a_real_project";
 
     #[test]
     fn opt_out_precedence() {
@@ -764,13 +832,43 @@ mod tests {
         // branch reads nothing (unique per run to avoid cross-run leftovers).
         let dir = std::env::temp_dir().join(format!("orx-tel-none-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::set_var("CRUX_POSTHOG_KEY", TEST_KEY);
 
-        // Clean state, no flag → enabled. Automated/CI environments are NOT
-        // auto-disabled (that's a query-time filter via the `ci` property).
+        // Clean state, key configured, no flag → enabled. Automated/CI
+        // environments are NOT auto-disabled (that's a query-time filter via
+        // the `ci` property).
         assert!(is_enabled(false));
 
         // The only per-run opt-out is the --no-telemetry flag.
         assert!(matches!(disabled_reason(true), Some(DisabledReason::Flag)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The fork default: no key anywhere → telemetry is off, and says why. This
+    /// is what keeps a plain Crux build from reporting into upstream's project.
+    #[test]
+    fn no_key_disables_telemetry() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-nokey-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::remove_var("CRUX_POSTHOG_KEY");
+
+        assert!(posthog_key().is_none(), "no key must resolve to None");
+        assert!(!is_enabled(false));
+        assert!(matches!(
+            disabled_reason(false),
+            Some(DisabledReason::NoKey)
+        ));
+
+        // A key in settings.json is enough to turn it on, without any env var.
+        mutate_settings(|s| s.posthog_key = Some(TEST_KEY.to_string())).unwrap();
+        assert_eq!(posthog_key().as_deref(), Some(TEST_KEY));
+        assert!(is_enabled(false));
+
+        // Env wins over settings, so a run can redirect its own destination.
+        std::env::set_var("CRUX_POSTHOG_KEY", "phc_env_override");
+        assert_eq!(posthog_key().as_deref(), Some("phc_env_override"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -780,6 +878,7 @@ mod tests {
         let _g = EnvGuard::new(OPT_VARS);
         let dir = std::env::temp_dir().join(format!("orx-tel-persist-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::set_var("CRUX_POSTHOG_KEY", TEST_KEY);
 
         // Nothing persisted → enabled.
         assert!(is_enabled(false));
@@ -935,13 +1034,14 @@ mod tests {
         let _g = EnvGuard::new(OPT_VARS);
         let dir = std::env::temp_dir().join(format!("orx-tel-shape-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::set_var("CRUX_POSTHOG_KEY", TEST_KEY);
         let payload = build_payload(
             "experiment_started",
             "test-distinct-id",
             json!({ "kind": "run", "local": false, "target": "modal" }),
         );
 
-        assert_eq!(payload["api_key"], POSTHOG_KEY);
+        assert_eq!(payload["api_key"], TEST_KEY);
         // The bare name is `cli_`-prefixed on the wire so CLI events are
         // separable from the website's events in this shared PostHog project.
         assert_eq!(payload["event"], "cli_experiment_started");
@@ -1107,6 +1207,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orx-tel-consent-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
         std::env::set_var("ORX_TELEMETRY_HOST", "http://127.0.0.1:9");
+        std::env::set_var("CRUX_POSTHOG_KEY", TEST_KEY);
 
         // Persist an opt-out; normal telemetry is now disabled.
         set_persisted_disabled(true).unwrap();
@@ -1147,6 +1248,7 @@ mod tests {
         let _g = EnvGuard::new(OPT_VARS);
         let dir = std::env::temp_dir().join(format!("orx-tel-corrupt-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::set_var("CRUX_POSTHOG_KEY", TEST_KEY);
 
         // Write a corrupt settings.json.
         let cfg = dir.join("openresearch");
@@ -1177,6 +1279,7 @@ mod tests {
         let _g = EnvGuard::new(OPT_VARS);
         let dir = std::env::temp_dir().join(format!("orx-tel-flush-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::set_var("CRUX_POSTHOG_KEY", TEST_KEY);
         // Dead endpoint: the send will fail fast; we only care about registration
         // and that flush_pending returns (bounded, never hangs).
         std::env::set_var("ORX_TELEMETRY_HOST", "http://127.0.0.1:9");

@@ -130,6 +130,9 @@ enum Command {
     /// Print CLI usage for agents, or fetch a skill doc.
     Skill(SkillArgs),
 
+    /// Print the path to the bundled idea evaluator (materializing it first).
+    Evaluator(EvaluatorArgs),
+
     /// Install the Crux skill into local coding agents (Claude Code, Codex, OpenCode, Cursor).
     #[command(name = "install-skills")]
     InstallSkills(InstallSkillsArgs),
@@ -670,9 +673,10 @@ pub struct ExpRunArgs {
     /// account, billed per second), `k8s` (a Job on your own Kubernetes
     /// cluster), `ssh` (a detached process on one of your own boxes), `slurm`
     /// (a batch job on your Slurm cluster, submitted via its login node),
-    /// `openresearch` (an ephemeral OpenResearch GPU/CPU box billed to your
-    /// org; needs `orx login`), or `local` (a detached process on this
-    /// machine). k8s, ssh, slurm, openresearch, and local are local
+    /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `openresearch`
+    /// (an ephemeral OpenResearch GPU/CPU box billed to your org; needs
+    /// `orx login`), or `local` (a detached process on this machine). k8s,
+    /// ssh, slurm, ray, openresearch, and local are local
     /// experiments only. orx submits the job and a detached supervisor
     /// mirrors status/logs back. Omitted on a local experiment: launches on
     /// the default compute target from `orx up` Settings → Compute, if set.
@@ -682,10 +686,12 @@ pub struct ExpRunArgs {
     /// h200, … With `--backend modal`: a Modal GPU (t4, l4, a10g, a100,
     /// a100-80gb, l40s, h100, h200, or e.g. h100:2) or cpu/cpu-large. With
     /// `--backend slurm`: a GPU request as a GRES spec (h100:2 → --gres=gpu:h100:2;
-    /// plain `gpu` → one GPU; omit for CPU-only). With `--backend openresearch`:
-    /// a GPU id from `orx compute` (h100_sxm, or h100_sxm:2 for two) or a CPU
-    /// flavor (cpu5c/cpu5g/cpu5m, or cpu5c:32 for the vCPU tier). Not used by
-    /// k8s (see --manifest) or ssh (see --host).
+    /// plain `gpu` → one GPU; omit for CPU-only). With `--backend ray`: optional
+    /// entrypoint resources (`cpu:2`, `gpu:1`, `gpu:1,mem:8GiB`; omit to reserve
+    /// nothing). With `--backend openresearch`: a GPU id from `orx compute`
+    /// (h100_sxm, or h100_sxm:2 for two) or a CPU flavor (cpu5c/cpu5g/cpu5m, or
+    /// cpu5c:32 for the vCPU tier). Not used by k8s (see --manifest) or ssh
+    /// (see --host).
     #[arg(long)]
     pub flavor: Option<String>,
     /// The org to bill the box to (with `--backend openresearch`). Omit when
@@ -715,6 +721,7 @@ pub struct ExpRunArgs {
     /// has no 4h default — unset falls back to the slurm settings, then the
     /// cluster's own limit. With `--backend openresearch` it bounds the run's
     /// wall clock on the box (the box itself is deleted when the run ends).
+    /// Not supported with `--backend ray` (Ray Jobs have no time limit).
     #[arg(long)]
     pub timeout: Option<String>,
     /// Launch even if the experiment's branch has no changes over its parent
@@ -775,6 +782,14 @@ pub struct SkillArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct EvaluatorArgs {
+    /// `path` (default) prints the evaluator directory. Anything else errors —
+    /// the subcommand exists so the skill can resolve the evaluator in one
+    /// shell expansion: `node "$(orx evaluator path)/evaluate.mjs" …`.
+    pub what: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct InstallSkillsArgs {
     /// Which agent(s) to install into: `claude`, `codex`, `opencode`, `cursor`,
     /// or `all`. Defaults to every agent already set up on this machine.
@@ -811,6 +826,15 @@ pub enum TelemetryCommand {
         /// Context value to persist (omit to show the current value).
         value: Option<String>,
         /// Clear the persisted context (the machine counts as human again).
+        #[arg(long, conflicts_with = "value")]
+        clear: bool,
+    },
+    /// Show or set this fork's PostHog project key. Crux ships no key, so
+    /// analytics stay off until one is set here (or via `CRUX_POSTHOG_KEY`).
+    Key {
+        /// Public, write-only `phc_` key to persist (omit to show the current one).
+        value: Option<String>,
+        /// Clear the persisted key (analytics go back to off).
         #[arg(long, conflicts_with = "value")]
         clear: bool,
     },
@@ -950,6 +974,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Agent(_) => "agent",
         Command::Report(_) => "report",
         Command::Skill(_) => "skill",
+        Command::Evaluator(_) => "evaluator",
         Command::InstallSkills(_) => "install-skills",
         Command::Lit(_) => "lit",
         Command::Paper(_) => "paper",
@@ -993,6 +1018,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Agent(args) => commands::agent::run(args).await,
         Command::Report(args) => commands::report::run(args).await,
         Command::Skill(args) => commands::skill::run(args).await,
+        Command::Evaluator(args) => commands::evaluator::run(args).await,
         Command::InstallSkills(args) => commands::install_skills::run(args).await,
         Command::Lit(args) => commands::lit::run(args).await,
         Command::Paper(args) => commands::paper::run(args).await,

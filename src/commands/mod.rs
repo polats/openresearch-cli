@@ -24,6 +24,7 @@ pub mod compute;
 pub mod create_experiment;
 pub mod create_project;
 pub mod env;
+pub mod evaluator;
 pub mod exp;
 pub mod experiments;
 pub mod explore;

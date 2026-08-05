@@ -12,6 +12,7 @@ import {
   type OptionChoice,
 } from "../api";
 import { renderNote } from "./agentNote";
+import { onHarnessAuth } from "../events";
 
 export interface ModelSelection {
   harness: HarnessId;
@@ -99,12 +100,21 @@ export function ModelPicker({
   const [filter, setFilter] = useState("");
 
   useEffect(() => {
-    getHarnesses()
-      .then((list) => {
-        setHarnesses(list);
-        onHarnesses?.(list);
-      })
-      .catch(() => {});
+    let mounted = true;
+    const load = (refresh = false) =>
+      getHarnesses(refresh)
+        .then((list) => {
+          if (!mounted) return;
+          setHarnesses(list);
+          onHarnesses?.(list);
+        })
+        .catch(() => {});
+    void load();
+    const unsubscribe = onHarnessAuth(() => void load(true));
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -115,9 +125,27 @@ export function ModelPicker({
       lockHarness && value ? harnesses.filter((h) => h.id === value.harness) : harnesses;
     return shown.map((h) => {
       let models = h.models;
-      if (q) models = models.filter((m) => m.id.toLowerCase().includes(q));
-      // opencode's long tail (openrouter etc.) stays behind the filter box.
-      else if (h.id === "opencode") models = models.slice(0, 6);
+      if (q) {
+        models = models.filter((m) => m.id.toLowerCase().includes(q));
+      } else if (h.id === "opencode") {
+        // opencode's catalog is huge and mostly gateway providers (openrouter,
+        // github-copilot, …) — keep the list short, but never let one signed-in
+        // provider's models crowd out another (e.g. opencode-go vs zen). Lead
+        // with the first model of each provider, then round out the rest.
+        const chosen: typeof models = [];
+        const seen = new Set<string>();
+        for (const m of h.models) {
+          const provider = m.id.split("/")[0] ?? m.id;
+          if (seen.has(provider)) continue;
+          seen.add(provider);
+          chosen.push(m);
+        }
+        for (const m of h.models) {
+          if (chosen.length >= 6) break;
+          if (!chosen.includes(m)) chosen.push(m);
+        }
+        models = chosen;
+      }
       return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
     });
   }, [harnesses, filter, lockHarness, value]);
@@ -185,9 +213,16 @@ export function ModelPicker({
           <div className="model-menu-list">
             {groups.map(({ harness, models, hidden }) => (
               <div key={harness.id}>
-                <div className="model-group">{harness.name}</div>
+                <div className="model-group">
+                  <span>{harness.name}</span>
+                  {!harness.agentReady && (
+                    <span className="model-group-status">
+                      <Lock size={10} /> Unavailable
+                    </span>
+                  )}
+                </div>
                 {!harness.agentReady ? (
-                  <div className="model-more">
+                  <div className="model-more model-unavailable">
                     {harness.agentNote ? renderNote(harness.agentNote) : "Not available"}
                   </div>
                 ) : (

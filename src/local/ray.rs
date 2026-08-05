@@ -1,24 +1,27 @@
-//! Local launch — the on-this-machine twin of `local/ssh.rs`: run the
-//! experiment as a detached process on the machine running orx. Same clone
-//! contract as every backend — the run clones the branch's GitHub tip into
-//! its own run dir, never the agent's worktree. The run row lives in the
-//! local store only; a detached `orx supervise` watches the process.
+//! Local Ray Jobs launch — submit via the Ray Jobs / Dashboard API, then
+//! detach `orx supervise` to poll status and mirror logs.
 
 use std::collections::HashMap;
 
 use crate::commands::exp::{hf_clone_script, spawn_detached_supervise};
 use crate::error::{anyhow, Result};
-use crate::jobs::{localbox, BackendDescriptor};
+use crate::jobs::ssh::sh_quote;
+use crate::jobs::{huggingface, ray, BackendDescriptor};
 use crate::local::git;
 use crate::store::{now_ms, Store, StoredRun};
 
-/// CLI wrapper around `submit_local_run`: submit, then print the summary.
-pub async fn launch_local_run(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = submit_local_run(args).await?;
+/// CLI wrapper: submit, then print the summary.
+pub async fn launch_local_ray(args: &crate::ExpRunArgs) -> Result<()> {
+    let run = submit_local_ray(args).await?;
     let backend = BackendDescriptor::parse(&run.backend_json)?;
-    println!("\u{2713} Local run started.");
-    println!("  dir  {}", backend.job_id.as_deref().unwrap_or(""));
-    println!("  run  {}", run.id);
+    println!("\u{2713} Ray job submitted.");
+    println!("  run    {}", run.id);
+    println!(
+        "  job    {} ({})",
+        backend.job_id.as_deref().unwrap_or(""),
+        backend.flavor.as_deref().unwrap_or("default")
+    );
+    println!("  watch  {}", backend.url.as_deref().unwrap_or(""));
     println!(
         "  Follow it with `orx exp wait {}` or `orx logs {}`.",
         run.experiment_id, run.id
@@ -26,27 +29,38 @@ pub async fn launch_local_run(args: &crate::ExpRunArgs) -> Result<()> {
     Ok(())
 }
 
-/// Submit the local experiment's run as a detached process on this machine
-/// and detach a supervisor. Requires `--backend local`; there is nothing else
-/// to pick — the hardware is whatever this machine has.
-pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
+/// Submit the local experiment's run as a Ray Job and detach a supervisor.
+pub async fn submit_local_ray(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     if args.sandbox.is_some() || args.gpu.is_some() || args.cpu.is_some() {
         return Err(anyhow!(
-            "--backend local runs on this machine; drop --gpu/--cpu/--sandbox — \
-             there is nothing to provision."
-        ));
-    }
-    if args.flavor.is_some() {
-        return Err(anyhow!(
-            "--backend local has no flavors — the hardware is whatever this machine has."
+            "--backend ray submits to your Ray cluster; drop --gpu/--cpu/--sandbox and \
+             ask for resources with --flavor (e.g. --flavor gpu:1)."
         ));
     }
     if args.image.is_some() {
         return Err(anyhow!(
-            "--image doesn't apply to --backend local — the run uses this machine's \
-             own environment."
+            "--image doesn't apply to --backend ray — the job runs in the cluster's \
+             runtime environment, not a per-job container."
         ));
     }
+    if args.host.is_some() {
+        return Err(anyhow!(
+            "--host only applies with --backend ssh/slurm. Set the Ray Jobs URL in \
+             Settings → Compute → Ray (or ASTROAI_RAY_JOBS_ADDRESS / RAY_DASHBOARD_URL)."
+        ));
+    }
+    if args.manifest.is_some() {
+        return Err(anyhow!("--manifest only applies with --backend k8s."));
+    }
+    if args.timeout.is_some() {
+        return Err(anyhow!(
+            "--timeout isn't supported on --backend ray — Ray Jobs have no time limit; \
+             the job runs until the command exits. Bound the run in the command itself."
+        ));
+    }
+
+    let resources = ray::parse_flavor(args.flavor.as_deref())?;
+    let address = ray::resolve_address(None);
 
     let store = Store::open()?;
     let exp = store
@@ -71,25 +85,15 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
             )
         })?;
 
-    let kind = match args.kind.as_deref() {
-        None | Some("job") => "job",
-        Some("sim") => "sim",
-        Some(other) => return Err(anyhow!("Unknown run kind '{other}'. Supported: job, sim.")),
-    };
-
-    // One run in flight per experiment AND kind unless deliberately forced —
-    // per-kind because a sim alongside a play build is the normal loop, and
-    // the guard exists to stop accidental duplicates, not concurrency.
     if !args.force {
         if let Some(r) = store
             .list_runs_by_experiment(&exp.id)?
             .into_iter()
-            .find(|r| !crate::local::is_terminal(&r.status) && r.kind == kind)
+            .find(|r| !crate::local::is_terminal(&r.status))
         {
             return Err(anyhow!(
-                "A {} run ({}) is already in flight for this experiment ({}). \
+                "Run {} is already in flight for this experiment ({}). \
                  Cancel it with `orx exp cancel {}` or pass --force to launch anyway.",
-                r.kind,
                 r.id,
                 r.status,
                 exp.id
@@ -97,8 +101,15 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         }
     }
 
-    // Same clone contract as every backend: the run clones from GitHub, so
-    // the branch tip must exist there.
+    // Reachability check before we touch git / allocate a run id.
+    ray::preflight(&address).await.map_err(|e| {
+        anyhow!(
+            "{e}\n\
+             Set the Jobs URL in Settings → Compute → Ray, or export \
+             ASTROAI_RAY_JOBS_ADDRESS / RAY_DASHBOARD_URL."
+        )
+    })?;
+
     let commit_sha = {
         let (owner, repo, baseline, branch) = (
             project.github_owner.clone(),
@@ -118,61 +129,52 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     };
 
     let run_id = uuid::Uuid::new_v4().to_string();
+    // Ray submission ids: letters, digits, dashes, underscores.
+    let submission_id = format!("orx-{}", run_id.replace('-', ""));
     let script = hf_clone_script(
         &exp.branch_name,
         &project.github_owner,
         &project.github_repo,
         &run_command,
     );
-
-    // The run's env: everything the user synced (API keys), plus the tokens
-    // the clone script expects. Exported inside run.sh (written owner-only).
+    // The job env: everything the user synced (API keys), plus the tokens the
+    // clone step expects. Ray renders runtime_env in its dashboard, but anyone
+    // with dashboard access can submit jobs anyway — same trust boundary.
     let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
-    if let Ok(hf_token) = crate::jobs::huggingface::resolve_token() {
+    if let Ok(hf_token) = huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
     if let Some(gh) = git::resolve_github_token() {
+        // Overrides any synced GITHUB_TOKEN: the clone URL embeds exactly this
+        // variable, and it must be the token the branch was pushed with.
         env.insert("GITHUB_TOKEN".to_string(), gh);
     }
-    // The metrics/artifacts contract (all kinds, sims especially): anything
-    // written to $ORX_ARTIFACTS_DIR becomes the run's gallery; a JSON doc at
-    // $ORX_METRICS_PATH is ingested onto the run when it finishes.
-    let artifacts_dir = crate::store::run_artifacts_dir(&run_id);
-    std::fs::create_dir_all(&artifacts_dir)
-        .map_err(|e| anyhow!("Could not create {}: {}", artifacts_dir.display(), e))?;
-    env.insert(
-        "ORX_ARTIFACTS_DIR".to_string(),
-        artifacts_dir.to_string_lossy().into_owned(),
-    );
-    env.insert(
-        "ORX_METRICS_PATH".to_string(),
-        crate::store::run_metrics_path(&run_id)
-            .to_string_lossy()
-            .into_owned(),
-    );
-    // Sim runs score an idea with the bundled evaluator, which lives in the
-    // binary rather than the project repo — a run command reaches it through
-    // this var (`node "$ORX_EVALUATOR_DIR/evaluate.mjs" …`).
-    if let Ok(evaluator) = crate::local::evaluator::ensure() {
-        env.insert(
-            crate::local::evaluator::EVALUATOR_DIR_ENV.to_string(),
-            evaluator.to_string_lossy().into_owned(),
-        );
-    }
+    let mut metadata = HashMap::new();
+    metadata.insert("or_run".to_string(), run_id.clone());
+    metadata.insert("or_experiment".to_string(), exp.id.clone());
+    metadata.insert("or_project".to_string(), project.id.clone());
 
-    let dir = localbox::run_job(&localbox::LocalJobSpec {
-        run_id: run_id.clone(),
-        script,
-        env,
-    })?;
+    ray::run_job(
+        &address,
+        &ray::JobSubmission {
+            entrypoint: format!("bash -c {}", sh_quote(&script)),
+            submission_id: submission_id.clone(),
+            resources,
+            env,
+            metadata,
+        },
+    )
+    .await?;
+
+    let watch = ray::job_url(&address, &submission_id);
 
     let descriptor = BackendDescriptor {
-        kind: "local_job".to_string(),
-        namespace: None,
-        job_id: Some(dir.to_string_lossy().into_owned()),
-        flavor: None,
+        kind: "ray_job".to_string(),
+        namespace: Some(address.clone()),
+        job_id: Some(submission_id),
+        flavor: args.flavor.clone(),
         image: None,
-        url: None,
+        url: Some(watch),
         context: None,
         manifest: None,
         resources: None,
@@ -196,7 +198,7 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         result_markdown: None,
         cancel_requested: false,
         supervisor_heartbeat_ms: None,
-        kind: kind.to_string(),
+        kind: "job".to_string(),
         metrics_json: None,
         verdict: None,
         verdict_notes: None,

@@ -74,6 +74,7 @@ import {
   type ModelSelection,
 } from "./ModelPicker";
 import { ContextMeter } from "./ContextMeter";
+import { renderNote } from "./agentNote";
 
 const SELECTION_STORAGE_KEY = "orx:agent-selection";
 
@@ -984,9 +985,17 @@ function ProposalCard({
   const ready = harnesses.filter((h) => h.agentReady);
   const models = ready.find((h) => h.id === harness)?.models ?? [];
   // A suggested model that isn't valid for the chosen provider (e.g. gpt-5.1 on
-  // Codex) reads as — and is sent as — the harness default, so what's shown
-  // matches what spawns. Empty string = default.
+  // Codex, or a stale `claude-opus-5` against the CLI's live catalog) reads as —
+  // and is sent as — the harness default, so what's shown matches what spawns.
+  // Empty string = default, and it is sent *explicitly*: omitting the field
+  // makes the server fall back to the proposal's own suggestion, which is the
+  // stale value this line exists to drop.
   const effectiveModel = models.some((m) => m.id === model) ? model : "";
+  // Whether we're dropping a model the agent asked for. Worth saying out loud:
+  // the human is approving a dispatch, and "the model you were shown is not the
+  // one the agent named" is exactly the kind of silent substitution that makes a
+  // run hard to explain afterwards.
+  const droppedModel = model && !models.some((m) => m.id === model) ? model : null;
 
   async function act(fn: () => Promise<unknown>) {
     setBusy(true);
@@ -1056,6 +1065,13 @@ function ProposalCard({
           </label>
         </div>
       )}
+      {droppedModel && (
+        <div className="proposal-why">
+          {personaMeta(persona || "research").label} was suggested on{" "}
+          <code>{droppedModel}</code>, which this provider doesn&apos;t offer — it will
+          run on the provider default unless you pick a model.
+        </div>
+      )}
       {err && <div className="proposal-err">{err}</div>}
       <div className="proposal-actions">
         <button
@@ -1066,7 +1082,8 @@ function ProposalCard({
               approveProposal(proposal.id, {
                 persona: persona || undefined,
                 harness: harness || undefined,
-                model: effectiveModel || undefined,
+                // Always sent, empty included — see `effectiveModel`.
+                model: effectiveModel,
               }),
             )
           }
@@ -1966,6 +1983,7 @@ export function ChatPanel({
       return;
     }
     if (busy) return;
+    if (!activeHarness?.agentReady) return;
     // `composerSelection` already resolves to the open session's settings (+ any
     // unsent tweak) or, for a new session, the global preference.
     const effective = composerSelection;
@@ -2535,6 +2553,12 @@ export function ChatPanel({
           />
         )}
         <div className="composer-box" data-onboarding="composer">
+          {activeHarness && !activeHarness.agentReady && (
+            <div className="composer-harness-warning">
+              <strong>{activeHarness.name} is unavailable.</strong>{" "}
+              {activeHarness.agentNote ? renderNote(activeHarness.agentNote) : "Re-check its setup."}
+            </div>
+          )}
           {skillMenuOpen && (
             <SkillMenu
               skills={skillMatches}
@@ -2588,7 +2612,9 @@ export function ChatPanel({
                       ? `[paper — optional, defaults to ${paperId}] on [compute]`
                       : pickedSkill.argHint
                     : composerSelection
-                      ? `Message ${HARNESS_LABELS[composerSelection.harness]}… ( / for skills)`
+                      ? activeHarness?.agentReady
+                        ? `Message ${HARNESS_LABELS[composerSelection.harness]}… ( / for skills)`
+                        : `${HARNESS_LABELS[composerSelection.harness]} is unavailable — open the model picker`
                       : "Ask the research agent… ( / for skills)"
               }
               rows={2}
@@ -2671,7 +2697,7 @@ export function ChatPanel({
           <div className="composer-actions">
             {/* Bottom-left: permission mode. */}
             <OptionPicker
-              choices={opts?.permissionModes ?? []}
+              choices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
               value={composerSelection?.permissionMode ?? null}
               defaultId={opts?.defaultPermissionMode ?? null}
               header="Mode"
@@ -2713,7 +2739,7 @@ export function ChatPanel({
               lockHarness={!!openSession}
             />
             <OptionPicker
-              choices={reasoning.choices}
+              choices={activeHarness?.agentReady ? reasoning.choices : []}
               value={composerSelection?.reasoningLevel ?? null}
               defaultId={reasoning.defaultId}
               header="Reasoning"
@@ -2738,7 +2764,10 @@ export function ChatPanel({
                 title="Send"
                 aria-label="Send"
                 onClick={() => void send()}
-                disabled={!pickedSkill && !draft.trim() && attachments.length === 0}
+                disabled={
+                  !activeHarness?.agentReady ||
+                  (!pickedSkill && !draft.trim() && attachments.length === 0)
+                }
               >
                 <CornerDownLeft size={16} />
               </button>

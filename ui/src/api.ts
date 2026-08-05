@@ -320,7 +320,7 @@ export const startRun = (
   body: {
     /** Omit to launch on the default compute target (Settings → Compute);
      * with no default set the server falls back to `hf`. */
-    backend?: "local" | "hf" | "modal" | "k8s" | "ssh" | "slurm" | "openresearch";
+    backend?: "local" | "hf" | "modal" | "k8s" | "ssh" | "slurm" | "ray" | "openresearch";
     flavor?: string;
     manifest?: string;
     timeout?: string;
@@ -703,6 +703,34 @@ export interface SlurmPreflight {
 export const slurmPreflight = (host: string) =>
   post<SlurmPreflight>("/api/settings/slurm/preflight", { host });
 
+// --- settings: ray ------------------------------------------------------------
+
+export interface RaySettings {
+  /** Saved Jobs / Dashboard URL; null = fall back to env / localhost. */
+  address: string | null;
+  /** Effective address after settings → env → default resolution. */
+  resolvedAddress: string;
+  /** settings | ASTROAI_RAY_JOBS_ADDRESS | RAY_DASHBOARD_URL | default */
+  source: string;
+}
+
+export const getRaySettings = () => get<RaySettings>("/api/settings/ray");
+
+/** Empty string clears the saved address (fall back to env / default). */
+export const saveRaySettings = (body: { address?: string }) =>
+  post<RaySettings>("/api/settings/ray", body);
+
+export interface RayPreflight {
+  reachable: boolean;
+  address: string;
+  rayVersion: string | null;
+  error: string | null;
+}
+
+/** Live-test a Ray Jobs / Dashboard endpoint. */
+export const rayPreflight = (address?: string) =>
+  post<RayPreflight>("/api/settings/ray/preflight", { address: address ?? null });
+
 // --- settings: compute targets (unified list + default) ------------------------
 
 export type ComputeTargetId =
@@ -712,6 +740,7 @@ export type ComputeTargetId =
   | "k8s"
   | "ssh"
   | "slurm"
+  | "ray"
   | "openresearch";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
@@ -1018,6 +1047,7 @@ export interface Harness {
   binPath?: string;
   version?: string;
   authenticated: boolean;
+  authState: "ready" | "needsLogin" | "unknown" | "unsupported";
   authMethod?: "oauth" | "apiKey";
   account?: string;
   org?: string;
@@ -1029,10 +1059,13 @@ export interface Harness {
   usage?: HarnessUsage;
 }
 
-export const getHarnesses = (refresh = false) =>
-  get<{ harnesses: Harness[] }>(`/api/harnesses${refresh ? "?refresh=1" : ""}`).then(
-    (r) => r.harnesses,
-  );
+export const getHarnesses = (refresh = false, retryRejected = false) => {
+  const params = new URLSearchParams();
+  if (refresh) params.set("refresh", "1");
+  if (retryRejected) params.set("retry", "1");
+  const query = params.size > 0 ? `?${params.toString()}` : "";
+  return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`).then((r) => r.harnesses);
+};
 
 /** Slash-skill offered in the composer's `/` dropdown; expanded server-side. */
 export interface SkillInfo {
@@ -1319,6 +1352,8 @@ export function backendDetail(backend: Run["backend"]): string {
   if (!backend) return "";
   if (typeof backend.flavor === "string" && backend.flavor) return backend.flavor;
   if (typeof backend.manifest === "string" && backend.manifest) return backend.manifest;
+  // Ray's namespace is the whole Jobs URL — too long for a badge.
+  if (backendKind(backend) === "ray_job") return "";
   if (typeof backend.namespace === "string" && backend.namespace) return backend.namespace;
   return "";
 }

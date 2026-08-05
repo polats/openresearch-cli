@@ -49,6 +49,10 @@ const WHOLE_VERB_READS: &[&str] = &[
     "lit",
     "paper",
     "skill",
+    // Only verb is `path`: materializes the bundled evaluator under the data dir
+    // and prints it. Touches nothing in the repo, so plan mode may resolve the
+    // rubric without an approval round-trip.
+    "evaluator",
     "version",
 ];
 
