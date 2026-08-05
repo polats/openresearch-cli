@@ -1,9 +1,17 @@
 [package]
 name = "openresearch-cli"
-version = "0.1.89"
+# Crux versions on its own 1.x line, deliberately above upstream's 0.1.x.
+#
+# Upstream's version travels in `Cargo.toml`, so every sync tranche used to drag
+# its bump along — and `release-on-bump.yml` reads any unreleased version on
+# main as "release this", which is how a cherry-picked 0.1.87 → 0.1.89 once
+# dispatched a release nobody asked for. Sitting above 0.1.x makes that
+# self-correcting: an inherited 0.1.9x is now a *backwards* move, which CI's
+# version-guard rejects outright. Take upstream's code, never its version.
+version = "1.0.0"
 edition = "2021"
 description = "Crux — from a game idea to a validated, playable prototype (crux)"
-repository = "https://github.com/alphaXiv/openresearch-cli"
+repository = "https://github.com/trinity-asylum/crux"
 license = "MIT"
 default-run = "crux"
 

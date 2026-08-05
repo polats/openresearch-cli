@@ -27,8 +27,18 @@ use std::time::Duration;
 use crate::error::{anyhow, Result};
 use crate::updates;
 
-const INSTALL_HINT: &str = "curl --proto '=https' --tlsv1.2 -LsSf \
-https://github.com/alphaXiv/openresearch-cli/releases/latest/download/openresearch-cli-installer.sh | sh";
+/// Shown when the binary isn't installer-managed. Built from [`updates::REPO_URL`]
+/// rather than written out, because a literal URL here once pointed at upstream
+/// and would have installed `orx` over the user's `crux` — the same inherited
+/// mistake as `REPO_URL` itself. Deriving it means the fork's repo is stated in
+/// exactly one place.
+fn install_hint() -> String {
+    format!(
+        "curl --proto '=https' --tlsv1.2 -LsSf {}/releases/latest/download/{}-installer.sh | sh",
+        updates::REPO_URL,
+        updates::APP_NAME
+    )
+}
 
 pub async fn run(args: crate::UpdateArgs) -> Result<()> {
     if std::env::var("OPENRESEARCH_CLI_DISABLE_UPDATE").as_deref() == Ok("1") {
@@ -82,7 +92,7 @@ pub async fn run(args: crate::UpdateArgs) -> Result<()> {
              - cargo: cargo install --path . (or your original cargo install invocation)\n\
              - or reinstall with the installer: {}",
             updates::receipt_path().display(),
-            INSTALL_HINT
+            install_hint()
         ));
     };
 
