@@ -3950,7 +3950,9 @@ fn proposal_json(p: &crate::store::StoredAgentProposal) -> serde_json::Value {
 
 async fn list_proposals(Path(id): Path<String>) -> ApiResult {
     let store = Store::open()?;
-    store.get_local_project(&id)?.ok_or_else(|| not_found("project"))?;
+    store
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
     let props: Vec<serde_json::Value> = store
         .list_agent_proposals(&id)?
         .iter()
@@ -4612,9 +4614,15 @@ mod tests {
     #[test]
     fn an_explicit_default_does_not_fall_back_to_the_suggestion() {
         // Card resolved the stale suggestion to the provider default.
-        assert_eq!(resolve_dispatch_model(Some(""), Some("claude-opus-5")), None);
+        assert_eq!(
+            resolve_dispatch_model(Some(""), Some("claude-opus-5")),
+            None
+        );
         // Whitespace is the same intent, not a model named " ".
-        assert_eq!(resolve_dispatch_model(Some("   "), Some("claude-opus-5")), None);
+        assert_eq!(
+            resolve_dispatch_model(Some("   "), Some("claude-opus-5")),
+            None
+        );
         // No override at all → the orchestrator's suggestion still stands.
         assert_eq!(
             resolve_dispatch_model(None, Some("claude-opus-5")).as_deref(),
