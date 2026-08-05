@@ -166,6 +166,9 @@ enum Command {
     /// Turn anonymous usage analytics on or off, or show current status.
     Telemetry(TelemetryArgs),
 
+    /// Connect to Scenario (AI asset generation) and inspect its MCP tools.
+    Scenario(ScenarioArgs),
+
     /// Internal: the Claude plan-mode `PreToolUse` hook body. Reads the hook
     /// payload on stdin and prints an allow decision for read-only `orx`
     /// inspection; not a user command.
@@ -806,6 +809,38 @@ pub struct InstallSkillsArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct ScenarioArgs {
+    #[command(subcommand)]
+    pub command: ScenarioCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ScenarioCommand {
+    /// Sign in to Scenario in your browser (one time per machine).
+    Connect,
+    /// Show whether Scenario is connected, and whether the login still works.
+    Status,
+    /// Forget the stored Scenario login.
+    Disconnect,
+    /// List the tools the connected Scenario workspace offers.
+    Tools {
+        /// Emit the full tool definitions, including input schemas, as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Only show tools whose name or description contains this text.
+        #[arg(long)]
+        filter: Option<String>,
+    },
+    /// Call one Scenario tool and print its raw result (for discovery).
+    Call {
+        /// Tool name, as listed by `crux scenario tools`.
+        name: String,
+        /// Arguments as a JSON object, e.g. '{"query":"knight"}'.
+        args: Option<String>,
+    },
+}
+
+#[derive(Args, Debug)]
 pub struct TelemetryArgs {
     #[command(subcommand)]
     pub command: TelemetryCommand,
@@ -984,6 +1019,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Supervise(_) => "supervise",
         Command::Up(_) => "up",
         Command::Telemetry(_) => "telemetry",
+        Command::Scenario(_) => "scenario",
         Command::PlanGate => "plan-gate",
         Command::McpGate => "mcp-gate",
     }
@@ -1031,6 +1067,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
             None => commands::up::run(args).await,
         },
         Command::Telemetry(args) => commands::telemetry::run(args).await,
+        Command::Scenario(args) => commands::scenario::run(args).await,
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
         Command::McpGate => commands::mcp_gate::run().await,

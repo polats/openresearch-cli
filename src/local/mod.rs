@@ -32,6 +32,7 @@ pub mod play;
 pub mod projects;
 pub mod ray;
 pub mod resolve;
+pub mod scenario;
 pub mod skills;
 pub mod slurm;
 pub mod ssh;
