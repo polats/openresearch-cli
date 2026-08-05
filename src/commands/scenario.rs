@@ -43,6 +43,22 @@ async fn connect() -> Result<()> {
 async fn status() -> Result<()> {
     if !scenario::is_connected() {
         println!("Scenario: not connected");
+        // Report discovery too: "not connected" and "can't connect" look the
+        // same from here, and only the second is a problem to fix.
+        match scenario::auth::discover().await {
+            Ok(d) => {
+                println!("  OAuth endpoints discovered ({}):", d.source);
+                println!("    authorize:    {}", d.authorize);
+                println!("    token:        {}", d.token);
+                match d.registration.as_deref() {
+                    Some(url) => println!("    registration: {url}"),
+                    // Without it there is no client to register, and Crux
+                    // registers dynamically rather than shipping a client id.
+                    None => println!("    registration: (none advertised — login cannot work)"),
+                }
+            }
+            Err(e) => println!("  Cannot discover Scenario's OAuth endpoints: {e}"),
+        }
         println!("  Run `crux scenario connect` to sign in with your Scenario account.");
         return Ok(());
     }

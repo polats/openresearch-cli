@@ -143,6 +143,36 @@ fn write_credentials(credentials: &StoredCredentials) -> Result<()> {
     Ok(())
 }
 
+/// What discovery found, for `crux scenario status`.
+///
+/// Worth surfacing separately from "connected": a reachable-but-unauthenticated
+/// state and a broken-discovery state look identical from the outside, and only
+/// the second one means the login *can't* work. Checking it costs one request and
+/// needs no credentials.
+pub(crate) struct Discovery {
+    pub authorize: String,
+    pub token: String,
+    pub registration: Option<String>,
+    pub source: String,
+}
+
+/// Probe Scenario's OAuth metadata without touching stored credentials.
+pub(crate) async fn discover() -> Result<Discovery> {
+    let manager = AuthorizationManager::new(MCP_URL)
+        .await
+        .map_err(|e| anyhow!("cannot reach {MCP_URL}: {e}"))?;
+    let resolved = manager
+        .resolve_metadata()
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    Ok(Discovery {
+        authorize: resolved.metadata.authorization_endpoint.clone(),
+        token: resolved.metadata.token_endpoint.clone(),
+        registration: resolved.metadata.registration_endpoint.clone(),
+        source: format!("{:?}", resolved.source),
+    })
+}
+
 /// True when a token file exists and parses. Cheap enough for a status probe —
 /// it says nothing about whether the token still works, only that a login was
 /// completed at some point.
@@ -171,6 +201,36 @@ pub(crate) async fn manager() -> Result<(AuthorizationManager, bool)> {
     let mut manager = AuthorizationManager::new(MCP_URL)
         .await
         .map_err(|e| anyhow!("cannot reach Scenario's authorization metadata: {e}"))?;
+
+    // `new` only builds the manager — it discovers nothing. Without an explicit
+    // resolve+set, `metadata` stays `None` and `register_client` fails with the
+    // unhelpful "No authorization support detected".
+    //
+    // Scenario resolves via RFC 9728 protected-resource metadata: an
+    // unauthenticated request answers 401 with
+    // `WWW-Authenticate: Bearer resource_metadata="/.well-known/oauth-protected-resource/mcp"`,
+    // and that document names Clerk as the authorization server. Note the
+    // suffixed path — the unsuffixed `/.well-known/oauth-protected-resource`
+    // serves the marketing site's HTML with a 404, so a hand-rolled probe of the
+    // obvious URL would conclude there's no OAuth support at all.
+    let resolved = manager
+        .resolve_metadata()
+        .await
+        .map_err(|e| anyhow!("cannot discover Scenario's OAuth endpoints: {e}"))?;
+
+    // `resolve_metadata` never fails outright: when nothing is discoverable it
+    // synthesizes `/authorize`, `/token`, `/register` off the base URL for
+    // pre-2025-06 servers. Accepting that here would send a login to endpoints
+    // Scenario never advertised and fail later with something far less legible,
+    // so treat the fallback as the error it is.
+    if !resolved.source.is_discovered() {
+        return Err(anyhow!(
+            "Scenario published no OAuth metadata at {MCP_URL} — endpoints would have to be \
+             guessed, so refusing. The service may be down or its discovery paths may have moved."
+        ));
+    }
+    manager.set_metadata(resolved.metadata);
+
     manager.set_credential_store(FileCredentialStore);
     let restored = manager
         .initialize_from_store()
