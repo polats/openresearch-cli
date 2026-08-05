@@ -904,14 +904,20 @@ fn codex_usage_debug(method: &str, params: &Value) {
     }
     use std::io::Write;
     let path = crate::store::data_dir().join("codex-usage-debug.log");
-    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
         return;
     };
     let _ = writeln!(f, "NOTIF {method}");
     let blob = params.to_string().to_lowercase();
-    if ["rate", "limit", "usage", "token", "credit", "percent", "window"]
-        .iter()
-        .any(|k| blob.contains(k))
+    if [
+        "rate", "limit", "usage", "token", "credit", "percent", "window",
+    ]
+    .iter()
+    .any(|k| blob.contains(k))
     {
         let _ = writeln!(
             f,
@@ -944,7 +950,11 @@ fn codex_windows(snap: &Value) -> Vec<UsageWindow> {
             let used = num(w, &["usedPercent", "used_percent"])?;
             let mins = num(
                 w,
-                &["windowDurationMins", "window_minutes", "window_duration_mins"],
+                &[
+                    "windowDurationMins",
+                    "window_minutes",
+                    "window_duration_mins",
+                ],
             );
             let resets_at_ms = num(w, &["resetsAt", "resets_at"])
                 .map(|s| (s * 1000.0) as i64)

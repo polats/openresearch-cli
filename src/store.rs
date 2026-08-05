@@ -1538,7 +1538,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
     /// kind survives the upsert, metrics/verdict setters round-trip, and both
     /// bump updated_at (the SSE diff keys on it); clearing a verdict nulls
     /// verdict_at.
@@ -1645,16 +1644,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.get_chat_session("chat_g").unwrap().unwrap().persona.as_deref(),
+            store
+                .get_chat_session("chat_g")
+                .unwrap()
+                .unwrap()
+                .persona
+                .as_deref(),
             Some("game-designer"),
         );
         assert_eq!(
-            store.get_chat_session("chat_none").unwrap().unwrap().persona,
+            store
+                .get_chat_session("chat_none")
+                .unwrap()
+                .unwrap()
+                .persona,
             None,
         );
         // Survives the list path (uses the same column list) too.
         let listed = store.list_chat_sessions_by_project("p1").unwrap();
-        assert!(listed.iter().any(|s| s.id == "chat_g" && s.persona.as_deref() == Some("game-designer")));
+        assert!(listed
+            .iter()
+            .any(|s| s.id == "chat_g" && s.persona.as_deref() == Some("game-designer")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

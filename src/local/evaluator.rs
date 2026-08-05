@@ -125,7 +125,10 @@ mod tests {
             .find(|(rel, _)| *rel == "eval-data.mjs")
             .expect("eval-data.mjs bundled");
         assert!(data.contains("SIGNAL_DEFINITIONS_MD"), "signal definitions");
-        assert!(data.contains("ARCHETYPE_REFERENCE_MD"), "archetype reference");
+        assert!(
+            data.contains("ARCHETYPE_REFERENCE_MD"),
+            "archetype reference"
+        );
         assert!(data.contains("GAME_SIGNAL_PROFILES"), "game profiles");
         // Spot-check both ends of the signal list — the first and the one the
         // coding rules call out as always-Unresolved.

@@ -179,21 +179,66 @@ const PRODUCE: &str = include_str!("../../agent-skills/orx-produce/SKILL.md");
 /// Each entry is (relative path under `starter/`, file contents). Keep in sync
 /// with the on-disk `agent-skills/orx-game-polish/starter/` tree.
 const GAME_STARTER_FILES: &[(&str, &str)] = &[
-    ("package.json", include_str!("../../agent-skills/orx-game-polish/starter/package.json")),
-    ("vite.config.ts", include_str!("../../agent-skills/orx-game-polish/starter/vite.config.ts")),
-    ("tsconfig.json", include_str!("../../agent-skills/orx-game-polish/starter/tsconfig.json")),
-    ("index.html", include_str!("../../agent-skills/orx-game-polish/starter/index.html")),
-    ("README.md", include_str!("../../agent-skills/orx-game-polish/starter/README.md")),
-    ("src/style/tokens.css", include_str!("../../agent-skills/orx-game-polish/starter/src/style/tokens.css")),
-    ("src/style/ui.css", include_str!("../../agent-skills/orx-game-polish/starter/src/style/ui.css")),
-    ("src/core/engine.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/engine.ts")),
-    ("src/core/juice.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/juice.ts")),
-    ("src/core/toon.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/toon.ts")),
-    ("src/core/audio.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/audio.ts")),
-    ("src/core/sketchify.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/sketchify.ts")),
-    ("src/core/icons.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/core/icons.ts")),
-    ("src/ui/hud.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/ui/hud.ts")),
-    ("src/main.ts", include_str!("../../agent-skills/orx-game-polish/starter/src/main.ts")),
+    (
+        "package.json",
+        include_str!("../../agent-skills/orx-game-polish/starter/package.json"),
+    ),
+    (
+        "vite.config.ts",
+        include_str!("../../agent-skills/orx-game-polish/starter/vite.config.ts"),
+    ),
+    (
+        "tsconfig.json",
+        include_str!("../../agent-skills/orx-game-polish/starter/tsconfig.json"),
+    ),
+    (
+        "index.html",
+        include_str!("../../agent-skills/orx-game-polish/starter/index.html"),
+    ),
+    (
+        "README.md",
+        include_str!("../../agent-skills/orx-game-polish/starter/README.md"),
+    ),
+    (
+        "src/style/tokens.css",
+        include_str!("../../agent-skills/orx-game-polish/starter/src/style/tokens.css"),
+    ),
+    (
+        "src/style/ui.css",
+        include_str!("../../agent-skills/orx-game-polish/starter/src/style/ui.css"),
+    ),
+    (
+        "src/core/engine.ts",
+        include_str!("../../agent-skills/orx-game-polish/starter/src/core/engine.ts"),
+    ),
+    (
+        "src/core/juice.ts",
+        include_str!("../../agent-skills/orx-game-polish/starter/src/core/juice.ts"),
+    ),
+    (
+        "src/core/toon.ts",
+        include_str!("../../agent-skills/orx-game-polish/starter/src/core/toon.ts"),
+    ),
+    (
+        "src/core/audio.ts",
+        include_str!("../../agent-skills/orx-game-polish/starter/src/core/audio.ts"),
+    ),
+    (
+        "src/core/sketchify.ts",
+        include_str!("../../agent-skills/orx-game-polish/starter/src/core/sketchify.ts"),
+    ),
+    (
+        "src/core/icons.ts",
+        include_str!("../../agent-skills/orx-game-polish/starter/src/core/icons.ts"),
+    ),
+    (
+        "src/ui/hud.ts",
+        include_str!("../../agent-skills/orx-game-polish/starter/src/ui/hud.ts"),
+    ),
+    (
+        "src/main.ts",
+        include_str!("../../agent-skills/orx-game-polish/starter/src/main.ts"),
+    ),
 ];
 
 // Descriptions are the *trigger surface*: what the module covers plus explicit,

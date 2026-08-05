@@ -2215,10 +2215,7 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
     // Best-effort: a write failure must not stop the turn — the skill's
     // `orx evaluator path` fallback reports the real error.
     if let Ok(dir) = crate::local::evaluator::ensure() {
-        cmd.env(
-            crate::local::evaluator::EVALUATOR_DIR_ENV,
-            dir.as_os_str(),
-        );
+        cmd.env(crate::local::evaluator::EVALUATOR_DIR_ENV, dir.as_os_str());
     }
 }
 
