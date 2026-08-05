@@ -115,9 +115,27 @@ export function ModelPicker({
       lockHarness && value ? harnesses.filter((h) => h.id === value.harness) : harnesses;
     return shown.map((h) => {
       let models = h.models;
-      if (q) models = models.filter((m) => m.id.toLowerCase().includes(q));
-      // opencode's long tail (openrouter etc.) stays behind the filter box.
-      else if (h.id === "opencode") models = models.slice(0, 6);
+      if (q) {
+        models = models.filter((m) => m.id.toLowerCase().includes(q));
+      } else if (h.id === "opencode") {
+        // opencode's catalog is huge and mostly gateway providers (openrouter,
+        // github-copilot, …) — keep the list short, but never let one signed-in
+        // provider's models crowd out another (e.g. opencode-go vs zen). Lead
+        // with the first model of each provider, then round out the rest.
+        const chosen: typeof models = [];
+        const seen = new Set<string>();
+        for (const m of h.models) {
+          const provider = m.id.split("/")[0] ?? m.id;
+          if (seen.has(provider)) continue;
+          seen.add(provider);
+          chosen.push(m);
+        }
+        for (const m of h.models) {
+          if (chosen.length >= 6) break;
+          if (!chosen.includes(m)) chosen.push(m);
+        }
+        models = chosen;
+      }
       return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
     });
   }, [harnesses, filter, lockHarness, value]);

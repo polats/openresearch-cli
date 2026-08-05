@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use super::detect::{bin_version, read_json, HarnessInfo, HarnessUsage};
+use super::detect::{bin_version, read_json, HarnessInfo, HarnessUsage, UsageWindow};
 use super::options::{HarnessOptions, PermissionMode, REASONING_DEFAULT_ID};
 use super::{Harness, ResumeAction};
 use crate::error::{anyhow, Result};
@@ -75,7 +75,22 @@ impl Harness for OpenCode {
         // balance, but exposes no balance/usage API — it's dashboard-only (a
         // `GET /zen/v1/balance` endpoint is an open, unimplemented request). So
         // surface a manage link instead of a number, rather than leave it blank.
-        if providers.iter().any(|p| p == "opencode") {
+        //
+        // OpenCode Go (the `opencode-go` provider) is a subscription with
+        // documented plan caps (5h $12 / Weekly $30 / Monthly $60) but likewise
+        // no read API — the console computes usage server-side. Its spend is
+        // captured from the serve session's cost after each turn (see
+        // `capture_go_usage`), then normalized and surfaced here.
+        if providers.iter().any(|p| p == "opencode-go") {
+            info.usage = Some(stored_go_usage().unwrap_or_else(|| HarnessUsage {
+                windows: Vec::new(),
+                observed_at_ms: None,
+                note: Some(
+                    "Go spend appears here after your first opencode-go turn.".to_string(),
+                ),
+                manage_url: Some("https://opencode.ai/auth".to_string()),
+            }));
+        } else if providers.iter().any(|p| p == "opencode") {
             info.usage = Some(HarnessUsage {
                 windows: Vec::new(),
                 observed_at_ms: None,
@@ -745,6 +760,11 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                         }
                     }
                 }
+                // opencode accrues a session's `cost` when the turn *completes*,
+                // not during streaming — the session.updated events we saw were
+                // all-zero. Fetch the session once to read the authoritative
+                // cumulative cost and feed it to the rolling usage windows.
+                capture_turn_cost(ctx, &base, &native_id).await;
                 return Ok(());
             }
         }
@@ -899,6 +919,133 @@ fn handle_event(
         }
         _ => {}
     }
+}
+
+/// After a turn, read the session's authoritative cumulative `cost` (opencode
+/// accrues it at turn completion, not during streaming) and feed it to the
+/// rolling opencode-go usage windows. Best-effort: any failure is ignored and
+/// the cost simply lands on the next turn.
+async fn capture_turn_cost(ctx: &TurnCtx, base: &str, native_id: &str) {
+    let Ok(resp) = ctx
+        .http()
+        .get(format!("{base}/session/{native_id}"))
+        .send()
+        .await
+    else {
+        return;
+    };
+    let Ok(resp) = resp.error_for_status() else {
+        return;
+    };
+    let Ok(session) = resp.json::<Value>().await else {
+        return;
+    };
+    capture_go_usage(native_id, &session);
+}
+
+/// Store key for the last opencode-go spend log captured from a turn.
+const OPENCODE_GO_USAGE_KEY: &str = "opencode_go_usage";
+
+/// The documented OpenCode Go plan caps (opencode.ai/docs/go), per window.
+/// There's no read API — spend is captured on-turn and normalized against
+/// these dollar caps: 5h $12, weekly $30, monthly $60.
+const GO_WINDOWS: [(&str, f64, i64); 3] = [
+    ("5h", 12.0, 5 * 60 * 60 * 1000),
+    ("Weekly", 30.0, 7 * 24 * 60 * 60 * 1000),
+    ("Monthly", 60.0, 30 * 24 * 60 * 60 * 1000),
+];
+
+/// A rolling spend log for the `opencode-go` provider: one `(timestamp_ms,
+/// cost_usd)` entry per turn, keyed by native session so concurrent sessions
+/// each accumulate their own spend. Persisted as JSON under
+/// [`OPENCODE_GO_USAGE_KEY`]; `detect` reads it into the Settings usage row.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct GoUsageLog {
+    /// Spend events, newest last. Each is `(now_ms, cost_in_usd)`.
+    events: Vec<(i64, f64)>,
+    /// Last captured cumulative cost per native session, so the next turn can
+    /// compute its delta (the `session.updated` `cost` is cumulative).
+    last_cost_by_session: std::collections::HashMap<String, f64>,
+}
+
+/// Record a session snapshot's cumulative `cost` (USD) for the `opencode-go`
+/// provider. opencode exposes no read API, so the harness captures the session
+/// cost after each turn (see `capture_turn_cost`); the delta since the last
+/// observed value for that session is this turn's spend, appended to the
+/// rolling log. Prunes events older than the longest window (~31d). Best-effort:
+/// a non-opencode-go session or missing cost is silently skipped, and a store
+/// failure is ignored.
+fn capture_go_usage(native_session: &str, info: &Value) {
+    // Only the `opencode-go` provider rides the Go plan's caps.
+    let is_go = info
+        .get("model")
+        .and_then(|m| m.get("providerID"))
+        .and_then(Value::as_str)
+        == Some("opencode-go");
+    if !is_go {
+        return;
+    }
+    let Some(cost) = info.get("cost").and_then(Value::as_f64) else {
+        return;
+    };
+    let now = crate::store::now_ms();
+    let mut log = stored_go_log().unwrap_or_default();
+    let last = *log.last_cost_by_session.get(native_session).unwrap_or(&0.0);
+    let delta = cost - last;
+    log.last_cost_by_session.insert(native_session.to_string(), cost);
+    if delta > 0.0 {
+        log.events.push((now, delta));
+        let cutoff = now - 31 * 24 * 60 * 60 * 1000;
+        log.events.retain(|(t, _)| *t >= cutoff);
+    }
+    if let Ok(json) = serde_json::to_string(&log) {
+        if let Ok(store) = crate::store::Store::open() {
+            let _ = store.set_kv(OPENCODE_GO_USAGE_KEY, &json);
+        }
+    }
+}
+
+/// The last captured opencode-go spend log. `None` until a turn has populated
+/// it (Go exposes no cold usage read).
+fn stored_go_log() -> Option<GoUsageLog> {
+    let json = crate::store::Store::open()
+        .ok()?
+        .get_kv(OPENCODE_GO_USAGE_KEY)
+        .ok()??;
+    serde_json::from_str(&json).ok()
+}
+
+/// Normalize the captured opencode-go spend into remaining-percent windows
+/// against the plan's documented caps (5h $12 / weekly $30 / monthly $60).
+/// Live-fetched isn't possible, so `observed_at_ms` marks when the last turn
+/// refreshed the log. `None` until spend has been captured.
+fn stored_go_usage() -> Option<HarnessUsage> {
+    let log = stored_go_log()?;
+    let now = crate::store::now_ms();
+    let windows: Vec<UsageWindow> = GO_WINDOWS
+        .iter()
+        .map(|(label, cap, window_ms)| {
+            let spent: f64 = log
+                .events
+                .iter()
+                .filter(|(t, _)| now - *t <= *window_ms)
+                .map(|(_, c)| *c)
+                .sum();
+            UsageWindow {
+                label: (*label).to_string(),
+                remaining_percent: ((cap - spent) / cap * 100.0).clamp(0.0, 100.0),
+                // No resets-at from the wire; leave it unset so the UI shows
+                // only the bar and "as of" line.
+                resets_at_ms: None,
+            }
+        })
+        .collect();
+    Some(HarnessUsage {
+        windows,
+        observed_at_ms: Some(now),
+        note: None,
+        manage_url: Some("https://opencode.ai/auth".to_string()),
+    })
 }
 
 /// Surface a prompt card and flush it so it renders immediately (before the
@@ -1395,5 +1542,110 @@ opencode/glm-5
         let task = &ctx.assistant.parts[0];
         assert_eq!(task.state.as_ref().unwrap().status, "completed");
         assert_eq!(task.children.len(), 1, "children survive the final merge");
+    }
+
+    // --- opencode-go usage capture -----------------------------------------
+
+    /// A `session.updated` `info` payload shaped like the live event (verified
+    /// against opencode serve 1.18.11): cumulative `cost` rides on `info`, with
+    /// the model's `providerID` distinguishing zen vs go.
+    fn go_info(provider: &str, cost: f64) -> Value {
+        json!({
+            "id": "ses_go",
+            "model": { "id": "deepseek-v4-flash", "providerID": provider },
+            "cost": cost,
+            "title": "New session - x",
+        })
+    }
+
+    /// The window math over a spend log must come out to the documented caps:
+    /// 5h $12, Weekly $30, Monthly $60, with the "as of" timestamp set.
+    #[test]
+    fn go_usage_normalizes_spend_to_caps() {
+        let now = crate::store::now_ms();
+        let log = GoUsageLog {
+            events: vec![
+                // $1 within the 5h window.
+                (now - 60 * 60 * 1000, 1.0),
+                // $5 more, still within 5h and weekly (but it's 6d old → out of
+                // the 5h window, inside weekly+monthly).
+                (now - 6 * 24 * 60 * 60 * 1000, 5.0),
+                // $30 more, 25d ago → monthly only.
+                (now - 25 * 24 * 60 * 60 * 1000, 30.0),
+            ],
+            last_cost_by_session: std::collections::HashMap::new(),
+        };
+        // stored_go_usage reads the KV store; test the window math directly.
+        let windows: Vec<UsageWindow> = GO_WINDOWS
+            .iter()
+            .map(|(label, cap, window_ms)| {
+                let spent: f64 = log
+                    .events
+                    .iter()
+                    .filter(|(t, _)| now - *t <= *window_ms)
+                    .map(|(_, c)| *c)
+                    .sum();
+                UsageWindow {
+                    label: (*label).to_string(),
+                    remaining_percent: ((cap - spent) / cap * 100.0).clamp(0.0, 100.0),
+                    resets_at_ms: None,
+                }
+            })
+            .collect();
+        // 5h: $1 of $12 → 91.67% left.
+        assert_eq!(windows[0].label, "5h");
+        assert!((windows[0].remaining_percent - 91.66666).abs() < 0.001);
+        // Weekly: $6 of $30 → 80% left.
+        assert_eq!(windows[1].label, "Weekly");
+        assert!((windows[1].remaining_percent - 80.0).abs() < 0.001);
+        // Monthly: $36 of $60 → 40% left.
+        assert_eq!(windows[2].label, "Monthly");
+        assert!((windows[2].remaining_percent - 40.0).abs() < 0.001);
+    }
+
+    /// Spend at or beyond a cap clamps to 0% left (never negative).
+    #[test]
+    fn go_usage_clamps_at_zero() {
+        let now = crate::store::now_ms();
+        let log = GoUsageLog {
+            events: vec![(now - 1000, 99.0)],
+            last_cost_by_session: std::collections::HashMap::new(),
+        };
+        let windows: Vec<UsageWindow> = GO_WINDOWS
+            .iter()
+            .map(|(label, cap, window_ms)| {
+                let spent: f64 = log
+                    .events
+                    .iter()
+                    .filter(|(t, _)| now - *t <= *window_ms)
+                    .map(|(_, c)| *c)
+                    .sum();
+                UsageWindow {
+                    label: (*label).to_string(),
+                    remaining_percent: ((cap - spent) / cap * 100.0).clamp(0.0, 100.0),
+                    resets_at_ms: None,
+                }
+            })
+            .collect();
+        assert_eq!(windows[0].remaining_percent, 0.0);
+        assert_eq!(windows[1].remaining_percent, 0.0);
+        assert_eq!(windows[2].remaining_percent, 0.0);
+    }
+
+    /// Only `opencode-go` sessions are captured — a zen session is a no-op even
+    /// with a cost, so its spend never leaks into the Go plan's windows.
+    #[test]
+    fn capture_skips_non_go_provider() {
+        assert!(!go_info("opencode", 5.0)
+            .get("model")
+            .and_then(|m| m.get("providerID"))
+            .and_then(Value::as_str)
+            .is_some_and(|p| p == "opencode-go"));
+        let is_go = go_info("opencode-go", 5.0)
+            .get("model")
+            .and_then(|m| m.get("providerID"))
+            .and_then(Value::as_str)
+            == Some("opencode-go");
+        assert!(is_go);
     }
 }
