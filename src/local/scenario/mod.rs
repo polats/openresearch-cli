@@ -112,7 +112,11 @@ async fn connect_session() -> ScenarioResult<rmcp::service::RunningService<rmcp:
     // Both rmcp config structs are `#[non_exhaustive]`, so they're built and
     // then mutated rather than constructed with a struct literal.
     let mut config = StreamableHttpClientTransportConfig::with_uri(auth::MCP_URL);
-    config.auth_header = Some(format!("Bearer {token}"));
+    // The BARE token, with no "Bearer " prefix. Despite the field name, rmcp
+    // passes this to reqwest's `bearer_auth`, which adds the scheme itself —
+    // prefixing here sends `Authorization: Bearer Bearer <token>` and every
+    // request 401s with an unhelpful "Auth required".
+    config.auth_header = Some(token);
     let transport = StreamableHttpClientTransport::from_config(config);
     ().serve(transport).await.map_err(|e| {
         let text = e.to_string();
