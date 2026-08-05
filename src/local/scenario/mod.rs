@@ -33,7 +33,12 @@ use crate::error::{anyhow, Error};
 /// Per-call ceiling. Generous because Scenario generation tools do real work
 /// (a video job can take minutes) — but bounded, so a wedged call surfaces as an
 /// error rather than holding a dashboard request open forever.
-const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+///
+/// Must stay *above* Scenario's own server-side wait budget: `jobs_wait` blocks
+/// server-side until every job finishes or roughly 180s elapses, so a client
+/// ceiling of 180s would race it and report our timeout instead of the server's
+/// orderly "still in progress" answer — turning a resumable wait into an error.
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
 
 /// What went wrong talking to Scenario.
 ///
