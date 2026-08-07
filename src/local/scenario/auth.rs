@@ -4,9 +4,9 @@
 //! registration — there is no app to pre-register and no API key to paste. The
 //! flow is split the way tris-bot splits it (`.pi/extensions/scenario/`):
 //!
-//! - **Interactive** (`connect`): opens the user's real browser at the authorize
-//!   URL and catches the redirect on a one-shot loopback listener. Runs only
-//!   from `crux scenario connect` or the Settings action.
+//! - **Interactive** ([`begin`] + [`Login::finish`]): opens the user's real
+//!   browser at the authorize URL and catches the redirect. Runs only from
+//!   `crux scenario connect` or the dashboard's Settings action.
 //! - **Silent** (everything else): refreshes tokens but can never open a
 //!   browser. A missing or dead login surfaces as [`ScenarioError::NotConnected`]
 //!   so callers can say "reconnect" instead of leaking an OAuth error.
@@ -16,13 +16,21 @@
 //! atomic (temp + rename) and the file is re-read on every load rather than
 //! cached — otherwise a refresh in one process would leave the other holding a
 //! stale refresh token, which Clerk invalidates once the new one is issued.
+//!
+//! The interactive half is itself split by *where the redirect lands* — see
+//! [`Redirect`]. The CLI owns a private loopback port because it must work with
+//! no server running; the dashboard uses its own route so the remote modes work.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use rmcp::transport::auth::{AuthError, AuthorizationManager, CredentialStore, StoredCredentials};
+use rmcp::transport::auth::{
+    AuthError, AuthorizationManager, CredentialStore, OAuthClientConfig, StoredCredentials,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 use super::ScenarioError;
 use crate::error::{anyhow, Result};
@@ -34,12 +42,17 @@ pub(crate) const MCP_URL: &str = "https://mcp.scenario.com/mcp";
 /// Client name shown on Scenario's OAuth consent screen.
 const CLIENT_NAME: &str = "Crux";
 
-/// Loopback port the authorize redirect lands on. Fixed rather than ephemeral
-/// because it is baked into the registered `redirect_uris`: Clerk rejects a
-/// redirect that doesn't match the registration, so picking a fresh port per run
-/// would mean re-registering the client every time. Deliberately not tris-bot's
-/// 41899, so a Crux login and a tris login can't fight over the socket.
+/// Loopback port the authorize redirect lands on for the CLI flow. Fixed rather
+/// than ephemeral because it is baked into the registered `redirect_uris`: Clerk
+/// rejects a redirect that doesn't match the registration, so picking a fresh
+/// port per run would mean re-registering the client every time. Deliberately
+/// not tris-bot's 41899, so a Crux login and a tris login can't fight over the
+/// socket.
 const CALLBACK_PORT: u16 = 41900;
+
+/// Route the dashboard mounts for the authorize redirect. Under `/api/` so it
+/// lands with the rest of the server's surface instead of shadowing a UI path.
+pub(crate) const DASHBOARD_CALLBACK_PATH: &str = "/api/scenario/callback";
 
 /// How long [`connect`] waits for the user to finish logging in before giving up
 /// and releasing the port.
@@ -59,8 +72,36 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// die at the first access-token expiry.
 const SCOPES: &[&str] = &["email", "offline_access", "profile"];
 
-fn redirect_uri() -> String {
-    format!("http://localhost:{CALLBACK_PORT}/callback")
+/// Where the authorize redirect should land.
+///
+/// This is not a cosmetic choice: the URI is part of the dynamic client
+/// registration, so each variant needs its own registered client, and the two
+/// variants have genuinely different reach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Redirect {
+    /// A listener bound for this one login on [`CALLBACK_PORT`]. The CLI path:
+    /// `crux scenario connect` has to work with no server running, and it's the
+    /// escape hatch when the dashboard is on another machine.
+    Loopback,
+    /// The running dashboard's own route.
+    ///
+    /// Required for the remote modes rather than merely tidier: `crux up
+    /// --remote` SSH-forwards `--port` to the user's laptop, so a callback on
+    /// that port reaches this server through the tunnel that's already there.
+    /// `localhost:41900` typed into that same browser would resolve to the
+    /// laptop, where nothing is listening.
+    Dashboard { port: u16 },
+}
+
+impl Redirect {
+    pub(crate) fn uri(&self) -> String {
+        match self {
+            Redirect::Loopback => format!("http://localhost:{CALLBACK_PORT}/callback"),
+            Redirect::Dashboard { port } => {
+                format!("http://localhost:{port}{DASHBOARD_CALLBACK_PATH}")
+            }
+        }
+    }
 }
 
 /// `<config>/scenario/auth.json` — the shared token file.
@@ -72,6 +113,41 @@ pub(crate) fn auth_path() -> PathBuf {
     crate::config::config_dir()
         .join("scenario")
         .join("auth.json")
+}
+
+/// `<config>/scenario/client.json` — which OAuth client we registered, and the
+/// redirect it was registered for.
+///
+/// Separate from the token file because rmcp owns that one: [`StoredCredentials`]
+/// carries the `client_id` but has no room for the redirect, and rmcp rewrites
+/// the whole file on every token refresh.
+fn client_path() -> PathBuf {
+    crate::config::config_dir()
+        .join("scenario")
+        .join("client.json")
+}
+
+/// A dynamic client registration we can reuse.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientRecord {
+    client_id: String,
+    /// The redirect this client was registered against. Part of the record
+    /// because it's part of the registration — a client registered for the CLI's
+    /// loopback port is useless for a dashboard login, and Clerk rejects the
+    /// mismatch at authorize time rather than at registration time.
+    redirect_uri: String,
+}
+
+fn load_client_record() -> Option<ClientRecord> {
+    let body = std::fs::read_to_string(client_path()).ok()?;
+    serde_json::from_str(&body).ok()
+}
+
+fn save_client_record(record: &ClientRecord) -> Result<()> {
+    let body = serde_json::to_string_pretty(record)
+        .map_err(|e| anyhow!("cannot serialize the Scenario client record: {e}"))?;
+    write_private(&client_path(), &body)
 }
 
 /// File-backed [`CredentialStore`], replacing rmcp's in-memory default so a
@@ -116,16 +192,20 @@ impl CredentialStore for FileCredentialStore {
 /// `telemetry::write_settings` does it), and 0600 set on the temp file *before*
 /// the rename so the secret is never briefly world-readable.
 fn write_credentials(credentials: &StoredCredentials) -> Result<()> {
-    let path = auth_path();
+    let body = serde_json::to_string_pretty(credentials)
+        .map_err(|e| anyhow!("cannot serialize scenario credentials: {e}"))?;
+    write_private(&auth_path(), &body)
+}
+
+/// Atomic 0600 write, shared by the token file and the client record.
+fn write_private(path: &std::path::Path, body: &str) -> Result<()> {
     let parent = path
         .parent()
-        .ok_or_else(|| anyhow!("scenario auth path has no parent"))?;
+        .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
     std::fs::create_dir_all(parent)
         .map_err(|e| anyhow!("cannot create {}: {e}", parent.display()))?;
 
-    let body = serde_json::to_string_pretty(credentials)
-        .map_err(|e| anyhow!("cannot serialize scenario credentials: {e}"))?;
-    let tmp = parent.join(format!(".auth.json.{}.tmp", uuid::Uuid::new_v4()));
+    let tmp = parent.join(format!(".scenario.{}.tmp", uuid::Uuid::new_v4()));
 
     let write = || -> std::io::Result<()> {
         std::fs::write(&tmp, format!("{body}\n"))?;
@@ -134,7 +214,7 @@ fn write_credentials(credentials: &StoredCredentials) -> Result<()> {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
         }
-        std::fs::rename(&tmp, &path)
+        std::fs::rename(&tmp, path)
     };
     if let Err(e) = write() {
         let _ = std::fs::remove_file(&tmp);
@@ -183,12 +263,23 @@ pub(crate) fn has_stored_login() -> bool {
         .is_some()
 }
 
-/// Forget the stored login. Used by `crux scenario disconnect`.
+/// Forget the stored login. Used by `crux scenario disconnect` and the Settings
+/// card.
+///
+/// Drops the client registration along with the tokens. Keeping it would save one
+/// request on the next login, but disconnect is the "give me a clean slate"
+/// escape hatch — and a client registration the server has since forgotten would
+/// otherwise fail every future login with no way to clear it from the UI.
 pub(crate) fn forget() -> Result<()> {
-    match std::fs::remove_file(auth_path()) {
+    remove_if_present(&auth_path())?;
+    remove_if_present(&client_path())
+}
+
+fn remove_if_present(path: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(anyhow!("cannot remove {}: {e}", auth_path().display())),
+        Err(e) => Err(anyhow!("cannot remove {}: {e}", path.display())),
     }
 }
 
@@ -255,31 +346,92 @@ pub(crate) async fn silent_manager() -> std::result::Result<AuthorizationManager
     Ok(manager)
 }
 
-/// Run the interactive login and persist the result.
+/// A login that has been started but not finished: the user still has to visit
+/// [`Login::url`].
 ///
-/// Registers a client (Scenario supports dynamic registration, so there is
-/// nothing to configure), opens the browser at the authorize URL, and waits for
-/// the redirect on [`CALLBACK_PORT`]. Returns the granted scopes.
-pub(crate) async fn connect() -> Result<Vec<String>> {
+/// The two phases are separate because the dashboard has to answer its HTTP
+/// request with the authorize URL *immediately*. Holding that response open for
+/// the five minutes a human takes to log in would present as a hung request and
+/// would die to any proxy's read timeout, so the endpoint returns the URL and
+/// leaves [`Login::finish`] running on a background task.
+pub(crate) struct Login {
+    manager: AuthorizationManager,
+    csrf: String,
+    /// Where the user has to go to sign in.
+    pub(crate) url: String,
+    source: CodeSource,
+}
+
+/// How this login expects to receive its authorization code.
+enum CodeSource {
+    /// Our own listener, bound before the browser opened.
+    Loopback(TcpListener),
+    /// The dashboard's callback route hands it over through [`pending`].
+    Dashboard(oneshot::Receiver<std::result::Result<String, String>>),
+}
+
+/// Start an interactive login: register or reuse a client, build the authorize
+/// URL, and arrange to receive the redirect.
+///
+/// Does everything up to "the user must now visit this URL", and nothing that
+/// waits on a human.
+pub(crate) async fn begin(redirect: Redirect) -> Result<Login> {
+    // Refuse a second concurrent login before doing any network work. For
+    // `Loopback` the port bind below would catch it anyway; for `Dashboard` this
+    // is the only guard, and matching the CLI's behaviour means a double-clicked
+    // Connect button gets the same honest answer either way.
+    if matches!(redirect, Redirect::Dashboard { .. }) && pending().lock().unwrap().is_some() {
+        return Err(anyhow!(
+            "A Scenario login is already in progress — finish it in the browser tab that opened, \
+             or wait for it to time out."
+        ));
+    }
+
     let (mut manager, _) = manager().await?;
 
-    // Bind before opening the browser: if the port is busy — a stale login still
+    // Bind before opening any browser: if the port is busy — a stale login still
     // holding it, or another tool on the same port — say so now rather than
     // sending the user to a page whose redirect can't land.
-    let listener = TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
-        .await
-        .map_err(|e| {
-            anyhow!(
-                "cannot listen on 127.0.0.1:{CALLBACK_PORT} for the Scenario login redirect: {e}\n\
-                 Another login may still be in progress — wait a moment and retry."
-            )
-        })?;
+    let source = match redirect {
+        Redirect::Loopback => CodeSource::Loopback(
+            TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "cannot listen on 127.0.0.1:{CALLBACK_PORT} for the Scenario login \
+                         redirect: {e}\n\
+                         Another login may still be in progress — wait a moment and retry."
+                    )
+                })?,
+        ),
+        // Filled in below, once the CSRF token exists to key it by.
+        Redirect::Dashboard { .. } => CodeSource::Dashboard(oneshot::channel().1),
+    };
 
-    let redirect = redirect_uri();
-    manager
-        .register_client(CLIENT_NAME, &redirect, SCOPES)
-        .await
-        .map_err(|e| anyhow!("Scenario rejected the client registration: {e}"))?;
+    let redirect_uri = redirect.uri();
+    // Reuse the client we already registered for this exact redirect. Registering
+    // unconditionally would mint a fresh Clerk client on every login; tris-bot
+    // saves its `clientInformation` for the same reason. The redirect has to be
+    // part of the match because it's part of the registration — a CLI login and a
+    // dashboard login use different redirects and so cannot share a client.
+    match load_client_record().filter(|r| r.redirect_uri == redirect_uri) {
+        Some(record) => manager
+            .configure_client(
+                OAuthClientConfig::new(record.client_id, redirect_uri.clone())
+                    .with_scopes(SCOPES.iter().map(|s| s.to_string()).collect()),
+            )
+            .map_err(|e| anyhow!("cannot reuse the registered Scenario client: {e}"))?,
+        None => {
+            let config = manager
+                .register_client(CLIENT_NAME, &redirect_uri, SCOPES)
+                .await
+                .map_err(|e| anyhow!("Scenario rejected the client registration: {e}"))?;
+            save_client_record(&ClientRecord {
+                client_id: config.client_id,
+                redirect_uri: redirect_uri.clone(),
+            })?;
+        }
+    }
 
     let url = manager
         .get_authorization_url(SCOPES)
@@ -291,22 +443,165 @@ pub(crate) async fn connect() -> Result<Vec<String>> {
     let csrf = query_param(&url, "state")
         .ok_or_else(|| anyhow!("Scenario authorize URL carried no state parameter"))?;
 
+    let source = match source {
+        CodeSource::Loopback(l) => CodeSource::Loopback(l),
+        CodeSource::Dashboard(_) => {
+            let (tx, rx) = oneshot::channel();
+            // Any login that appeared during the network work above loses the
+            // slot. Benign: its `finish` reports the cancellation, and the user
+            // is looking at whichever tab opened last anyway.
+            *pending().lock().unwrap() = Some(Pending {
+                csrf: csrf.clone(),
+                tx,
+            });
+            CodeSource::Dashboard(rx)
+        }
+    };
+
+    Ok(Login {
+        manager,
+        csrf,
+        url,
+        source,
+    })
+}
+
+impl Login {
+    /// Wait for the redirect, exchange the code, and persist the tokens. Returns
+    /// the granted scopes.
+    pub(crate) async fn finish(self) -> Result<Vec<String>> {
+        let code = match self.source {
+            CodeSource::Loopback(listener) => {
+                tokio::time::timeout(LOGIN_TIMEOUT, wait_for_code(listener, &self.csrf))
+                    .await
+                    .map_err(|_| {
+                        anyhow!("timed out after 5 minutes waiting for the Scenario login")
+                    })??
+            }
+            CodeSource::Dashboard(rx) => {
+                let outcome = tokio::time::timeout(LOGIN_TIMEOUT, rx).await;
+                // Release the slot however this ended, or an abandoned login
+                // would wedge the Connect button until the process restarts.
+                clear_pending(&self.csrf);
+                match outcome {
+                    Ok(Ok(Ok(code))) => code,
+                    Ok(Ok(Err(reason))) => {
+                        return Err(anyhow!("Scenario login failed: {reason}"));
+                    }
+                    // Sender dropped: a later login took the slot.
+                    Ok(Err(_)) => {
+                        return Err(anyhow!("the Scenario login was replaced by a newer one"));
+                    }
+                    Err(_) => {
+                        return Err(anyhow!(
+                            "timed out after 5 minutes waiting for the Scenario login"
+                        ));
+                    }
+                }
+            }
+        };
+
+        self.manager
+            .exchange_code_for_token(&code, &self.csrf)
+            .await
+            .map_err(|e| anyhow!("Scenario refused the authorization code: {e}"))?;
+
+        // `exchange_code_for_token` persists through the credential store, so the
+        // token file exists by now; read the granted scopes back for the caller.
+        Ok(self.manager.get_current_scopes().await)
+    }
+}
+
+/// Run the whole interactive login on the CLI's own loopback port.
+pub(crate) async fn connect() -> Result<Vec<String>> {
+    let login = begin(Redirect::Loopback).await?;
     eprintln!("Opening your browser to sign in to Scenario…");
-    eprintln!("If it doesn't open, visit:\n  {url}");
-    crate::browser::open_browser(&url);
+    eprintln!("If it doesn't open, visit:\n  {}", login.url);
+    crate::browser::open_browser(&login.url);
+    login.finish().await
+}
 
-    let code = tokio::time::timeout(LOGIN_TIMEOUT, wait_for_code(listener, &csrf))
-        .await
-        .map_err(|_| anyhow!("timed out after 5 minutes waiting for the Scenario login"))??;
+/// The one in-flight dashboard login, if any.
+///
+/// A single slot rather than a map: the CLI path is already serialized by its
+/// fixed-port bind, so allowing several concurrent dashboard logins would be the
+/// odd one out — and there is exactly one person at the browser.
+struct Pending {
+    csrf: String,
+    tx: oneshot::Sender<std::result::Result<String, String>>,
+}
 
-    manager
-        .exchange_code_for_token(&code, &csrf)
-        .await
-        .map_err(|e| anyhow!("Scenario refused the authorization code: {e}"))?;
+fn pending() -> &'static Mutex<Option<Pending>> {
+    static PENDING: OnceLock<Mutex<Option<Pending>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(None))
+}
 
-    // `exchange_code_for_token` persists through the credential store, so the
-    // token file exists by now; read the granted scopes back for the caller.
-    Ok(manager.get_current_scopes().await)
+/// Drop the pending slot if it is still the one this login installed. The guard
+/// matters: without it, a login that times out would evict the *successor* that
+/// replaced it.
+fn clear_pending(csrf: &str) {
+    let mut slot = pending().lock().unwrap();
+    if slot.as_ref().is_some_and(|p| p.csrf == csrf) {
+        *slot = None;
+    }
+}
+
+/// True while a dashboard login is waiting for its redirect. Lets the status
+/// endpoint report "waiting for the browser" instead of a bare "not connected".
+pub(crate) fn login_in_progress() -> bool {
+    pending().lock().unwrap().is_some()
+}
+
+/// Hand a redirect's `code` to the waiting dashboard login.
+///
+/// `Ok` carries the message to show in the user's browser tab, `Err` the reason
+/// it couldn't be accepted — the route renders either as a small page, since this
+/// tab is the only place the user can see it.
+pub(crate) fn deliver_callback(
+    state: Option<&str>,
+    code: Option<&str>,
+    error: Option<&str>,
+) -> std::result::Result<&'static str, String> {
+    let mut slot = pending().lock().unwrap();
+    let Some(p) = slot.as_ref() else {
+        return Err(
+            "No Scenario login is in progress. Start one from Settings → Scenario in Crux.".into(),
+        );
+    };
+    // A stale browser tab from an earlier attempt replays an old state; that code
+    // is worthless, and consuming the slot for it would cancel the live login. So
+    // reject without taking it.
+    if state != Some(p.csrf.as_str()) {
+        return Err(
+            "Login failed: state mismatch (a stale login tab?). Start the login again \
+                    from Settings → Scenario in Crux."
+                .into(),
+        );
+    }
+    let p = slot.take().expect("checked immediately above");
+    match code {
+        Some(code) => {
+            // A dropped receiver means the login already gave up (timed out);
+            // nothing to report to it, and the tab still gets an honest page.
+            if p.tx.send(Ok(code.to_string())).is_err() {
+                return Err(
+                    "That login already timed out. Start a new one from Settings → \
+                            Scenario in Crux."
+                        .into(),
+                );
+            }
+            // Deliberately not "connected": the token exchange happens after this
+            // response and can still fail. The Settings card is watching the SSE
+            // stream and reports the real outcome — this page must not contradict
+            // it by claiming a success it cannot yet see.
+            Ok("Signed in — you can close this tab. Crux is finishing the login.")
+        }
+        None => {
+            let reason = error.unwrap_or("no code returned").to_string();
+            let _ = p.tx.send(Err(reason.clone()));
+            Err(format!("Login failed: {reason}"))
+        }
+    }
 }
 
 /// Accept exactly one `/callback` hit and return its `code`.
@@ -353,7 +648,10 @@ async fn wait_for_code(listener: TcpListener, expected_state: &str) -> Result<St
                 respond(
                     &mut sock,
                     "200 OK",
-                    "Scenario connected — you can close this tab and return to Crux.",
+                    // Same caution as the dashboard's page: the exchange comes
+                    // after this, so the terminal — not this tab — is where the
+                    // real outcome is reported.
+                    "Signed in — you can close this tab and return to your terminal.",
                 )
                 .await;
                 return Ok(code);
@@ -428,12 +726,112 @@ mod tests {
     /// The redirect URI is part of the client registration, so it has to match
     /// the port we actually bind — a drift here fails only at login time.
     #[test]
-    fn redirect_uri_matches_the_callback_port() {
+    fn loopback_redirect_matches_the_callback_port() {
         assert_eq!(
-            redirect_uri(),
+            Redirect::Loopback.uri(),
             format!("http://localhost:{CALLBACK_PORT}/callback")
         );
-        assert!(redirect_uri().ends_with("/callback"));
+    }
+
+    /// The dashboard redirect must name the route the server actually mounts;
+    /// they're set in different files, and a mismatch only shows up mid-login.
+    #[test]
+    fn dashboard_redirect_uses_the_mounted_path() {
+        assert_eq!(
+            Redirect::Dashboard { port: 3333 }.uri(),
+            format!("http://localhost:3333{DASHBOARD_CALLBACK_PATH}")
+        );
+        assert!(DASHBOARD_CALLBACK_PATH.starts_with("/api/"));
+    }
+
+    /// The two redirects must differ, or the client-reuse check would hand a
+    /// dashboard login a client registered for the CLI's port.
+    #[test]
+    fn the_two_redirects_are_distinct() {
+        assert_ne!(
+            Redirect::Loopback.uri(),
+            Redirect::Dashboard {
+                port: CALLBACK_PORT
+            }
+            .uri()
+        );
+    }
+
+    /// The pending slot is process-global, so the tests below have to take turns.
+    /// Each also resets the slot, so an earlier failure can't cascade.
+    fn claim_pending_slot() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        *pending().lock().unwrap() = None;
+        guard
+    }
+
+    /// A callback arriving with no login in flight must be refused, not panic —
+    /// anyone can hit the route, and a stale bookmark will.
+    #[test]
+    fn callback_without_a_pending_login_is_refused() {
+        let _guard = claim_pending_slot();
+        let out = deliver_callback(Some("nope"), Some("code"), None);
+        assert!(out.is_err(), "expected a refusal, got {out:?}");
+    }
+
+    /// A pending login must survive a stale tab replaying an old `state`: the
+    /// slot stays put so the real redirect can still land.
+    ///
+    /// Synchronous, and reads the channel with `try_recv`: `deliver_callback`
+    /// sends before it returns, so there is nothing to wait for — and holding the
+    /// serializing guard across an await would be its own bug.
+    #[test]
+    fn stale_state_does_not_consume_the_pending_login() {
+        let _guard = claim_pending_slot();
+        let (tx, mut rx) = oneshot::channel();
+        *pending().lock().unwrap() = Some(Pending {
+            csrf: "live".to_string(),
+            tx,
+        });
+
+        assert!(deliver_callback(Some("stale"), Some("code"), None).is_err());
+        assert!(login_in_progress(), "the live login was evicted");
+        assert!(rx.try_recv().is_err(), "a stale tab delivered a code");
+
+        // The real redirect still works, and clears the slot.
+        assert!(deliver_callback(Some("live"), Some("real-code"), None).is_ok());
+        assert_eq!(rx.try_recv().unwrap().unwrap(), "real-code");
+        assert!(!login_in_progress());
+    }
+
+    /// An authorize error (user declined) must reach the waiting login as a
+    /// failure rather than leaving it to time out five minutes later.
+    #[test]
+    fn callback_error_is_delivered_to_the_waiting_login() {
+        let _guard = claim_pending_slot();
+        let (tx, mut rx) = oneshot::channel();
+        *pending().lock().unwrap() = Some(Pending {
+            csrf: "s".to_string(),
+            tx,
+        });
+
+        assert!(deliver_callback(Some("s"), None, Some("access_denied")).is_err());
+        assert_eq!(rx.try_recv().unwrap().unwrap_err(), "access_denied");
+        assert!(!login_in_progress());
+    }
+
+    /// `clear_pending` must not evict a login that replaced the caller's — that
+    /// would cancel a live login when an abandoned one times out.
+    #[test]
+    fn clear_pending_only_clears_its_own_login() {
+        let _guard = claim_pending_slot();
+        let (tx, _rx) = oneshot::channel();
+        *pending().lock().unwrap() = Some(Pending {
+            csrf: "successor".to_string(),
+            tx,
+        });
+
+        clear_pending("abandoned");
+        assert!(login_in_progress(), "the successor login was evicted");
+
+        clear_pending("successor");
+        assert!(!login_in_progress());
     }
 
     /// `offline_access` is what earns a refresh token; losing it would make

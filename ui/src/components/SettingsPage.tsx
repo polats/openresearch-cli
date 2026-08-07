@@ -12,6 +12,7 @@ import {
   RadioTower,
   RefreshCw,
   Server,
+  Sparkles,
   SquareTerminal,
   Trash2,
   X,
@@ -33,6 +34,10 @@ import {
   getLocalMachine,
   getModalSettings,
   getOpenResearchSettings,
+  getScenarioSettings,
+  connectScenario,
+  disconnectScenario,
+  type ScenarioSettings,
   getRaySettings,
   getSlurmSettings,
   getSshHosts,
@@ -84,7 +89,7 @@ import {
   type SshPreflight,
   harnessModelLabel,
 } from "../api";
-import { onDataDirMove, onHarnessAuth } from "../events";
+import { onDataDirMove, onHarnessAuth, onScenarioConnect } from "../events";
 import { GitTokenForm } from "./GitTokenForm";
 import { Md } from "./Md";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
@@ -95,6 +100,7 @@ export type SettingsTab =
   | "appearance"
   | "persona"
   | "harnesses"
+  | "scenario"
   | "compute"
   | "instances"
   | "environment"
@@ -308,6 +314,188 @@ function HarnessesTab() {
             </span>
           </div>
           {!h.agentReady && h.agentNote && <p className="settings-note">{h.agentNote}</p>}
+        </div>
+      )}
+    </>
+  );
+}
+
+// --- scenario -------------------------------------------------------------------
+
+function ScenarioBadge({ s }: { s: ScenarioSettings }) {
+  if (s.state === "connected") return <span className="badge ok">Connected</span>;
+  if (s.state === "expired") return <span className="badge err">Login expired</span>;
+  if (s.state === "error") return <span className="badge err">Error</span>;
+  if (s.reachable === false) return <span className="badge err">Unreachable</span>;
+  return <span className="badge">Not connected</span>;
+}
+
+function ScenarioTab() {
+  const [s, setS] = useState<ScenarioSettings | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  /** Set when the server couldn't open a browser (it's on another machine over
+   * SSH), so the user has to open the URL themselves. */
+  const [manualUrl, setManualUrl] = useState<string | null>(null);
+
+  const load = () =>
+    getScenarioSettings()
+      .then((next) => {
+        setS(next);
+        setLoadError(null);
+        // The server is the authority on whether a login is still in flight, so
+        // let it overrule our local optimism — otherwise a missed outcome event
+        // would leave the card stuck on "waiting" with no way back.
+        if (!next.connecting) setBusy(false);
+      })
+      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  // The POST returns as soon as the browser opens, so the outcome arrives here.
+  // Re-fetch on success rather than trusting the event's scopes: the card's whole
+  // claim is that the login *works*, which only a live check establishes.
+  useEffect(
+    () =>
+      onScenarioConnect((ev) => {
+        setBusy(false);
+        setManualUrl(null);
+        if (ev.type === "error") setError(ev.error);
+        else setError(null);
+        void load();
+      }),
+    [],
+  );
+
+  async function connect() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setManualUrl(null);
+    try {
+      const started = await connectScenario();
+      if (!started.browserOpened) setManualUrl(started.authorizeUrl);
+      // Reflect "waiting for the browser" immediately; `busy` stays set until an
+      // SSE event lands or the five-minute login window times out.
+      await load();
+    } catch (err) {
+      setBusy(false);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function disconnect() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setManualUrl(null);
+    try {
+      setS(await disconnectScenario());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const waiting = busy || (s?.connecting ?? false);
+
+  return (
+    <>
+      <h1>Scenario</h1>
+      <p className="settings-sub">
+        AI asset generation — images, video and 3D — reached over Scenario's MCP server. Signing in
+        uses your own Scenario account, so there's no API key to paste or share.
+      </p>
+      {loadError ? (
+        <div className="error">{loadError}</div>
+      ) : !s ? (
+        <div className="settings-loading">
+          <span className="spinner" /> Checking Scenario…
+        </div>
+      ) : (
+        <div className="settings-card">
+          <div className="settings-card-head">
+            <ScenarioBadge s={s} />
+            <div className="spacer" style={{ flex: 1 }} />
+            {/* Deliberately usable while waiting: it's a read-only check, and it's
+                the way out if a login's outcome event was missed (the page was
+                reloaded mid-login, say) and the card would otherwise sit waiting
+                until the five-minute window lapsed. */}
+            <button className="btn sm" onClick={() => void load()}>
+              <RefreshCw size={12} /> Refresh
+            </button>
+          </div>
+          <div className="kv">
+            <span className="k">Login</span>
+            <span className="v">
+              {s.state === "connected"
+                ? "Signed in and working"
+                : s.state === "expired"
+                  ? "Stored, but no longer accepted"
+                  : s.state === "error"
+                    ? "Stored, but the check failed"
+                    : "Not signed in"}
+            </span>
+            {s.toolCount !== undefined && (
+              <>
+                <span className="k">Tools</span>
+                <span className="v">{s.toolCount} available in this workspace</span>
+              </>
+            )}
+            <span className="k">Token</span>
+            <span className="v">
+              <code>{s.authPath}</code> (private to your user)
+            </span>
+          </div>
+          {s.state === "disconnected" && s.reachable === false && (
+            <p className="settings-note">
+              Scenario didn't answer with the OAuth details a login needs, so signing in can't
+              succeed right now — the service may be down. {s.error}
+            </p>
+          )}
+          {s.state === "expired" && (
+            <p className="settings-note">
+              The stored login no longer works — signing in again replaces it. This happens when the
+              same account is re-authorised somewhere else.
+            </p>
+          )}
+          {s.state === "error" && s.error && <p className="settings-note">{s.error}</p>}
+          {waiting && (
+            <p className="settings-note">
+              Waiting for you to finish signing in{manualUrl ? "" : " in the browser tab that just opened"}
+              …
+              {manualUrl && (
+                <>
+                  {" "}
+                  This server has no browser of its own, so open this yourself:{" "}
+                  <a href={manualUrl} target="_blank" rel="noreferrer">
+                    the Scenario login page <ExternalLink size={11} />
+                  </a>
+                </>
+              )}
+            </p>
+          )}
+          {error && <div className="error">{error}</div>}
+          <div className="actions">
+            <button className="btn primary" onClick={() => void connect()} disabled={waiting}>
+              {waiting
+                ? "Waiting for the browser…"
+                : s.state === "connected"
+                  ? "Sign in again"
+                  : s.state === "expired"
+                    ? "Reconnect"
+                    : "Connect"}
+            </button>
+            {s.state !== "disconnected" && (
+              <button className="btn" onClick={() => void disconnect()} disabled={waiting}>
+                Disconnect
+              </button>
+            )}
+          </div>
         </div>
       )}
     </>
@@ -2702,6 +2890,7 @@ export const SETTINGS_NAV: { id: Tab; label: string; icon: React.ReactNode }[] =
   { id: "appearance", label: "Appearance", icon: <Palette size={15} /> },
   { id: "persona", label: "Persona", icon: <Drama size={15} /> },
   { id: "harnesses", label: "Harnesses", icon: <Blocks size={15} /> },
+  { id: "scenario", label: "Scenario", icon: <Sparkles size={15} /> },
   { id: "compute", label: "Compute", icon: <Cpu size={15} /> },
   { id: "instances", label: "Instances", icon: <Server size={15} /> },
   { id: "environment", label: "Environment", icon: <SquareTerminal size={15} /> },
@@ -2726,6 +2915,7 @@ export function SettingsView({
       {tab === "appearance" && <AppearanceTab />}
       {tab === "persona" && <PersonaTab project={project} onProjectUpdated={onProjectUpdated} />}
       {tab === "harnesses" && <HarnessesTab />}
+      {tab === "scenario" && <ScenarioTab />}
       {tab === "compute" && <ComputeTab />}
       {tab === "environment" && (
         <>

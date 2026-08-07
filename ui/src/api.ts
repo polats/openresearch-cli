@@ -590,6 +590,46 @@ export const getModalSettings = () => get<ModalSettings>("/api/settings/modal");
 /** Build the orx-managed Modal env (first run downloads the SDK, ~30–60s). */
 export const provisionModal = () => post<ModalSettings>("/api/settings/modal/provision");
 
+// --- settings: scenario ------------------------------------------------------
+
+/** `connected` is verified against the live server, not inferred from the token
+ * file: `expired` is the stored-but-dead case, and the only one where the fix is
+ * to log in again. */
+export type ScenarioState = "connected" | "expired" | "disconnected" | "error";
+
+export interface ScenarioSettings {
+  state: ScenarioState;
+  /** Where the token lives, so the card can say it out loud. */
+  authPath: string;
+  /** A login started from this dashboard is still waiting for its redirect. */
+  connecting: boolean;
+  /** Tools the connected workspace advertises. Only set when `connected`. */
+  toolCount?: number;
+  /** Scenario's OAuth metadata was discoverable. Only set when `disconnected` —
+   * false means a login can't succeed, which Connect alone won't fix. */
+  reachable?: boolean;
+  error?: string;
+}
+
+export interface ScenarioConnectStarted {
+  started: boolean;
+  /** Where the user has to sign in. Shown when we couldn't open a browser. */
+  authorizeUrl: string;
+  /** False over SSH, where the browser is on the user's machine, not the
+   * server's — the card then asks them to open the URL themselves. */
+  browserOpened: boolean;
+}
+
+export const getScenarioSettings = () => get<ScenarioSettings>("/api/settings/scenario");
+
+/** Kicks off the browser login and returns at once; watch `onScenarioConnect`
+ * for the outcome. */
+export const connectScenario = () =>
+  post<ScenarioConnectStarted>("/api/settings/scenario/connect");
+
+export const disconnectScenario = () =>
+  post<ScenarioSettings>("/api/settings/scenario/disconnect");
+
 // --- settings: env vars / git / harnesses ------------------------------------
 
 export interface EnvVar {

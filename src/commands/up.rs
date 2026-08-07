@@ -352,6 +352,19 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/settings/modal", get(modal_settings))
         .route("/api/settings/modal/provision", post(provision_modal))
+        .route("/api/settings/scenario", get(scenario_settings))
+        .route("/api/settings/scenario/connect", post(connect_scenario))
+        .route(
+            "/api/settings/scenario/disconnect",
+            post(disconnect_scenario),
+        )
+        // Not under /api/settings: this is where Scenario's OAuth server sends the
+        // user's browser, and the path is baked into the client registration
+        // (`auth::DASHBOARD_CALLBACK_PATH`), so it can't be moved freely.
+        .route(
+            local::scenario::auth::DASHBOARD_CALLBACK_PATH,
+            get(scenario_callback),
+        )
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
             "/api/settings/env/{key}",
@@ -2510,6 +2523,150 @@ async fn modal_settings() -> Json<Value> {
 async fn provision_modal() -> ApiResult {
     modal::ensure_env().await.map_err(bad_request)?;
     Ok(Json(modal_settings_json(&modal::detect().await)))
+}
+
+// --- scenario (asset generation over MCP) --------------------------------------
+
+use crate::local::scenario;
+
+/// Connection state for the Settings card.
+///
+/// Verifies the login rather than just reporting the file's existence: a stored
+/// token whose refresh has been redeemed elsewhere looks present but fails on
+/// first use, and a card claiming "Connected" on the strength of a file on disk
+/// would be wrong exactly when it matters. One MCP round trip, on a page that
+/// isn't hot.
+async fn scenario_settings_json() -> Value {
+    let mut out = json!({
+        "authPath": scenario::auth::auth_path().to_string_lossy(),
+        // A login started from this dashboard that hasn't come back yet. Lets a
+        // reloaded page rejoin a login in flight instead of offering Connect
+        // again and being refused.
+        "connecting": scenario::auth::login_in_progress(),
+    });
+
+    if !scenario::is_connected() {
+        // "Not connected" and "cannot connect" are indistinguishable from here,
+        // and only the second is a problem the user can't fix by clicking
+        // Connect. Discovery needs no credentials, so answer it while we're here.
+        let reachable = scenario::auth::discover().await;
+        out["state"] = json!("disconnected");
+        out["reachable"] = json!(reachable.is_ok());
+        if let Err(e) = reachable {
+            out["error"] = json!(e.to_string());
+        }
+        return out;
+    }
+
+    match scenario::list_tools().await {
+        Ok(tools) => {
+            out["state"] = json!("connected");
+            out["toolCount"] = json!(tools.len());
+        }
+        // The one distinction the whole error split exists for: this is
+        // "reconnect", not "something broke".
+        Err(scenario::ScenarioError::NotConnected) => out["state"] = json!("expired"),
+        Err(e) => {
+            out["state"] = json!("error");
+            out["error"] = json!(e.to_string());
+        }
+    }
+    out
+}
+
+async fn scenario_settings() -> ApiResult {
+    Ok(Json(scenario_settings_json().await))
+}
+
+/// Start a Scenario login and return immediately with the authorize URL.
+///
+/// The login itself finishes on a background task: a human takes up to five
+/// minutes, and holding the response open for that would look like a hung request
+/// and die to any proxy read timeout. Progress arrives on `/api/events` as
+/// `scenario.connect.done` / `scenario.connect.error`.
+async fn connect_scenario(State(state): State<AppState>) -> ApiResult {
+    let port = state.chat.up_port().ok_or_else(|| {
+        bad_request("this server's port is unknown, so the login redirect can't be built")
+    })?;
+
+    let login = scenario::auth::begin(scenario::auth::Redirect::Dashboard { port })
+        .await
+        .map_err(bad_request)?;
+    let url = login.url.clone();
+
+    // Over SSH the browser is on the user's machine, not this one, so opening one
+    // here shows nobody anything — `up` skips it at startup for the same reason.
+    // Report that we didn't, and the card shows the URL to open by hand.
+    let opened = crate::remote::detect_ssh_session().is_none();
+    if opened {
+        browser::open_browser(&url);
+    }
+
+    let chat = state.chat.clone();
+    tokio::spawn(async move {
+        match login.finish().await {
+            Ok(scopes) => chat.emit_event("scenario.connect.done", json!({ "scopes": scopes })),
+            Err(e) => chat.emit_event("scenario.connect.error", json!({ "error": e.to_string() })),
+        }
+    });
+
+    Ok(Json(json!({
+        "started": true,
+        "authorizeUrl": url,
+        "browserOpened": opened,
+    })))
+}
+
+async fn disconnect_scenario() -> ApiResult {
+    scenario::auth::forget().map_err(bad_request)?;
+    Ok(Json(scenario_settings_json().await))
+}
+
+#[derive(Deserialize)]
+struct ScenarioCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+/// Where Scenario's OAuth server sends the user's browser after they sign in.
+///
+/// Mounted here rather than on a private loopback port so the remote modes work:
+/// `up --remote` already forwards this port to the user's laptop, so the redirect
+/// rides the tunnel that's there. The CLI keeps its own listener for the
+/// no-server-running case.
+async fn scenario_callback(Query(q): Query<ScenarioCallbackQuery>) -> Response {
+    // Clerk sends the human-readable reason in `error_description`; `error` is the
+    // machine code and the fallback.
+    let reason = q.error_description.as_deref().or(q.error.as_deref());
+    match scenario::auth::deliver_callback(q.state.as_deref(), q.code.as_deref(), reason) {
+        Ok(message) => (StatusCode::OK, Html(callback_page(message))).into_response(),
+        Err(message) => (StatusCode::BAD_REQUEST, Html(callback_page(&message))).into_response(),
+    }
+}
+
+/// The one page the user sees in the tab Scenario redirected. Deliberately
+/// dependency-free and self-contained — it renders in a tab that has no access to
+/// the SPA's assets yet, and its only job is to say what happened.
+fn callback_page(message: &str) -> String {
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+         <title>Crux — Scenario</title>\
+         <style>body{{font:15px/1.5 system-ui,sans-serif;margin:0;display:grid;\
+         place-items:center;min-height:100vh;background:#111;color:#eee}}\
+         p{{max-width:34rem;padding:0 1.5rem;text-align:center}}</style></head>\
+         <body><p>{}</p></body></html>",
+        html_escape(message)
+    )
+}
+
+/// Minimal HTML text escaping. The message can carry a server-supplied error
+/// string, so it does not go into the page unescaped.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 // --- kubernetes settings ------------------------------------------------------
