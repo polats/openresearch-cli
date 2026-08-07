@@ -175,7 +175,10 @@ async fn spawn_mcp(bin: &PathBuf, port: u16) -> Result<Child> {
         // search order, which on a machine with two checkouts is a coin flip — and
         // it would then be describing a different ComfyUI than the card does.
         .env("COMFYUI_PATH", super::install_path())
-        .env("COMFYUI_URL", super::dashboard_url())
+        // Numeric, not the dashboard's `localhost`: this is the MCP server's own
+        // programmatic connection, and `localhost` would try `::1` first against a
+        // server bound to 127.0.0.1.
+        .env("COMFYUI_URL", super::api_base())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(
             log.try_clone().map_err(|e| anyhow!("{e}"))?,

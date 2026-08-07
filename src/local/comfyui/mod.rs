@@ -31,9 +31,25 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 
-/// Where ComfyUI listens by default, and the env override.
+/// Where ComfyUI listens by default — the address we bind and connect to.
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8188;
+
+/// The host used only in the **browser-facing** dashboard link.
+///
+/// Deliberately different from [`DEFAULT_HOST`], because these two jobs have
+/// different constraints and one name cannot serve both:
+///
+/// * A browser hitting `http://127.0.0.1:8188` can be refused where `localhost`
+///   works — extensions and private-network policies treat a bare loopback IP as a
+///   different, less trusted origin. Reported on this machine.
+/// * Our own probes must NOT use `localhost`: it resolves to `::1` first on most
+///   systems, and ComfyUI binds `127.0.0.1` only, so the connection would be
+///   refused. `address()` therefore stays numeric.
+///
+/// An explicit `COMFYUI_HOST` overrides both — if the user names a host, that is
+/// the host in every context.
+const DASHBOARD_HOST: &str = "localhost";
 
 /// Default install location. Overridable with `COMFYUI_PATH` — deliberately the
 /// same variable `comfyui-mcp` itself reads, so one setting points both at the
@@ -63,8 +79,9 @@ pub(crate) struct ComfyStatus {
     pub comfy_reachable: bool,
     /// The install crux points at (`COMFYUI_PATH` or the default).
     pub install_path: String,
-    /// `http://host:port` — also the dashboard link the card offers, since it is
-    /// the same server the user's browser talks to.
+    /// The **browsable** URL for ComfyUI's own web UI, which the card links to.
+    /// Uses a hostname rather than the loopback IP our probes use — see
+    /// [`DASHBOARD_HOST`].
     pub dashboard_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_path: Option<String>,
@@ -138,9 +155,20 @@ pub(crate) fn address() -> (String, u16) {
     (host, port)
 }
 
-/// The dashboard URL — ComfyUI's own web UI, which the card links to.
-pub(crate) fn dashboard_url() -> String {
+/// The base URL for our own HTTP calls to ComfyUI. Always numeric — see
+/// [`DASHBOARD_HOST`] for why this must not be `localhost`.
+pub(crate) fn api_base() -> String {
     let (host, port) = address();
+    format!("http://{host}:{port}")
+}
+
+/// The URL to open in a browser — ComfyUI's own web UI, which the card links to.
+///
+/// Uses `localhost` rather than the loopback IP: some browsers refuse
+/// `http://127.0.0.1:<port>` as a distinct, less-trusted origin.
+pub(crate) fn dashboard_url() -> String {
+    let (_, port) = address();
+    let host = std::env::var("COMFYUI_HOST").unwrap_or_else(|_| DASHBOARD_HOST.to_string());
     format!("http://{host}:{port}")
 }
 
@@ -251,7 +279,9 @@ struct ComfyInfo {
 /// Deliberately direct: this has to answer "is ComfyUI there" even when the MCP
 /// server is the broken part, and it is one cheap request either way.
 async fn probe_comfy() -> std::result::Result<ComfyInfo, String> {
-    let base = dashboard_url();
+    // Numeric, not the dashboard's `localhost`: that would resolve to `::1` first
+    // and be refused by a server bound to 127.0.0.1.
+    let base = api_base();
     let client = reqwest::Client::builder()
         .timeout(PROBE_TIMEOUT)
         .build()
@@ -473,6 +503,29 @@ mod tests {
         assert!(url.starts_with("http://"), "not absolute: {url}");
         let (_, port) = address();
         assert!(url.ends_with(&format!(":{port}")), "port missing: {url}");
+    }
+
+    /// The browsable URL uses a hostname and our own calls use the loopback IP.
+    /// Both halves matter: some browsers refuse `http://127.0.0.1:<port>` as a
+    /// less-trusted origin, while `localhost` resolves to `::1` first and would be
+    /// refused by a server bound to 127.0.0.1. Collapsing them breaks one or other.
+    #[test]
+    fn the_browse_url_and_the_api_base_use_different_hosts() {
+        // Only meaningful without an explicit override, which wins for both.
+        if std::env::var_os("COMFYUI_HOST").is_some() {
+            return;
+        }
+        assert!(
+            dashboard_url().contains("localhost"),
+            "the browser link must not be a bare loopback IP: {}",
+            dashboard_url()
+        );
+        assert!(
+            api_base().contains("127.0.0.1"),
+            "our own calls must stay numeric: {}",
+            api_base()
+        );
+        assert_ne!(dashboard_url(), api_base());
     }
 
     /// `COMFYUI_PATH` is the same variable `comfyui-mcp` reads. This machine has
