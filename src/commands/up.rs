@@ -62,11 +62,22 @@ pub async fn run(args: UpArgs) -> Result<()> {
         chat: Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone())),
         claude: claude.clone(),
         harnesses: Arc::new(tokio::sync::Mutex::new(None)),
+        blender: Arc::new(tokio::sync::Mutex::new(None)),
+        blender_status: Arc::new(tokio::sync::Mutex::new(None)),
         project_lifecycle: Arc::new(ProjectLifecycle::default()),
         data_dir_move_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(port);
+
+    // Start the Blender MCP server before anything can spawn a harness. The order
+    // is the point: harness children are configured at spawn and live for many
+    // turns, so a server that arrived later would leave the first child without
+    // Blender tools for its whole life.
+    if let Some(server) = local::blender::server::start_if_available().await {
+        local::blender::server::spawn_watchdog(server.clone());
+        *state.blender.lock().await = Some(server);
+    }
 
     spawn_hf_preflight();
     spawn_k8s_preflight();
@@ -201,6 +212,13 @@ struct AppState {
     /// Harness detection cache — detection shells out to CLIs, so it's rate-
     /// limited to once per TTL unless the UI asks for a refresh.
     harnesses: Arc<tokio::sync::Mutex<Option<(std::time::Instant, Value)>>>,
+    /// The managed `blender-mcp` child, when one started. `None` on a machine
+    /// without a usable install — Blender is optional, so that is a normal state,
+    /// not a failure.
+    blender: Arc<tokio::sync::Mutex<Option<local::blender::server::BlenderServer>>>,
+    /// Blender status cache. Same reason as `harnesses`: detection shells out and
+    /// opens a socket, so it must not run on every poll.
+    blender_status: Arc<tokio::sync::Mutex<Option<(std::time::Instant, Value)>>>,
     project_lifecycle: Arc<ProjectLifecycle>,
     /// Set while a data-dir move is running. New chat turns and run launches
     /// check it and refuse (409) so nothing starts writing the store mid-move —
@@ -352,6 +370,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/settings/modal", get(modal_settings))
         .route("/api/settings/modal/provision", post(provision_modal))
+        .route("/api/settings/genai", get(genai_settings))
         .route("/api/settings/scenario", get(scenario_settings))
         .route("/api/settings/scenario/connect", post(connect_scenario))
         .route(
@@ -2620,6 +2639,85 @@ async fn connect_scenario(State(state): State<AppState>) -> ApiResult {
 async fn disconnect_scenario() -> ApiResult {
     scenario::auth::forget().map_err(bad_request)?;
     Ok(Json(scenario_settings_json().await))
+}
+
+// --- generative-ai providers ---------------------------------------------------
+
+/// How long a Blender probe is reused.
+///
+/// Much shorter than `HARNESS_CACHE_TTL`: opening and closing Blender is something
+/// the user does *while looking at this card*, so a minute-long cache would show
+/// them a stale answer about a window they can see. Short enough to notice, long
+/// enough that the `blender-mcp --help` subprocess isn't paid per poll.
+const BLENDER_CACHE_TTL: Duration = Duration::from_secs(10);
+
+/// Blender's card payload: the three-layer probe, plus what the managed server
+/// advertises.
+async fn blender_settings_json(state: &AppState) -> Value {
+    let status = local::blender::detect().await;
+    let mut out = serde_json::to_value(&status).unwrap_or_else(|_| json!({}));
+    out["kind"] = json!("blender");
+    out["id"] = json!("blender");
+    out["name"] = json!("Blender");
+    out["ready"] = json!(status.ready());
+
+    // Whether *we* have a server running is a separate fact from whether one
+    // could run: a repaired install still needs an `orx up` restart before the
+    // child exists, and the card has to be able to say so.
+    let server = state.blender.lock().await.clone();
+    match server {
+        Some(server) => {
+            out["serverUrl"] = json!(server.url());
+            out["serverRunning"] = json!(true);
+            // Works with Blender closed — `tools/list` never touches the socket —
+            // so this reports the server, not the session.
+            match server.list_tools().await {
+                Ok(tools) => out["toolCount"] = json!(tools.len()),
+                Err(e) => out["serverError"] = json!(e.to_string()),
+            }
+        }
+        None => out["serverRunning"] = json!(false),
+    }
+    out
+}
+
+/// Cached Blender payload, refreshed on `?refresh=1`.
+async fn blender_settings_cached(state: &AppState, refresh: bool) -> Value {
+    let mut slot = state.blender_status.lock().await;
+    if !refresh {
+        if let Some((at, cached)) = slot.as_ref() {
+            if at.elapsed() < BLENDER_CACHE_TTL {
+                return cached.clone();
+            }
+        }
+    }
+    let fresh = blender_settings_json(state).await;
+    *slot = Some((std::time::Instant::now(), fresh.clone()));
+    fresh
+}
+
+#[derive(Deserialize)]
+struct RefreshQuery {
+    refresh: Option<u8>,
+}
+
+/// Every generative-AI provider, one entry per Settings sub-tab.
+///
+/// A discriminated list rather than a `Harness`-style trait: Scenario is a remote
+/// OAuth service verified by a live tool call, Blender is a local process plus a
+/// socket, and they share almost no fields. A common trait would force a shape
+/// neither one really has; `kind` lets the UI render each honestly.
+async fn genai_settings(State(state): State<AppState>, Query(q): Query<RefreshQuery>) -> ApiResult {
+    let refresh = q.refresh == Some(1);
+    let mut scenario = scenario_settings_json().await;
+    scenario["kind"] = json!("scenario");
+    scenario["id"] = json!("scenario");
+    scenario["name"] = json!("Scenario");
+    scenario["ready"] = json!(scenario.get("state").and_then(Value::as_str) == Some("connected"));
+
+    Ok(Json(json!({
+        "providers": [scenario, blender_settings_cached(&state, refresh).await],
+    })))
 }
 
 #[derive(Deserialize)]

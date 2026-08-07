@@ -10,6 +10,7 @@
 //! `resolve::{resolve_project, resolve_experiment, resolve_run}`, never by hand.
 
 pub mod agent_skills;
+pub mod blender;
 pub mod chat;
 pub mod claude;
 pub mod codex;

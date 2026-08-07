@@ -203,7 +203,10 @@ impl HarnessInfo {
     }
 }
 
-pub(super) fn find_on_path(bin: &str) -> Option<PathBuf> {
+/// First match for `bin` on `PATH`. `pub(crate)` and re-exported from
+/// `local::harness` because `local::blender` needs the same lookup — one
+/// implementation beats a fourth hand-rolled PATH walk.
+pub(crate) fn find_on_path(bin: &str) -> Option<PathBuf> {
     let paths = std::env::var_os("PATH")?;
     std::env::split_paths(&paths)
         .map(|dir| dir.join(bin))

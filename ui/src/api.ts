@@ -630,6 +630,54 @@ export const connectScenario = () =>
 export const disconnectScenario = () =>
   post<ScenarioSettings>("/api/settings/scenario/disconnect");
 
+// --- settings: generative-ai providers ---------------------------------------
+
+/** Blender, reached through the Blender Lab MCP server.
+ *
+ * Three separate booleans rather than one `ready` because their fixes differ:
+ * the server can be missing, or present-but-not-runnable (a pipx venv whose
+ * interpreter a Python upgrade removed), and Blender itself can simply be closed. */
+export interface BlenderSettings {
+  kind: "blender";
+  id: string;
+  name: string;
+  /** Server runnable AND Blender reachable — what a tool call needs. */
+  ready: boolean;
+  serverFound: boolean;
+  serverRunnable: boolean;
+  blenderReachable: boolean;
+  /** Crux has a server child running. Distinct from `serverRunnable`: a freshly
+   * repaired install is runnable but needs a `crux up` restart to be running. */
+  serverRunning: boolean;
+  /** The `host:port` probed, so an override is visible rather than implied. */
+  addonAddress: string;
+  serverPath?: string;
+  serverUrl?: string;
+  blenderVersion?: string;
+  /** Absent for an unsaved file. */
+  blendFile?: string;
+  objectCount?: number;
+  toolCount?: number;
+  serverError?: string;
+  blenderError?: string;
+}
+
+/** Fields every provider carries, so the sub-tab strip can be generic. */
+export interface GenAiCommon {
+  id: string;
+  name: string;
+  ready: boolean;
+}
+
+export type ScenarioProvider = ScenarioSettings & GenAiCommon & { kind: "scenario" };
+
+export type GenAiProvider = ScenarioProvider | BlenderSettings;
+
+export const getGenAi = (refresh = false) =>
+  get<{ providers: GenAiProvider[] }>(
+    `/api/settings/genai${refresh ? "?refresh=1" : ""}`,
+  ).then((r) => r.providers);
+
 // --- settings: env vars / git / harnesses ------------------------------------
 
 export interface EnvVar {

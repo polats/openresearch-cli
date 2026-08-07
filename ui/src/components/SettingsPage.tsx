@@ -34,10 +34,12 @@ import {
   getLocalMachine,
   getModalSettings,
   getOpenResearchSettings,
-  getScenarioSettings,
+  getGenAi,
   connectScenario,
   disconnectScenario,
-  type ScenarioSettings,
+  type BlenderSettings,
+  type GenAiProvider,
+  type ScenarioProvider,
   getRaySettings,
   getSlurmSettings,
   getSshHosts,
@@ -100,7 +102,7 @@ export type SettingsTab =
   | "appearance"
   | "persona"
   | "harnesses"
-  | "scenario"
+  | "generative-ai"
   | "compute"
   | "instances"
   | "environment"
@@ -320,19 +322,173 @@ function HarnessesTab() {
   );
 }
 
-// --- scenario -------------------------------------------------------------------
+// --- generative ai (scenario, blender) ------------------------------------------
 
-function ScenarioBadge({ s }: { s: ScenarioSettings }) {
-  if (s.state === "connected") return <span className="badge ok">Connected</span>;
-  if (s.state === "expired") return <span className="badge err">Login expired</span>;
-  if (s.state === "error") return <span className="badge err">Error</span>;
-  if (s.reachable === false) return <span className="badge err">Unreachable</span>;
-  return <span className="badge">Not connected</span>;
+/** Sub-tab dot + card badge for one provider, the way `harnessStatus` does it for
+ *  harnesses — one function driving both so they can't disagree. */
+function genAiStatus(p: GenAiProvider): { cls: string; label: string } {
+  if (p.ready) return { cls: "ok", label: "Ready" };
+  if (p.kind === "scenario") {
+    if (p.state === "expired") return { cls: "err", label: "Login expired" };
+    if (p.state === "error") return { cls: "err", label: "Error" };
+    if (p.reachable === false) return { cls: "err", label: "Unreachable" };
+    return { cls: "", label: "Not connected" };
+  }
+  // Blender: "installed but broken" is a harder failure than "Blender is closed",
+  // which is just the user's window state and not something to alarm about.
+  if (p.serverFound && !p.serverRunnable) return { cls: "err", label: "Server broken" };
+  if (!p.serverFound) return { cls: "", label: "Not installed" };
+  return { cls: "warn", label: "Blender not running" };
 }
 
-function ScenarioTab() {
-  const [s, setS] = useState<ScenarioSettings | null>(null);
+function GenerativeAiTab() {
+  const [providers, setProviders] = useState<GenAiProvider[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [active, setActive] = useState("scenario");
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = (refresh = false) => {
+    setRefreshing(true);
+    return getGenAi(refresh)
+      .then((next) => {
+        setProviders(next);
+        setLoadError(null);
+      })
+      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setRefreshing(false));
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const p = providers?.find((x) => x.id === active);
+
+  return (
+    <>
+      <h1>Generative AI</h1>
+      <p className="settings-sub">
+        Asset-generation backends the agent can drive. Scenario runs in the cloud on your own
+        account; Blender runs on this machine through its MCP add-on.
+      </p>
+      {loadError ? (
+        <div className="error">{loadError}</div>
+      ) : !providers ? (
+        <div className="settings-loading">
+          <span className="spinner" /> Checking providers…
+        </div>
+      ) : (
+        <>
+          <div className="harness-tabs">
+            {providers.map((x) => (
+              <button
+                key={x.id}
+                className={x.id === active ? "active" : ""}
+                onClick={() => setActive(x.id)}
+              >
+                {x.name}
+                <span className={`harness-dot ${genAiStatus(x).cls}`} />
+              </button>
+            ))}
+          </div>
+          {p?.kind === "scenario" && <ScenarioCard s={p} onChanged={load} />}
+          {p?.kind === "blender" && (
+            <BlenderCard s={p} refreshing={refreshing} onRefresh={() => void load(true)} />
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
+/** Blender's card: one row per independently fixable fact, and the command that
+ *  fixes whichever one is broken. Reports only — no start/stop or install. */
+function BlenderCard({
+  s,
+  refreshing,
+  onRefresh,
+}: {
+  s: BlenderSettings;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const status = genAiStatus(s);
+  return (
+    <div className="settings-card">
+      <div className="settings-card-head">
+        <span className={`badge ${status.cls}`}>{status.label}</span>
+        <div className="spacer" style={{ flex: 1 }} />
+        <button className="btn sm" onClick={onRefresh} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "spin" : ""} /> Refresh
+        </button>
+      </div>
+      <div className="kv">
+        <span className="k">MCP server</span>
+        <span className="v">
+          {!s.serverFound
+            ? "not installed"
+            : !s.serverRunnable
+              ? "installed, but will not run"
+              : s.serverRunning
+                ? `running on ${s.serverUrl}`
+                : "installed — restart crux to start it"}
+        </span>
+        {s.serverPath && (
+          <>
+            <span className="k">Path</span>
+            <span className="v">
+              <code>{s.serverPath}</code>
+            </span>
+          </>
+        )}
+        <span className="k">Blender</span>
+        <span className="v">
+          {s.blenderReachable
+            ? [
+                s.blenderVersion,
+                s.blendFile ?? "unsaved file",
+                s.objectCount !== undefined ? `${s.objectCount} objects` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            : `not reachable on ${s.addonAddress}`}
+        </span>
+        {s.toolCount !== undefined && (
+          <>
+            <span className="k">Tools</span>
+            <span className="v">{s.toolCount} offered to the agent</span>
+          </>
+        )}
+      </div>
+      {!s.serverFound && (
+        <p className="settings-note">
+          Install the Blender MCP server with <code>pipx install blender-mcp</code>, then restart
+          crux so it can start one.
+        </p>
+      )}
+      {s.serverFound && !s.serverRunnable && s.serverError && (
+        <p className="settings-note">{s.serverError}</p>
+      )}
+      {/* Only worth saying once the server side is sound — otherwise it's the
+          second problem, and fixing it wouldn't help yet. */}
+      {s.serverRunnable && !s.blenderReachable && (
+        <p className="settings-note">
+          {s.blenderError ??
+            `Nothing answered on ${s.addonAddress}.`}{" "}
+          Blender-backed tools will fail until Blender is open; documentation tools keep working.
+        </p>
+      )}
+      {s.serverRunnable && !s.serverRunning && (
+        <p className="settings-note">
+          The server is usable but crux has no child running — it starts one at launch, so restart{" "}
+          <code>crux up</code> to pick it up.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ScenarioCard({ s, onChanged }: { s: ScenarioProvider; onChanged: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** Set when the server couldn't open a browser (it's on another machine over
@@ -340,20 +496,12 @@ function ScenarioTab() {
   const [manualUrl, setManualUrl] = useState<string | null>(null);
 
   const load = () =>
-    getScenarioSettings()
-      .then((next) => {
-        setS(next);
-        setLoadError(null);
-        // The server is the authority on whether a login is still in flight, so
-        // let it overrule our local optimism — otherwise a missed outcome event
-        // would leave the card stuck on "waiting" with no way back.
-        if (!next.connecting) setBusy(false);
-      })
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-
-  useEffect(() => {
-    void load();
-  }, []);
+    onChanged().then(() => {
+      // The server is the authority on whether a login is still in flight, so
+      // let it overrule our local optimism — otherwise a missed outcome event
+      // would leave the card stuck on "waiting" with no way back.
+      setBusy(false);
+    });
 
   // The POST returns as soon as the browser opens, so the outcome arrives here.
   // Re-fetch on success rather than trusting the event's scopes: the card's whole
@@ -365,9 +513,9 @@ function ScenarioTab() {
         setManualUrl(null);
         if (ev.type === "error") setError(ev.error);
         else setError(null);
-        void load();
+        void onChanged();
       }),
-    [],
+    [onChanged],
   );
 
   async function connect() {
@@ -380,7 +528,7 @@ function ScenarioTab() {
       if (!started.browserOpened) setManualUrl(started.authorizeUrl);
       // Reflect "waiting for the browser" immediately; `busy` stays set until an
       // SSE event lands or the five-minute login window times out.
-      await load();
+      await onChanged();
     } catch (err) {
       setBusy(false);
       setError(err instanceof Error ? err.message : String(err));
@@ -393,7 +541,8 @@ function ScenarioTab() {
     setError(null);
     setManualUrl(null);
     try {
-      setS(await disconnectScenario());
+      await disconnectScenario();
+      await onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -401,104 +550,92 @@ function ScenarioTab() {
     }
   }
 
-  const waiting = busy || (s?.connecting ?? false);
+  const waiting = busy || s.connecting;
+  const status = genAiStatus(s);
 
   return (
-    <>
-      <h1>Scenario</h1>
-      <p className="settings-sub">
-        AI asset generation — images, video and 3D — reached over Scenario's MCP server. Signing in
-        uses your own Scenario account, so there's no API key to paste or share.
-      </p>
-      {loadError ? (
-        <div className="error">{loadError}</div>
-      ) : !s ? (
-        <div className="settings-loading">
-          <span className="spinner" /> Checking Scenario…
-        </div>
-      ) : (
-        <div className="settings-card">
-          <div className="settings-card-head">
-            <ScenarioBadge s={s} />
-            <div className="spacer" style={{ flex: 1 }} />
-            {/* Deliberately usable while waiting: it's a read-only check, and it's
-                the way out if a login's outcome event was missed (the page was
-                reloaded mid-login, say) and the card would otherwise sit waiting
-                until the five-minute window lapsed. */}
-            <button className="btn sm" onClick={() => void load()}>
-              <RefreshCw size={12} /> Refresh
-            </button>
-          </div>
-          <div className="kv">
-            <span className="k">Login</span>
-            <span className="v">
-              {s.state === "connected"
-                ? "Signed in and working"
-                : s.state === "expired"
-                  ? "Stored, but no longer accepted"
-                  : s.state === "error"
-                    ? "Stored, but the check failed"
-                    : "Not signed in"}
-            </span>
-            {s.toolCount !== undefined && (
-              <>
-                <span className="k">Tools</span>
-                <span className="v">{s.toolCount} available in this workspace</span>
-              </>
-            )}
-            <span className="k">Token</span>
-            <span className="v">
-              <code>{s.authPath}</code> (private to your user)
-            </span>
-          </div>
-          {s.state === "disconnected" && s.reachable === false && (
-            <p className="settings-note">
-              Scenario didn't answer with the OAuth details a login needs, so signing in can't
-              succeed right now — the service may be down. {s.error}
-            </p>
-          )}
-          {s.state === "expired" && (
-            <p className="settings-note">
-              The stored login no longer works — signing in again replaces it. This happens when the
-              same account is re-authorised somewhere else.
-            </p>
-          )}
-          {s.state === "error" && s.error && <p className="settings-note">{s.error}</p>}
-          {waiting && (
-            <p className="settings-note">
-              Waiting for you to finish signing in{manualUrl ? "" : " in the browser tab that just opened"}
-              …
-              {manualUrl && (
-                <>
-                  {" "}
-                  This server has no browser of its own, so open this yourself:{" "}
-                  <a href={manualUrl} target="_blank" rel="noreferrer">
-                    the Scenario login page <ExternalLink size={11} />
-                  </a>
-                </>
-              )}
-            </p>
-          )}
-          {error && <div className="error">{error}</div>}
-          <div className="actions">
-            <button className="btn primary" onClick={() => void connect()} disabled={waiting}>
-              {waiting
-                ? "Waiting for the browser…"
-                : s.state === "connected"
-                  ? "Sign in again"
-                  : s.state === "expired"
-                    ? "Reconnect"
-                    : "Connect"}
-            </button>
-            {s.state !== "disconnected" && (
-              <button className="btn" onClick={() => void disconnect()} disabled={waiting}>
-                Disconnect
-              </button>
-            )}
-          </div>
-        </div>
+    <div className="settings-card">
+      <div className="settings-card-head">
+        <span className={`badge ${status.cls}`}>
+          {s.state === "connected" ? "Connected" : status.label}
+        </span>
+        <div className="spacer" style={{ flex: 1 }} />
+        {/* Deliberately usable while waiting: it's a read-only check, and it's
+            the way out if a login's outcome event was missed (the page was
+            reloaded mid-login, say) and the card would otherwise sit waiting
+            until the five-minute window lapsed. */}
+        <button className="btn sm" onClick={() => void load()}>
+          <RefreshCw size={12} /> Refresh
+        </button>
+      </div>
+      <div className="kv">
+        <span className="k">Login</span>
+        <span className="v">
+          {s.state === "connected"
+            ? "Signed in and working"
+            : s.state === "expired"
+              ? "Stored, but no longer accepted"
+              : s.state === "error"
+                ? "Stored, but the check failed"
+                : "Not signed in"}
+        </span>
+        {s.toolCount !== undefined && (
+          <>
+            <span className="k">Tools</span>
+            <span className="v">{s.toolCount} available in this workspace</span>
+          </>
+        )}
+        <span className="k">Token</span>
+        <span className="v">
+          <code>{s.authPath}</code> (private to your user)
+        </span>
+      </div>
+      {s.state === "disconnected" && s.reachable === false && (
+        <p className="settings-note">
+          Scenario didn't answer with the OAuth details a login needs, so signing in can't succeed
+          right now — the service may be down. {s.error}
+        </p>
       )}
-    </>
+      {s.state === "expired" && (
+        <p className="settings-note">
+          The stored login no longer works — signing in again replaces it. This happens when the same
+          account is re-authorised somewhere else.
+        </p>
+      )}
+      {s.state === "error" && s.error && <p className="settings-note">{s.error}</p>}
+      {waiting && (
+        <p className="settings-note">
+          Waiting for you to finish signing in
+          {manualUrl ? "" : " in the browser tab that just opened"}…
+          {manualUrl && (
+            <>
+              {" "}
+              This server has no browser of its own, so open this yourself:{" "}
+              <a href={manualUrl} target="_blank" rel="noreferrer">
+                the Scenario login page <ExternalLink size={11} />
+              </a>
+            </>
+          )}
+        </p>
+      )}
+      {error && <div className="error">{error}</div>}
+      <div className="actions">
+        <button className="btn primary" onClick={() => void connect()} disabled={waiting}>
+          {waiting
+            ? "Waiting for the browser…"
+            : s.state === "connected"
+              ? "Sign in again"
+              : s.state === "expired"
+                ? "Reconnect"
+                : "Connect"}
+        </button>
+        {s.state !== "disconnected" && (
+          <button className="btn" onClick={() => void disconnect()} disabled={waiting}>
+            Disconnect
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -2890,7 +3027,7 @@ export const SETTINGS_NAV: { id: Tab; label: string; icon: React.ReactNode }[] =
   { id: "appearance", label: "Appearance", icon: <Palette size={15} /> },
   { id: "persona", label: "Persona", icon: <Drama size={15} /> },
   { id: "harnesses", label: "Harnesses", icon: <Blocks size={15} /> },
-  { id: "scenario", label: "Scenario", icon: <Sparkles size={15} /> },
+  { id: "generative-ai", label: "Generative AI", icon: <Sparkles size={15} /> },
   { id: "compute", label: "Compute", icon: <Cpu size={15} /> },
   { id: "instances", label: "Instances", icon: <Server size={15} /> },
   { id: "environment", label: "Environment", icon: <SquareTerminal size={15} /> },
@@ -2915,7 +3052,7 @@ export function SettingsView({
       {tab === "appearance" && <AppearanceTab />}
       {tab === "persona" && <PersonaTab project={project} onProjectUpdated={onProjectUpdated} />}
       {tab === "harnesses" && <HarnessesTab />}
-      {tab === "scenario" && <ScenarioTab />}
+      {tab === "generative-ai" && <GenerativeAiTab />}
       {tab === "compute" && <ComputeTab />}
       {tab === "environment" && (
         <>

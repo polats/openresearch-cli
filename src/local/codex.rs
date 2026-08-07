@@ -477,8 +477,15 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
 async fn spawn_client(session_id: &str) -> Result<Arc<CodexClient>> {
     let bin = find_codex_required()?;
     let mut cmd = Command::new(&bin);
-    cmd.arg("app-server")
-        .stdin(Stdio::piped())
+    cmd.arg("app-server");
+    // Blender's tools, when crux has a server running. A dotted-path override, so
+    // it adds one entry to `mcp_servers` and leaves the user's own servers in
+    // `~/.codex/config.toml` untouched — which is also why crux still never writes
+    // that file.
+    if let Some(over) = crate::local::blender::server::codex_config_override() {
+        cmd.arg("-c").arg(over);
+    }
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(crate::local::chat::harness_log("codex")?))
         .kill_on_drop(true);
