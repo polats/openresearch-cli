@@ -4,6 +4,7 @@
 // consistently. Colors mirror the --persona-* tokens in styles.css.
 import {
   Box,
+  Blend,
   Clapperboard,
   Gamepad2,
   Lightbulb,
@@ -70,6 +71,14 @@ const META: Record<string, PersonaMeta> = {
     cls: "persona-blender",
     role: "Models 3D assets in your open Blender and exports them for the build.",
   },
+  comfyui: {
+    id: "comfyui",
+    label: "ComfyUI artist",
+    Icon: Blend,
+    color: "var(--persona-comfyui)",
+    cls: "persona-comfyui",
+    role: "Generates 2D art on your local ComfyUI and checks the result.",
+  },
   research: {
     id: "research",
     label: "Research",
@@ -93,6 +102,7 @@ export const PERSONA_ORDER = [
   "analyst",
   "game-designer",
   "blender",
+  "comfyui",
   "research",
 ] as const;
 

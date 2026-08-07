@@ -135,6 +135,10 @@ const SYSTEM_PROMPT_PRODUCER: &str = include_str!("../../SYSTEM_PROMPT_PRODUCER.
 /// *running* Blender via the Blender MCP tools and exports for a game-designer to
 /// load. Launches no compute; its output is a file.
 const SYSTEM_PROMPT_BLENDER: &str = include_str!("../../SYSTEM_PROMPT_BLENDER.md");
+/// The ComfyUI persona's playbook template — generates 2D assets on the local
+/// ComfyUI via its MCP tools. Launches no experiment compute; its output is a
+/// file, produced on a GPU shared with everything else on the machine.
+const SYSTEM_PROMPT_COMFYUI: &str = include_str!("../../SYSTEM_PROMPT_COMFYUI.md");
 
 /// Appended to EVERY persona's playbook (not just the producer) so any session
 /// knows the one correct way to involve another agent. Without this, a worker
@@ -155,7 +159,7 @@ sub-session** the human approves:
 
 ```sh
 orx agent suggest --from-session {session_id} \\
-  --persona <idea-foundry|analyst|game-designer|producer|blender> \\
+  --persona <idea-foundry|analyst|game-designer|producer|blender|comfyui> \\
   --harness <claude-code|codex|opencode> --model <model-id> \\
   --parent <experimentNodeId> \\
   --task \"<what the subagent should do — name the node id>\" \\
@@ -180,6 +184,7 @@ pub fn persona_template(persona: Persona) -> &'static str {
         Persona::Analyst => SYSTEM_PROMPT_ANALYST,
         Persona::Producer => SYSTEM_PROMPT_PRODUCER,
         Persona::Blender => SYSTEM_PROMPT_BLENDER,
+        Persona::Comfyui => SYSTEM_PROMPT_COMFYUI,
     };
     raw.split_once("-->\n\n")
         .map(|(_, rest)| rest)
@@ -795,6 +800,7 @@ mod tests {
                 Persona::Analyst => "# OpenResearch analyst agent",
                 Persona::Producer => "# OpenResearch producer agent",
                 Persona::Blender => "# OpenResearch Blender agent",
+                Persona::Comfyui => "# OpenResearch ComfyUI agent",
             };
             assert!(md.starts_with(title), "template comment not stripped");
             assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
@@ -854,6 +860,20 @@ mod tests {
                 Persona::Blender => {
                     assert!(md.contains("orx-blender"));
                     assert!(md.contains("orx-git"));
+                    assert!(!md.contains("orx-compute"));
+                    assert!(!md.contains("orx-evidence"));
+                    assert!(!md.contains("orx-play"));
+                    assert!(!md.contains("orx-reports"));
+                    assert!(!md.contains("orx-lit"));
+                    assert!(!md.contains("orx-ideate"));
+                }
+                // Same shape as Blender, and it must not claim Blender's tools
+                // either — the two hand work to each other and should stay
+                // distinct about what they can actually do.
+                Persona::Comfyui => {
+                    assert!(md.contains("orx-comfyui"));
+                    assert!(md.contains("orx-git"));
+                    assert!(!md.contains("orx-blender"));
                     assert!(!md.contains("orx-compute"));
                     assert!(!md.contains("orx-evidence"));
                     assert!(!md.contains("orx-play"));

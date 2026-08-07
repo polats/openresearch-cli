@@ -3604,6 +3604,9 @@ a.files-pill:hover {
      designer's) even though Blender's own brand is orange: the two personas hand
      work to each other constantly, so their badges must not read as the same. */
   --persona-blender: var(--accent-amber);
+  /* green = comfyui artist. The last unused accent that isn't red, which would
+     read as an error state on a badge rather than an identity. */
+  --persona-comfyui: var(--accent-green);
 }
 .persona-swatch {
   flex: none;
@@ -3633,6 +3636,7 @@ a.files-pill:hover {
 .persona-badge.persona-analyst { color: var(--persona-analyst); }
 .persona-badge.persona-producer { color: var(--persona-producer); }
 .persona-badge.persona-blender { color: var(--persona-blender); }
+.persona-badge.persona-comfyui { color: var(--persona-comfyui); }
 /* compact variant for dense rows (icon only, or tiny label) */
 .persona-badge.compact { padding: 2px; border-color: transparent; background: transparent; }
 
@@ -3878,6 +3882,18 @@ a.files-pill:hover {
 .persona-active-pill.persona-blender {
   color: var(--persona-blender);
   border-color: var(--persona-blender);
+}
+/* comfyui persona (green) — the 2D asset generator */
+.persona-swatch.persona-comfyui,
+.persona-bar.persona-comfyui {
+  background: var(--persona-comfyui);
+}
+.persona-card.persona-comfyui {
+  border-left: 3px solid var(--persona-comfyui);
+}
+.persona-active-pill.persona-comfyui {
+  color: var(--persona-comfyui);
+  border-color: var(--persona-comfyui);
 }
 /* Recents row: title + a muted provider·model subline (glanceable per-session). */
 .session-row .session-titlewrap {
