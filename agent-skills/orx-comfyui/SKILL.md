@@ -82,9 +82,22 @@ batch, lighter model.
 
 ## Render, then look
 
-Enqueue and **wait for the job** rather than polling in a tight loop. When it
-finishes, the history entry gives you the status, the duration and the output
-filenames.
+Enqueue, then **wait by re-reading the job's status with the history tool** until
+it reports done. When it finishes, that same entry gives you the status, the
+duration and the output filenames.
+
+Two ways of waiting that look reasonable and are not:
+
+- **Shelling out to watch for the output file.** The MCP tools already tell you
+  the job's state; a shell loop watching the filesystem knows less (it cannot see
+  a *failed* job, only an absent file) and invites the next mistake.
+- **Backgrounding the wait.** Anything that returns immediately and finishes
+  later lets your turn end mid-render. The image lands, correctly named, and the
+  user is never told — they are reading the conversation, not the output
+  directory. Observed in practice; do not do it.
+
+Wait in the foreground, or say plainly that you are stopping with the job
+unfinished and give its id.
 
 Then **fetch the image and look at it.** A `success` status means the graph
 executed — nothing more. It does not tell you the composition works, the subject
@@ -102,6 +115,9 @@ Report, in one message: what you made, the **absolute path**, dimensions, and th
 **exact settings** — model files, steps, cfg, sampler, scheduler, seed, and any
 LoRA with its strength and trigger words. Those settings are what make the result
 reproducible or extendable; without them a good image is a lucky accident.
+
+**This report is the last thing you do.** A delivered file with no message
+describing it has not been delivered as far as the user is concerned.
 
 ## Iterating
 

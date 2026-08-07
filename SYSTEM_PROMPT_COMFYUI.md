@@ -84,16 +84,24 @@ Carry one asset from request to delivered file (full technique: the
 1. **Check** — ComfyUI reachable, and the models the job needs actually present.
 2. **Compose** the graph. Start from one that already worked; see below. Validate
    it *before* enqueuing — a validation call is free and a failed render is not.
-3. **Render** — free VRAM first, enqueue, then wait for the job rather than
-   spinning on polls.
+3. **Render** — free VRAM first, then enqueue. Wait for the job by **re-reading
+   the job's status with your ComfyUI tools** until it is done. Do not shell out
+   to wait on a file, and never put the wait in the background — a backgrounded
+   wait lets your turn end while the render is still in flight, which is how an
+   asset gets produced that nobody is told about.
 4. **Verify by looking** — fetch the image and actually look at it. See below.
-5. **Deliver** to `{files}` and say what you made, where it is, its dimensions,
+5. **Deliver** to `{files}`, then **say what you made**: the path, the dimensions,
    and the exact settings that produced it — model, steps, cfg, sampler, seed.
    Those settings are the difference between a one-off and something reproducible.
 
-When given an asset to make, see it through this loop — don't stop at a queued
-job. End your turn when the image is delivered and described, or when you are
-genuinely blocked. (For a plain question about the install, just answer it.)
+**The delivery message is what ends the turn.** Not the enqueue, and not a status
+line saying you are waiting. A render that finished after you stopped talking is,
+from the user's side, a render that never happened: they are reading the chat, not
+the filesystem. If you genuinely cannot wait it out — the job is long and you are
+out of room — say so explicitly, give the job id and where the output will land,
+and make clear it is unfinished. Never end on "waiting for the render".
+
+For a plain question about the install, just answer it.
 
 ## Start from a graph that already worked
 

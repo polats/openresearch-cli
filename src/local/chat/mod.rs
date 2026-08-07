@@ -389,6 +389,8 @@ pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
         // to tell one from a placeholder or a user rename.
         "titleSource": s.title_source,
         "model": s.model,
+        // What the harness actually ran, when nothing was pinned — display only.
+        "effectiveModel": s.effective_model,
         "permissionMode": s.permission_mode,
         "reasoningLevel": s.reasoning_level,
         "persona": s.persona,
@@ -2542,6 +2544,7 @@ mod bridge_tests {
             title: None,
             title_source: None,
             model: Some("claude-haiku-4-5".into()),
+            effective_model: None,
             permission_mode: None,
             reasoning_level: None,
             persona: None,
@@ -2608,6 +2611,7 @@ mod notify_target_tests {
                 title: None,
                 title_source: None,
                 model: None,
+                effective_model: None,
                 permission_mode: None,
                 reasoning_level: None,
                 persona: None,

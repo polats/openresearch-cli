@@ -830,6 +830,14 @@ fn handle_event(
                     assistant_msgs.insert(id.to_string());
                 }
             }
+            // Which model actually answered. Captured here rather than from the
+            // post-turn session fetch because this event is what renders the
+            // transcript, so it is guaranteed to run — whereas the turn-completion
+            // fetch demonstrably does not (its opencode-go cost log stays empty
+            // across real opencode-go turns, a pre-existing gap).
+            if session == Some(native_id) && is_assistant {
+                capture_effective_model(&ctx.session_id, info);
+            }
             // Only the MAIN session's tokens drive the context meter; a
             // sub-agent's smaller counts must not overwrite it.
             if session == Some(native_id) && is_assistant {
@@ -939,6 +947,64 @@ async fn capture_turn_cost(ctx: &TurnCtx, base: &str, native_id: &str) {
         return;
     };
     capture_go_usage(native_id, &session);
+}
+
+/// Record which model opencode actually ran this turn.
+///
+/// Worth capturing because it is otherwise unknowable: when no model is pinned,
+/// opencode picks one from the authenticated providers and reports it only at
+/// runtime — `opencode models` lists everything and flags no default, and the
+/// user's config may name none. Without this the UI can only say "OpenCode" and
+/// leave you guessing which model answered.
+///
+/// Stored separately from the session's pinned `model` (see
+/// `StoredChatSession::effective_model`): writing it there would turn an
+/// observation into a pin. Best-effort — a missing field or store error is
+/// simply skipped.
+fn capture_effective_model(session_id: &str, info: &Value) {
+    let Some(label) = effective_model_label(info) else {
+        return;
+    };
+    // `message.updated` fires several times per message, so memoize: without
+    // this every streamed chunk would be a redundant UPDATE.
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    {
+        let mut seen = SEEN
+            .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        if seen.get(session_id) == Some(&label) {
+            return;
+        }
+        seen.insert(session_id.to_string(), label.clone());
+    }
+    if let Ok(store) = crate::store::Store::open() {
+        let _ = store.set_chat_session_effective_model(session_id, &label);
+    }
+}
+
+/// `provider/model` from either payload shape opencode uses.
+///
+/// A *message* carries `modelID`/`providerID` at the top level; a *session*
+/// nests them under `model` as `id`/`providerID`. Both are accepted because the
+/// capture point has moved between them once already, and picking the wrong one
+/// fails silently — the field just stays empty and the UI keeps saying nothing.
+/// The `provider/model` spelling matches how a pinned model is stored, so both
+/// render identically.
+fn effective_model_label(info: &Value) -> Option<String> {
+    let (id, provider) = match info.get("model") {
+        Some(m) if m.is_object() => (
+            m.get("id").or_else(|| m.get("modelID")),
+            m.get("providerID"),
+        ),
+        _ => (info.get("modelID"), info.get("providerID")),
+    };
+    let id = id.and_then(Value::as_str).filter(|s| !s.is_empty())?;
+    match provider.and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        Some(p) => Some(format!("{p}/{id}")),
+        None => Some(id.to_string()),
+    }
 }
 
 /// Store key for the last opencode-go spend log captured from a turn.
@@ -1629,6 +1695,43 @@ opencode/glm-5
         assert_eq!(windows[0].remaining_percent, 0.0);
         assert_eq!(windows[1].remaining_percent, 0.0);
         assert_eq!(windows[2].remaining_percent, 0.0);
+    }
+
+    /// The observed model is read from the session payload's `model` object.
+    /// Pinned here because the key differs between opencode's payloads (`id` on
+    /// the session, `modelID` on a message) and picking the wrong one fails
+    /// silently — the field simply stays empty and the UI keeps saying nothing.
+    #[test]
+    fn effective_model_is_read_from_either_payload_shape() {
+        // A *message*: modelID/providerID at the top level. This is the shape the
+        // live capture point (`message.updated`) actually delivers.
+        assert_eq!(
+            effective_model_label(&serde_json::json!({
+                "role": "assistant", "modelID": "deepseek-v4-flash", "providerID": "opencode-go"
+            }))
+            .as_deref(),
+            Some("opencode-go/deepseek-v4-flash")
+        );
+        // A *session*: nested under `model` as id/providerID — what
+        // `/session/{id}` returns, verified live.
+        assert_eq!(
+            effective_model_label(&go_info("opencode-go", 1.0)).as_deref(),
+            Some("opencode-go/deepseek-v4-flash")
+        );
+        // Provider missing → the bare model id, not a dangling slash.
+        assert_eq!(
+            effective_model_label(&serde_json::json!({"modelID": "kimi-k3"})).as_deref(),
+            Some("kimi-k3")
+        );
+        // Nothing reported → nothing recorded, rather than a bogus label.
+        assert_eq!(
+            effective_model_label(&serde_json::json!({"cost": 1.0})),
+            None
+        );
+        assert_eq!(
+            effective_model_label(&serde_json::json!({"modelID": "", "providerID": "x"})),
+            None
+        );
     }
 
     /// Only `opencode-go` sessions are captured — a zen session is a no-op even

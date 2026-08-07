@@ -1314,7 +1314,13 @@ export interface ChatSession {
   /** Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
    * (harness auto-title), `"user"` (rename). Null on legacy sessions. */
   titleSource?: string | null;
+  /** The model the user pinned for this session; null = harness default. */
   model: string | null;
+  /** The model the harness actually resolved and ran, observed at turn time.
+   *  Display only — never send it back as a pin. Fills in the blank when `model`
+   *  is null, which is otherwise unanswerable: OpenCode picks its default from
+   *  the authenticated providers and reports it only at runtime. */
+  effectiveModel?: string | null;
   permissionMode: string | null;
   reasoningLevel: string | null;
   /** The session's own persona wire id; null = inherit the project's persona. */

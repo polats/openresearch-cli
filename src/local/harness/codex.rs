@@ -2055,6 +2055,21 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                                 }
                             }
                         }
+                        ServerReqKind::McpElicitation => {
+                            // Codex asking to run a tool on one of the MCP servers
+                            // orx itself injected → accept; anything else is a
+                            // form/url elicitation we have no surface for.
+                            let accept =
+                                crate::local::codex::mcp_elicitation_is_tool_approval(&params);
+                            let _ = client
+                                .respond(
+                                    &id,
+                                    serde_json::json!({
+                                        "action": if accept { "accept" } else { "decline" }
+                                    }),
+                                )
+                                .await;
+                        }
                         ServerReqKind::Other => {
                             // A reply schema we don't speak — fail the call
                             // rather than answer in a shape codex can't parse.
@@ -2110,6 +2125,12 @@ async fn settle_request(client: &CodexClient, id: &Value, kind: ServerReqKind) {
         ServerReqKind::UserInput => {
             let _ = client
                 .respond(id, serde_json::json!({ "answers": {} }))
+                .await;
+        }
+        ServerReqKind::McpElicitation => {
+            // Its own reply shape: `{action}`, not `{decision}`.
+            let _ = client
+                .respond(id, serde_json::json!({ "action": "decline" }))
                 .await;
         }
         ServerReqKind::Other => {

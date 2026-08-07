@@ -1191,8 +1191,11 @@ function SessionRow({
   const title = session.title?.trim() || "Untitled";
   // The session's own persona wins; fall back to the project's.
   const rowPersona = session.persona ?? persona ?? "research";
+  // Fall back to the observed model so an unpinned session still names what it
+  // ran, rather than showing the harness alone and leaving you to guess.
+  const shownModel = session.model ?? session.effectiveModel;
   const provider = `${HARNESS_LABELS[session.harness] ?? session.harness}${
-    session.model ? ` · ${session.model}` : ""
+    shownModel ? ` · ${shownModel}` : ""
   }`;
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
@@ -1228,7 +1231,7 @@ function SessionRow({
         editing ? "editing" : ""
       } ${depth > 0 ? "nested" : ""}`}
       style={depth > 0 ? { paddingLeft: 10 + depth * 16 } : undefined}
-      title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}`}
+      title={`${HARNESS_LABELS[session.harness]}${shownModel ? ` · ${shownModel}` : ""}`}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
         if (editing) return;

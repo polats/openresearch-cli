@@ -4249,6 +4249,8 @@ async fn create_chat_session(
         title: None,
         title_source: None,
         model: nonempty(req.model),
+        // Observed during the first turn, not at creation.
+        effective_model: None,
         permission_mode: nonempty(req.permission_mode),
         reasoning_level: nonempty(req.reasoning_level),
         persona,
@@ -4365,6 +4367,8 @@ async fn approve_proposal(
         native_session_id: None,
         title: None,
         model,
+        // Observed during the first turn, not at creation.
+        effective_model: None,
         // An approved subagent runs autonomously in the background — there is no
         // human at its keyboard to answer per-tool permission prompts, so it would
         // hang on the first one. Default it to bypass (the human already approved
