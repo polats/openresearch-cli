@@ -3600,6 +3600,10 @@ a.files-pill:hover {
   --persona-idea-foundry: var(--accent-purple);
   --persona-analyst: var(--accent-teal);
   --persona-producer: var(--accent-pink);
+  /* amber = blender artist. Deliberately not --accent-orange (the game
+     designer's) even though Blender's own brand is orange: the two personas hand
+     work to each other constantly, so their badges must not read as the same. */
+  --persona-blender: var(--accent-amber);
 }
 .persona-swatch {
   flex: none;
@@ -3628,6 +3632,7 @@ a.files-pill:hover {
 .persona-badge.persona-idea-foundry { color: var(--persona-idea-foundry); }
 .persona-badge.persona-analyst { color: var(--persona-analyst); }
 .persona-badge.persona-producer { color: var(--persona-producer); }
+.persona-badge.persona-blender { color: var(--persona-blender); }
 /* compact variant for dense rows (icon only, or tiny label) */
 .persona-badge.compact { padding: 2px; border-color: transparent; background: transparent; }
 
@@ -3861,6 +3866,18 @@ a.files-pill:hover {
 .persona-active-pill.persona-producer {
   color: var(--persona-producer);
   border-color: var(--persona-producer);
+}
+/* blender persona (amber) — the 3D asset author */
+.persona-swatch.persona-blender,
+.persona-bar.persona-blender {
+  background: var(--persona-blender);
+}
+.persona-card.persona-blender {
+  border-left: 3px solid var(--persona-blender);
+}
+.persona-active-pill.persona-blender {
+  color: var(--persona-blender);
+  border-color: var(--persona-blender);
 }
 /* Recents row: title + a muted provider·model subline (glanceable per-session). */
 .session-row .session-titlewrap {

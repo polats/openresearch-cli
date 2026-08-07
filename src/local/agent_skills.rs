@@ -71,15 +71,20 @@ pub enum Persona {
     /// *suggesting* subagents (idea-foundry / analyst / game-designer) for a
     /// human to approve — it never does the worker jobs itself.
     Producer,
+    /// Blender artist: authors 3D assets in the user's *running* Blender through
+    /// the Blender MCP tools, then exports for a game-designer to load. Launches
+    /// no compute and builds no playable — its output is a file.
+    Blender,
 }
 
 impl Persona {
-    pub const ALL: [Persona; 5] = [
+    pub const ALL: [Persona; 6] = [
         Persona::Research,
         Persona::GameDesigner,
         Persona::IdeaFoundry,
         Persona::Analyst,
         Persona::Producer,
+        Persona::Blender,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -89,6 +94,7 @@ impl Persona {
             Persona::IdeaFoundry => "idea-foundry",
             Persona::Analyst => "analyst",
             Persona::Producer => "producer",
+            Persona::Blender => "blender",
         }
     }
 
@@ -101,8 +107,9 @@ impl Persona {
             Some("idea-foundry") => Ok(Persona::IdeaFoundry),
             Some("analyst") => Ok(Persona::Analyst),
             Some("producer") => Ok(Persona::Producer),
+            Some("blender") => Ok(Persona::Blender),
             Some(other) => Err(format!(
-                "unknown persona '{other}' (expected 'research', 'game-designer', 'idea-foundry', 'analyst', or 'producer')"
+                "unknown persona '{other}' (expected 'research', 'game-designer', 'idea-foundry', 'analyst', 'producer', or 'blender')"
             )),
         }
     }
@@ -114,6 +121,7 @@ impl Persona {
             Persona::IdeaFoundry => "Idea foundry",
             Persona::Analyst => "Analyst",
             Persona::Producer => "Producer",
+            Persona::Blender => "Blender artist",
         }
     }
 
@@ -141,6 +149,11 @@ impl Persona {
                 "Runs the discovery funnel: surveys the idea gallery and \
                  suggests the next subagent (capture / evaluate / build) for you \
                  to approve — an orchestrator, not a worker."
+            }
+            Persona::Blender => {
+                "Authors 3D assets in your running Blender: inspects the scene, \
+                 drives bpy, renders to check its own work, and exports glTF for \
+                 a game-designer to load."
             }
         }
     }
@@ -171,6 +184,7 @@ const IDEATE: &str = include_str!("../../agent-skills/orx-ideate/SKILL.md");
 const EVALUATE: &str = include_str!("../../agent-skills/orx-evaluate/SKILL.md");
 const GAME_POLISH: &str = include_str!("../../agent-skills/orx-game-polish/SKILL.md");
 const PRODUCE: &str = include_str!("../../agent-skills/orx-produce/SKILL.md");
+const BLENDER: &str = include_str!("../../agent-skills/orx-blender/SKILL.md");
 
 /// The committed game starter template, bundled with the `orx-game-polish`
 /// skill and written into the session worktree at
@@ -348,6 +362,11 @@ const S_PRODUCE: AgentSkill = AgentSkill {
     description: "Orchestrate the game-discovery funnel: survey the idea gallery, decide the next move, and suggest a subagent (idea-foundry to capture, analyst to evaluate, game-designer to build) via `orx agent suggest` for the human to approve — including which provider/model fits the job. Use to run the pipeline over many ideas without doing the worker jobs yourself.",
     content: PRODUCE,
 };
+const S_BLENDER: AgentSkill = AgentSkill {
+    name: "orx-blender",
+    description: "Author 3D assets in the user's running Blender through the Blender MCP tools: inspect the scene before editing, drive bpy in small verified steps, render and read the image back to check the result, and export glTF to the files dir. Use when making or fixing a 3D asset, inspecting a .blend, or when a Blender tool reports it cannot reach Blender.",
+    content: BLENDER,
+};
 
 /// The modules for a given set, in a stable order. Local and Full share names;
 /// `experiment-tree`/`compute`/`reports`/`evidence` swap bodies, and `create`
@@ -401,11 +420,16 @@ pub fn skills_for_persona(persona: Persona) -> Vec<&'static AgentSkill> {
         // The orchestrator: one skill (survey → suggest). It dispatches the
         // worker personas rather than doing their jobs, so it needs nothing else.
         Persona::Producer => vec![&S_PRODUCE],
+        // Author an asset and deliver it: one skill for the Blender work, plus
+        // git because a finished asset gets committed to the game's branch when
+        // the build loads it from the repo. No compute, tree, or play modules —
+        // this persona's output is a file, not a run.
+        Persona::Blender => vec![&S_BLENDER, &S_GIT],
     }
 }
 
 /// Resolve a bundled skill by name within `set`, plus the persona-only modules
-/// (play, ideate, evaluate, game-polish, produce), accepting both the public
+/// (play, ideate, evaluate, game-polish, produce, blender), accepting both the public
 /// name (`orx-compute`) and the bare form (`compute`). `None` for an unknown
 /// name — the caller falls back to the live API fetch. Local and cloud share
 /// skill *names* but swap bodies, so pass the set you actually want.
@@ -413,7 +437,14 @@ pub fn find(name: &str, set: SkillSet) -> Option<&'static AgentSkill> {
     let want = name.trim();
     skills(set)
         .into_iter()
-        .chain([&S_PLAY, &S_IDEATE, &S_EVALUATE, &S_GAME_POLISH, &S_PRODUCE])
+        .chain([
+            &S_PLAY,
+            &S_IDEATE,
+            &S_EVALUATE,
+            &S_GAME_POLISH,
+            &S_PRODUCE,
+            &S_BLENDER,
+        ])
         .find(|s| s.name == want || s.name.strip_prefix("orx-") == Some(want))
 }
 

@@ -89,6 +89,8 @@ function personaTitle(persona?: string | null): string {
       return "Analyst persona";
     case "producer":
       return "Producer persona";
+    case "blender":
+      return "Blender artist persona";
     default:
       return "Research agent persona";
   }
