@@ -47,39 +47,9 @@ pub(crate) fn log_path() -> PathBuf {
     store::data_dir().join("blender-mcp.log")
 }
 
-/// The managed server's URL, for the harness spawn paths.
-///
-/// A process global rather than a value threaded through three call chains: the
-/// three harnesses are plumbed completely differently (Claude's spawn takes a
-/// `ChatHost`, Codex's takes neither, OpenCode's config writer runs on a blocking
-/// task), yet all three want the same single startup fact. Set once, before
-/// anything can spawn a harness — see the ordering note in `commands::up::run`.
-static HARNESS_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-/// The URL to give harnesses, or `None` when no server started.
-///
-/// `None` means the harness gets **no Blender entry at all**, which is deliberate:
-/// a configured MCP server that nothing answers shows up as a broken tool in the
-/// agent's list, which is worse than its absence.
-pub(crate) fn harness_url() -> Option<&'static str> {
-    HARNESS_URL.get().map(String::as_str)
-}
-
-/// The `-c` value that registers the managed server with Codex, or `None` when
-/// there is no server.
-///
-/// A **dotted path** on purpose: it sets one key *inside* `mcp_servers` and leaves
-/// the rest of the table alone, so the user's own Codex MCP servers survive.
-/// Verified — with a `config.toml` declaring a server, `-c
-/// mcp_servers.blender={…}` lists both. (Contrast the title path's
-/// `-c mcp_servers={}`, which replaces the whole table, deliberately, to boot none
-/// of them for a one-line request.)
-///
-/// The value is TOML, and the URL is ours (`http://127.0.0.1:<port>/`), so it needs
-/// no escaping beyond the quotes.
-pub(crate) fn codex_config_override() -> Option<String> {
-    harness_url().map(|url| format!("mcp_servers.blender={{url=\"{url}\"}}"))
-}
+/// The name Blender's tools appear under in an agent's namespace
+/// (`mcp__blender__*`).
+pub(crate) const SERVER_NAME: &str = "blender";
 
 /// A running `blender-mcp`. Cheap to clone; the child sits behind a mutex so the
 /// watchdog can replace it without invalidating anyone's handle.
@@ -305,9 +275,9 @@ pub(crate) async fn start_if_available() -> Option<BlenderServer> {
     match BlenderServer::start(bin).await {
         Ok(server) => {
             eprintln!("orx up: blender-mcp on 127.0.0.1:{}", server.port());
-            // Publish before returning: the caller wires the watchdog and the
+            // Register before returning: the caller wires the watchdog and the
             // router next, and any harness spawn after that must see the URL.
-            let _ = HARNESS_URL.set(server.url());
+            crate::local::mcp_servers::register(SERVER_NAME, server.url());
             Some(server)
         }
         Err(e) => {

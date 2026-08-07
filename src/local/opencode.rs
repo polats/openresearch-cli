@@ -96,14 +96,12 @@ fn opencode_config_json(model: Option<&str>, instructions: &str) -> String {
     if let Some(model) = model {
         cfg["model"] = json!(model);
     }
-    // Blender's tools, when crux has a server running. Only added if there is one:
-    // this child gets `OPENCODE_DISABLE_PROJECT_CONFIG=1` in the tracked-config
-    // case, so anything we omit here is simply absent rather than falling back to
-    // the repo's own `mcp` block.
-    if let Some(url) = crate::local::blender::server::harness_url() {
-        cfg["mcp"] = json!({
-            "blender": { "type": "remote", "url": url, "enabled": true },
-        });
+    // Every managed MCP server crux is running (Blender, ComfyUI). Only added if
+    // there is at least one: this child gets `OPENCODE_DISABLE_PROJECT_CONFIG=1`
+    // in the tracked-config case, so anything we omit here is simply absent rather
+    // than falling back to the repo's own `mcp` block.
+    if let Some(mcp) = crate::local::mcp_servers::opencode_config() {
+        cfg["mcp"] = mcp;
     }
     serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string())
 }

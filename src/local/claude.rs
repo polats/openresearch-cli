@@ -398,7 +398,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
             session_id: &spec.session_id,
             token,
         }),
-        crate::local::blender::server::harness_url(),
+        &crate::local::mcp_servers::claude_entries(),
     ) {
         Ok(Some(path)) => {
             cmd.arg("--mcp-config").arg(path);

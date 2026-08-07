@@ -861,8 +861,9 @@ pub(crate) struct GateSpec<'a> {
 ///   binary). Written only when `gate` is `Some`, i.e. only in Plan mode. Writing
 ///   it in other modes would put a tool in the model's list that the CLI never
 ///   consults, because `--permission-prompt-tool` stays Plan-only.
-/// * **`blender`** — the managed `blender-mcp` server, in *every* mode. These are
-///   the user's own tools; there is no reason to withhold them outside Plan.
+/// * **The managed MCP servers** (Blender, ComfyUI — see `local::mcp_servers`), in
+///   *every* mode. These are the user's own tools; there is no reason to withhold
+///   them outside Plan.
 ///
 /// The split matters beyond tidiness: `bridge_active` (and therefore the respawn
 /// decision in `local::claude::child_action`) must keep tracking only the
@@ -873,15 +874,15 @@ pub(crate) struct GateSpec<'a> {
 /// `--mcp-config` is *additive* to the user's own configured servers — that is why
 /// the title path needs `--strict-mcp-config` to avoid booting them — so nothing
 /// here displaces anything the user set up.
-/// `blender_url` is passed in rather than read from
-/// `local::blender::server::harness_url` so this stays a pure function of its
-/// arguments — the emit-only-what-the-mode-needs logic is the part worth testing.
+/// `servers` is passed in rather than read from `local::mcp_servers` so this stays
+/// a pure function of its arguments — the emit-only-what-the-mode-needs logic is
+/// the part worth testing.
 pub(crate) fn write_mcp_config(
     repo: &std::path::Path,
     gate: Option<GateSpec<'_>>,
-    blender_url: Option<&str>,
+    servers: &[(&str, serde_json::Value)],
 ) -> Result<Option<PathBuf>> {
-    let config = match mcp_config_json(gate, blender_url)? {
+    let config = match mcp_config_json(gate, servers)? {
         Some(config) => config,
         // Nothing to say: no bridge wanted and no Blender server. Writing an empty
         // `mcpServers` would still cost a `--mcp-config` flag and a file for no
@@ -901,13 +902,13 @@ pub(crate) fn write_mcp_config(
 /// The `mcpServers` document, or `None` when there is nothing to configure.
 fn mcp_config_json(
     gate: Option<GateSpec<'_>>,
-    blender_url: Option<&str>,
+    servers: &[(&str, serde_json::Value)],
 ) -> Result<Option<serde_json::Value>> {
-    let mut servers = serde_json::Map::new();
+    let mut out = serde_json::Map::new();
     if let Some(gate) = gate {
         let orx = std::env::current_exe()
             .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
-        servers.insert(
+        out.insert(
             "orx".to_string(),
             serde_json::json!({
                 "type": "stdio",
@@ -921,16 +922,13 @@ fn mcp_config_json(
             }),
         );
     }
-    if let Some(url) = blender_url {
-        servers.insert(
-            "blender".to_string(),
-            serde_json::json!({ "type": "http", "url": url }),
-        );
+    for (name, entry) in servers {
+        out.insert((*name).to_string(), entry.clone());
     }
-    if servers.is_empty() {
+    if out.is_empty() {
         return Ok(None);
     }
-    Ok(Some(serde_json::json!({ "mcpServers": servers })))
+    Ok(Some(serde_json::json!({ "mcpServers": out })))
 }
 
 /// Session reasoning id → Claude's `--effort` value.
@@ -1930,11 +1928,18 @@ mod tests {
         names
     }
 
-    /// No bridge and no Blender means no file and no `--mcp-config` flag. Writing
-    /// an empty `mcpServers` would cost a flag for nothing.
+    fn blender() -> Vec<(&'static str, serde_json::Value)> {
+        vec![(
+            "blender",
+            serde_json::json!({ "type": "http", "url": "http://127.0.0.1:41999/" }),
+        )]
+    }
+
+    /// No bridge and no managed servers means no file and no `--mcp-config` flag.
+    /// Writing an empty `mcpServers` would cost a flag for nothing.
     #[test]
     fn mcp_config_is_absent_when_there_is_nothing_to_configure() {
-        assert!(mcp_config_json(None, None).unwrap().is_none());
+        assert!(mcp_config_json(None, &[]).unwrap().is_none());
     }
 
     /// The whole point of the split: outside Plan mode Blender is offered but the
@@ -1943,7 +1948,7 @@ mod tests {
     /// model's list.
     #[test]
     fn non_plan_modes_get_blender_without_the_gate() {
-        let config = mcp_config_json(None, Some("http://127.0.0.1:41999/"))
+        let config = mcp_config_json(None, &blender())
             .unwrap()
             .expect("a config with just Blender");
         assert_eq!(server_names(&config), ["blender"]);
@@ -1958,7 +1963,7 @@ mod tests {
     /// before this change.
     #[test]
     fn plan_mode_without_blender_gets_only_the_gate() {
-        let config = mcp_config_json(Some(gate()), None)
+        let config = mcp_config_json(Some(gate()), &[])
             .unwrap()
             .expect("a config with just the gate");
         assert_eq!(server_names(&config), ["orx"]);
@@ -1975,10 +1980,30 @@ mod tests {
     /// the other.
     #[test]
     fn plan_mode_with_blender_gets_both_servers() {
-        let config = mcp_config_json(Some(gate()), Some("http://127.0.0.1:41999/"))
+        let config = mcp_config_json(Some(gate()), &blender())
             .unwrap()
             .expect("a config with both");
         assert_eq!(server_names(&config), ["blender", "orx"]);
+    }
+
+    /// Several managed servers must all land alongside the gate — the registry's
+    /// whole purpose, and the case a third provider introduces.
+    #[test]
+    fn every_managed_server_lands_in_the_config() {
+        let mut servers = blender();
+        servers.push((
+            "comfyui",
+            serde_json::json!({ "type": "http", "url": "http://127.0.0.1:9100/mcp" }),
+        ));
+        let config = mcp_config_json(Some(gate()), &servers)
+            .unwrap()
+            .expect("a config with all three");
+        assert_eq!(server_names(&config), ["blender", "comfyui", "orx"]);
+        // The endpoint paths differ between providers; neither may be rewritten.
+        assert_eq!(
+            config["mcpServers"]["comfyui"]["url"],
+            "http://127.0.0.1:9100/mcp"
+        );
     }
 
     /// A `list_models` response in the live 2.1.212 shape (fields we don't

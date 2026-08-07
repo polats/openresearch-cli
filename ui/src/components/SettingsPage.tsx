@@ -37,6 +37,8 @@ import {
   getGenAi,
   connectScenario,
   disconnectScenario,
+  startComfyui,
+  type ComfyuiSettings,
   type BlenderSettings,
   type GenAiProvider,
   type ScenarioProvider,
@@ -334,6 +336,13 @@ function genAiStatus(p: GenAiProvider): { cls: string; label: string } {
     if (p.reachable === false) return { cls: "err", label: "Unreachable" };
     return { cls: "", label: "Not connected" };
   }
+  if (p.kind === "comfyui") {
+    if (p.mcpFound && !p.mcpRunnable) return { cls: "err", label: "Server broken" };
+    if (!p.mcpFound) return { cls: "", label: "Not installed" };
+    // Not running is a state the card can fix with its Start button, so it's a
+    // warning rather than an error.
+    return { cls: "warn", label: "ComfyUI not running" };
+  }
   // Blender: "installed but broken" is a harder failure than "Blender is closed",
   // which is just the user's window state and not something to alarm about.
   if (p.serverFound && !p.serverRunnable) return { cls: "err", label: "Server broken" };
@@ -369,7 +378,7 @@ function GenerativeAiTab() {
       <h1>Generative AI</h1>
       <p className="settings-sub">
         Asset-generation backends the agent can drive. Scenario runs in the cloud on your own
-        account; Blender runs on this machine through its MCP add-on.
+        account; Blender and ComfyUI run on this machine, each through its own MCP server.
       </p>
       {loadError ? (
         <div className="error">{loadError}</div>
@@ -394,6 +403,9 @@ function GenerativeAiTab() {
           {p?.kind === "scenario" && <ScenarioCard s={p} onChanged={load} />}
           {p?.kind === "blender" && (
             <BlenderCard s={p} refreshing={refreshing} onRefresh={() => void load(true)} />
+          )}
+          {p?.kind === "comfyui" && (
+            <ComfyuiCard s={p} refreshing={refreshing} onRefresh={() => void load(true)} />
           )}
         </>
       )}
@@ -483,6 +495,145 @@ function BlenderCard({
           The server is usable but crux has no child running — it starts one at launch, so restart{" "}
           <code>crux up</code> to pick it up.
         </p>
+      )}
+    </div>
+  );
+}
+
+/** ComfyUI's card: the four layers, the polled tool count, a link into ComfyUI's
+ *  own web UI, and a Start button when nothing is listening. */
+function ComfyuiCard({
+  s,
+  refreshing,
+  onRefresh,
+}: {
+  s: ComfyuiSettings;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const status = genAiStatus(s);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function start() {
+    if (starting) return;
+    setStarting(true);
+    setError(null);
+    try {
+      await startComfyui();
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  const gb = (bytes?: number) =>
+    bytes === undefined ? null : `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+
+  return (
+    <div className="settings-card">
+      <div className="settings-card-head">
+        <span className={`badge ${status.cls}`}>{status.label}</span>
+        <div className="spacer" style={{ flex: 1 }} />
+        {/* The dashboard is where the real work happens — the graph editor, the
+            queue, the outputs — so the card's job is to get you there, not to
+            reproduce it. Only offered once ComfyUI is actually up. */}
+        {s.comfyReachable && (
+          <a
+            className="btn sm"
+            href={s.dashboardUrl}
+            target="_blank"
+            rel="noreferrer"
+            title="Open ComfyUI's own web UI"
+          >
+            Open ComfyUI <ExternalLink size={12} />
+          </a>
+        )}
+        <button className="btn sm" onClick={onRefresh} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "spin" : ""} /> Refresh
+        </button>
+      </div>
+      <div className="kv">
+        <span className="k">MCP server</span>
+        <span className="v">
+          {!s.mcpFound
+            ? "not installed"
+            : !s.mcpRunnable
+              ? "installed, but will not run"
+              : s.serverRunning
+                ? `running on ${s.serverUrl}`
+                : "installed — restart crux to start it"}
+        </span>
+        <span className="k">ComfyUI</span>
+        <span className="v">
+          {s.comfyReachable
+            ? [
+                s.comfyVersion && `v${s.comfyVersion}`,
+                s.comfyManaged ? "started by crux" : "already running",
+                s.nodeClasses !== undefined && `${s.nodeClasses} nodes`,
+                s.queueDepth !== undefined &&
+                  (s.queueDepth === 0 ? "queue idle" : `${s.queueDepth} queued`),
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            : `not running at ${s.dashboardUrl}`}
+        </span>
+        {s.device && (
+          <>
+            <span className="k">Device</span>
+            <span className="v">
+              {s.device}
+              {s.vramTotal !== undefined && ` — ${gb(s.vramFree)} free of ${gb(s.vramTotal)}`}
+            </span>
+          </>
+        )}
+        {s.toolCount !== undefined && (
+          <>
+            <span className="k">Tools</span>
+            <span className="v">{s.toolCount} offered to the agent</span>
+          </>
+        )}
+        <span className="k">Install</span>
+        <span className="v">
+          <code>{s.installPath}</code>
+        </span>
+      </div>
+      {!s.mcpFound && (
+        <p className="settings-note">
+          Install the MCP server with <code>npm install -g comfyui-mcp</code>, then restart crux so
+          it can start one. There is no official local server yet — Comfy's own is in private test,
+          and their hosted Cloud one doesn't drive a self-hosted install.
+        </p>
+      )}
+      {s.mcpFound && !s.mcpRunnable && s.mcpError && <p className="settings-note">{s.mcpError}</p>}
+      {s.mcpRunnable && !s.comfyReachable && (
+        <p className="settings-note">
+          Nothing is listening at <code>{s.dashboardUrl}</code>. Start it below, or run it yourself
+          from <code>{s.installPath}</code> — the agent's ComfyUI tools fail until it's up.
+        </p>
+      )}
+      {/* The finding no other surface reports: a pack can serve templates whose
+          node classes never imported, so the templates look fine and every run
+          fails on an unknown node type. */}
+      {s.brokenPacks?.map((b) => (
+        <p className="settings-note" key={b.pack}>
+          <strong>{b.pack}</strong> serves {b.templates} workflow
+          {b.templates === 1 ? "" : "s"} referencing node classes that aren't registered, so those
+          workflows cannot run. Missing: <code>{b.missingNodes.slice(0, 4).join(", ")}</code>
+          {b.missingNodes.length > 4 && ` and ${b.missingNodes.length - 4} more`}. Either the pack
+          failed to import — a compiled dependency built against a different torch does this, and
+          ComfyUI's own log says which — or the templates need other packs you haven't installed.
+        </p>
+      ))}
+      {error && <div className="error">{error}</div>}
+      {s.mcpRunnable && !s.comfyReachable && (
+        <div className="actions">
+          <button className="btn primary" onClick={() => void start()} disabled={starting}>
+            {starting ? "Starting… (imports torch, ~30s+)" : "Start ComfyUI"}
+          </button>
+        </div>
       )}
     </div>
   );

@@ -662,6 +662,53 @@ export interface BlenderSettings {
   blenderError?: string;
 }
 
+/** A custom-node pack serving workflow templates whose node classes never
+ *  registered — the templates look available and every submission fails. */
+export interface BrokenPack {
+  pack: string;
+  templates: number;
+  missingNodes: string[];
+}
+
+/** ComfyUI, reached through the community `comfyui-mcp` server.
+ *
+ * Four independent layers because the fixes differ: the MCP server can be missing
+ * or unrunnable, ComfyUI itself can be down, and its custom nodes can have failed
+ * to import while still advertising templates. */
+export interface ComfyuiSettings {
+  kind: "comfyui";
+  id: string;
+  name: string;
+  /** MCP server runnable AND ComfyUI reachable. */
+  ready: boolean;
+  mcpFound: boolean;
+  mcpRunnable: boolean;
+  comfyReachable: boolean;
+  /** Crux has an MCP child running. */
+  serverRunning: boolean;
+  /** Crux started ComfyUI, as opposed to adopting the user's own instance. */
+  comfyManaged: boolean;
+  installPath: string;
+  /** ComfyUI's own web UI — the card links here. */
+  dashboardUrl: string;
+  mcpPath?: string;
+  serverUrl?: string;
+  comfyVersion?: string;
+  pythonVersion?: string;
+  torchVersion?: string;
+  device?: string;
+  vramTotal?: number;
+  vramFree?: number;
+  /** Registered node classes — the catalog's size, not its contents. */
+  nodeClasses?: number;
+  queueDepth?: number;
+  /** Polled from the live server, never hard-coded. */
+  toolCount?: number;
+  brokenPacks?: BrokenPack[];
+  mcpError?: string;
+  comfyError?: string;
+}
+
 /** Fields every provider carries, so the sub-tab strip can be generic. */
 export interface GenAiCommon {
   id: string;
@@ -671,7 +718,19 @@ export interface GenAiCommon {
 
 export type ScenarioProvider = ScenarioSettings & GenAiCommon & { kind: "scenario" };
 
-export type GenAiProvider = ScenarioProvider | BlenderSettings;
+export type GenAiProvider = ScenarioProvider | BlenderSettings | ComfyuiSettings;
+
+export interface ComfyStartResult {
+  /** We spawned it. */
+  started: boolean;
+  /** Something was already listening, so we took that instead. */
+  adopted: boolean;
+  dashboardUrl: string;
+}
+
+/** Start ComfyUI (or adopt a running one). Slow — it imports torch and scans
+ *  models, so the caller should show a spinner rather than assume a quick reply. */
+export const startComfyui = () => post<ComfyStartResult>("/api/settings/comfyui/start");
 
 export const getGenAi = (refresh = false) =>
   get<{ providers: GenAiProvider[] }>(

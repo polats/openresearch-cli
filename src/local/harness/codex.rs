@@ -2617,11 +2617,11 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref()) {
         cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
     }
-    // Blender's tools, matching the app-server path so a turn's tools don't depend
-    // on which transport it happened to take. Dotted path, so unlike
-    // `writable_roots` above this *adds* to the user's `mcp_servers` rather than
+    // The managed MCP servers, matching the app-server path so a turn's tools don't
+    // depend on which transport it happened to take. Dotted paths, so unlike
+    // `writable_roots` above these *add* to the user's `mcp_servers` rather than
     // replacing the table.
-    if let Some(over) = crate::local::blender::server::codex_config_override() {
+    for over in crate::local::mcp_servers::codex_overrides() {
         cmd.args(["-c", &over]);
     }
     if let Some(model) = &ctx.model {

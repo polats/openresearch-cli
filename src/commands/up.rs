@@ -64,6 +64,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
         harnesses: Arc::new(tokio::sync::Mutex::new(None)),
         blender: Arc::new(tokio::sync::Mutex::new(None)),
         blender_status: Arc::new(tokio::sync::Mutex::new(None)),
+        comfyui: Arc::new(tokio::sync::Mutex::new(None)),
+        comfyui_status: Arc::new(tokio::sync::Mutex::new(None)),
         project_lifecycle: Arc::new(ProjectLifecycle::default()),
         data_dir_move_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -77,6 +79,13 @@ pub async fn run(args: UpArgs) -> Result<()> {
     if let Some(server) = local::blender::server::start_if_available().await {
         local::blender::server::spawn_watchdog(server.clone());
         *state.blender.lock().await = Some(server);
+    }
+    // Same ordering requirement. ComfyUI itself is *not* started here — it's a GPU
+    // server that loads models, so it's adopted if already running and otherwise
+    // started on request from its card. The MCP server tolerates it being down.
+    if let Some(server) = local::comfyui::server::start_if_available().await {
+        local::comfyui::server::spawn_watchdog(server.clone());
+        *state.comfyui.lock().await = Some(server);
     }
 
     spawn_hf_preflight();
@@ -219,6 +228,12 @@ struct AppState {
     /// Blender status cache. Same reason as `harnesses`: detection shells out and
     /// opens a socket, so it must not run on every poll.
     blender_status: Arc<tokio::sync::Mutex<Option<(std::time::Instant, Value)>>>,
+    /// The managed `comfyui-mcp` child, when one started.
+    comfyui: Arc<tokio::sync::Mutex<Option<local::comfyui::server::ComfyMcpServer>>>,
+    /// ComfyUI status cache. Its probe is the most expensive of the three — a
+    /// `--help` subprocess plus several HTTP calls, one of which pulls a ~1.4 MB
+    /// `/object_info` — so it must not run per poll.
+    comfyui_status: Arc<tokio::sync::Mutex<Option<(std::time::Instant, Value)>>>,
     project_lifecycle: Arc<ProjectLifecycle>,
     /// Set while a data-dir move is running. New chat turns and run launches
     /// check it and refuse (409) so nothing starts writing the store mid-move —
@@ -371,6 +386,7 @@ fn router(state: AppState) -> Router {
         .route("/api/settings/modal", get(modal_settings))
         .route("/api/settings/modal/provision", post(provision_modal))
         .route("/api/settings/genai", get(genai_settings))
+        .route("/api/settings/comfyui/start", post(start_comfyui))
         .route("/api/settings/scenario", get(scenario_settings))
         .route("/api/settings/scenario/connect", post(connect_scenario))
         .route(
@@ -2716,7 +2732,72 @@ async fn genai_settings(State(state): State<AppState>, Query(q): Query<RefreshQu
     scenario["ready"] = json!(scenario.get("state").and_then(Value::as_str) == Some("connected"));
 
     Ok(Json(json!({
-        "providers": [scenario, blender_settings_cached(&state, refresh).await],
+        "providers": [
+            scenario,
+            blender_settings_cached(&state, refresh).await,
+            comfyui_settings_cached(&state, refresh).await,
+        ],
+    })))
+}
+
+/// ComfyUI's card payload: the layered probe, plus the polled tool surface.
+async fn comfyui_settings_json(state: &AppState) -> Value {
+    let status = local::comfyui::detect().await;
+    let mut out = serde_json::to_value(&status).unwrap_or_else(|_| json!({}));
+    out["kind"] = json!("comfyui");
+    out["id"] = json!("comfyui");
+    out["name"] = json!("ComfyUI");
+    out["ready"] = json!(status.ready());
+
+    let server = state.comfyui.lock().await.clone();
+    match server {
+        Some(server) => {
+            out["serverUrl"] = json!(server.url());
+            out["serverRunning"] = json!(true);
+            // Polled, never hard-coded: `comfyui-mcp` is a third-party package and
+            // its surface moves. This also needs ComfyUI up — several of its tools
+            // introspect the live install — so a failure here is reported without
+            // contradicting `comfyReachable`.
+            match server.list_tools().await {
+                Ok(tools) => out["toolCount"] = json!(tools.len()),
+                Err(e) => out["mcpError"] = json!(e.to_string()),
+            }
+        }
+        None => out["serverRunning"] = json!(false),
+    }
+    out
+}
+
+async fn comfyui_settings_cached(state: &AppState, refresh: bool) -> Value {
+    let mut slot = state.comfyui_status.lock().await;
+    if !refresh {
+        if let Some((at, cached)) = slot.as_ref() {
+            if at.elapsed() < BLENDER_CACHE_TTL {
+                return cached.clone();
+            }
+        }
+    }
+    let fresh = comfyui_settings_json(state).await;
+    *slot = Some((std::time::Instant::now(), fresh.clone()));
+    fresh
+}
+
+/// Start ComfyUI, or report that something already answers on its port.
+///
+/// Adopt-then-start, and slow by nature: ComfyUI imports torch and scans models.
+/// Unlike the Scenario login this *does* hold the request open — there is no
+/// browser step to hand back, the card shows a spinner, and the honest answer is
+/// "it's up" or the reason it isn't.
+async fn start_comfyui(State(state): State<AppState>) -> ApiResult {
+    let started = local::comfyui::server::start_comfy()
+        .await
+        .map_err(bad_request)?;
+    // The cached status is stale the moment this returns.
+    *state.comfyui_status.lock().await = None;
+    Ok(Json(json!({
+        "started": started,
+        "adopted": !started,
+        "dashboardUrl": local::comfyui::dashboard_url(),
     })))
 }
 
