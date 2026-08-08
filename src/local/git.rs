@@ -288,6 +288,30 @@ fn clone_with_progress(
     Ok(())
 }
 
+/// The working-tree root of a checkout at `path`, or `None` when it isn't one.
+///
+/// Asks git rather than testing for a `.git` directory: `.git` is a *file* in a
+/// linked worktree and a submodule, so the naive check calls a real repo not one.
+/// Returns the root so a path *inside* a repo resolves to the repo itself.
+pub fn repo_root(path: &Path) -> Option<PathBuf> {
+    if !path.is_dir() {
+        return None;
+    }
+    git(Some(path), &["rev-parse", "--show-toplevel"])
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
+/// A remote's fetch URL (`git remote get-url <name>`), or `None` when there is
+/// no such remote.
+pub fn remote_url(repo: &Path, name: &str) -> Option<String> {
+    git(Some(repo), &["remote", "get-url", name])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// The remote's default branch, over git's own credentials (ssh, then https).
 /// The GitHub API can't answer this without a token, but a project created by
 /// an SSH-only user still needs a baseline that exists — otherwise the clone
@@ -519,6 +543,54 @@ fn seed_copy_in(
     if git(Some(dir), &["push", &dst_ssh, "HEAD:main"]).is_err() {
         git(Some(dir), &["push", &dst_https, "HEAD:main"])?;
     }
+    Ok(())
+}
+
+/// Push an existing local checkout's history to a freshly created GitHub repo and
+/// point its `origin` at it.
+///
+/// Unlike [`seed_copy`], history is preserved: that path re-roots an imported
+/// repo into one orphan commit, which is right for copying someone else's work
+/// and wrong for publishing your own.
+///
+/// `origin` is added *after* a push succeeds, and set to whichever transport
+/// worked — writing an SSH remote for a user who only has HTTPS credentials would
+/// leave their repo with an origin they cannot push to.
+pub fn publish_to_github(dir: &str, owner: &str, repo: &str, branch: &str) -> Result<()> {
+    let dir = Path::new(dir);
+    let ssh = format!("git@github.com:{owner}/{repo}.git");
+    let https = format!("https://github.com/{owner}/{repo}.git");
+
+    let refspec = format!("{branch}:{branch}");
+    let url = match git(Some(dir), &["push", &ssh, &refspec]) {
+        Ok(_) => ssh,
+        Err(ssh_err) => {
+            git(Some(dir), &["push", &https, &refspec]).map_err(|https_err| {
+                anyhow!(
+                    "Could not push {branch} to {owner}/{repo}.\n  ssh:   {ssh_err}\n  https: {https_err}"
+                )
+            })?;
+            https
+        }
+    };
+
+    // Best-effort from here: the history is on GitHub, which is the part that
+    // matters and the part that cannot be retried idempotently. A repo left
+    // without an upstream is a one-command fix; failing the whole create here
+    // would strand an already-pushed repo.
+    if git(Some(dir), &["remote", "add", "origin", &url]).is_err() {
+        let _ = git(Some(dir), &["remote", "set-url", "origin", &url]);
+    }
+    let _ = git(Some(dir), &["fetch", "origin"]);
+    let _ = git(
+        Some(dir),
+        &[
+            "branch",
+            "--set-upstream-to",
+            &format!("origin/{branch}"),
+            branch,
+        ],
+    );
     Ok(())
 }
 

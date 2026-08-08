@@ -24,6 +24,7 @@ pub mod github;
 pub mod harness;
 pub mod hf;
 pub mod k8s;
+pub mod localrepo;
 pub mod localrun;
 pub mod mcp_servers;
 pub mod memory;

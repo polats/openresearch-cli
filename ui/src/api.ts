@@ -138,7 +138,31 @@ export interface NewProject {
   /** Fork-by-copy the repo into a fresh `<repo>-<hash>` repo on the user's
    * account. Applied automatically when they lack push access. */
   forkRepo?: boolean;
+  /** Publish this local checkout — which has no `origin` — to a new GitHub repo
+   * and push its history. Only send it when the user has explicitly opted in;
+   * it is the one create path that writes outside orx. */
+  publishLocalPath?: string;
 }
+
+/** What is at a local path, as the New Project form needs to explain it. Five
+ *  shapes, because each has a different fix. */
+export type LocalRepoInfo =
+  | { kind: "missing" }
+  | { kind: "notARepo" }
+  | { kind: "noRemote"; currentBranch?: string | null; suggestedName?: string | null }
+  | { kind: "foreignRemote"; remoteUrl: string }
+  | {
+      kind: "github";
+      owner: string;
+      repo: string;
+      remoteUrl: string;
+      currentBranch?: string | null;
+    };
+
+/** Inspect a directory on this machine. Read-only: reports the shape of what's
+ *  there, never file contents. */
+export const inspectLocalRepo = (path: string) =>
+  get<LocalRepoInfo>(`/api/local-repo?path=${encodeURIComponent(path)}`);
 
 export const createProject = (body: NewProject) =>
   post<{ project: Project }>("/api/projects", body).then((r) => r.project);

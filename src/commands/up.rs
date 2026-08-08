@@ -317,6 +317,7 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/local-repo", get(local_repo))
         .route(
             "/api/projects/{id}",
             get(get_project)
@@ -750,6 +751,79 @@ struct CreateProjectReq {
     /// automatically when the user lacks push access to the entered repo.
     #[serde(default)]
     fork_repo: bool,
+    /// Publish this local checkout, which has no `origin`, to a new GitHub repo
+    /// and push its history. Only set when the user explicitly opts in — see
+    /// `publish_local_repo`.
+    publish_local_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LocalRepoQuery {
+    path: String,
+}
+
+/// Inspect a directory on this machine so the New Project form can resolve a
+/// checkout the user already has into an `owner/repo`.
+///
+/// Read-only and shape-only: it reports whether a path is a repo, and what its
+/// origin is, never file contents. The dashboard is unauthenticated by design, so
+/// a route that reaches outside the data dir should answer the narrowest possible
+/// question.
+async fn local_repo(Query(q): Query<LocalRepoQuery>) -> ApiResult {
+    // git shells out; keep it off the async workers.
+    let found = tokio::task::spawn_blocking(move || local::localrepo::inspect(&q.path))
+        .await
+        .map_err(|e| anyhow!("local repo inspect failed: {e}"))?;
+    Ok(Json(
+        serde_json::to_value(found).unwrap_or_else(|_| json!({})),
+    ))
+}
+
+/// Create a GitHub repo for a local checkout that has none, push its history,
+/// and set the checkout's `origin` to it.
+///
+/// Deliberately not `git::seed_copy`, which the fork-by-copy path uses: that
+/// re-roots everything into a single orphan commit, which is right for importing
+/// someone else's repo and wrong here — this is the user's own history and must
+/// arrive intact.
+async fn publish_local_repo(
+    path: &str,
+    name: &str,
+    organization: Option<&str>,
+) -> std::result::Result<(String, String, Option<String>), ApiError> {
+    let found = {
+        let path = path.to_string();
+        tokio::task::spawn_blocking(move || local::localrepo::inspect(&path))
+            .await
+            .map_err(|e| anyhow!("local repo inspect failed: {e}"))?
+    };
+    // Re-check rather than trusting the form: the directory can change between
+    // the inspect that drew the checkbox and this request, and publishing over a
+    // repo that has since gained an origin would push somewhere unintended.
+    let branch = match found {
+        local::localrepo::LocalRepo::NoRemote { current_branch, .. } => current_branch
+            .ok_or_else(|| bad_request("That repo has no branch to publish — commit something first, or check out a branch."))?,
+        local::localrepo::LocalRepo::Github { owner, repo, .. } => {
+            return Err(bad_request(format!(
+                "That repo already has a GitHub remote ({owner}/{repo}) — create it from the remote instead of publishing."
+            )))
+        }
+        _ => return Err(bad_request("That path is no longer a git repo without a remote.")),
+    };
+
+    let (owner, repo, _default) = local::github::create_repo(&local::slugify(name), organization)
+        .await
+        .map_err(bad_request)?;
+
+    let dir = path.to_string();
+    let (o, r, b) = (owner.clone(), repo.clone(), branch.clone());
+    tokio::task::spawn_blocking(move || local::git::publish_to_github(&dir, &o, &r, &b))
+        .await
+        .map_err(|e| anyhow!("publish task failed: {e}"))?
+        .map_err(bad_request)?;
+
+    // The pushed branch is the repo's only branch, so it is the baseline.
+    Ok((owner, repo, Some(branch)))
 }
 
 async fn create_project(
@@ -761,7 +835,18 @@ async fn create_project(
     if name.is_empty() {
         return Err(bad_request("name is required"));
     }
-    let (owner, repo, baseline_branch) = if req.create_repo {
+    let (owner, repo, baseline_branch) = if let Some(path) = req
+        .publish_local_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        // Publishing a repo that has no origin: create the GitHub repo, then push
+        // the user's existing history to it. Gated behind an explicit opt-in in
+        // the form because it is the one create path that writes outside orx — a
+        // new GitHub repo, and an `origin` on the user's own checkout.
+        publish_local_repo(path, &name, req.github_organization.as_deref()).await?
+    } else if req.create_repo {
         let (owner, repo, default_branch) =
             local::github::create_repo(&local::slugify(&name), req.github_organization.as_deref())
                 .await
