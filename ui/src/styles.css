@@ -1515,10 +1515,30 @@ textarea::placeholder {
 }
 .composer-actions {
   display: flex;
-  justify-content: flex-end;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 6px 8px 8px;
+  /* Never a second row: the controls compress before they wrap, and the send
+     button is pinned by `flex: none` below so it is the one thing that never
+     gives up space. */
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+/* The model label is the elastic one — it is the only value that can be very
+   long (`provider/model`), so it alone absorbs the squeeze. Mode and reasoning
+   hold their intrinsic width: their labels are short and fixed, and truncating
+   "Auto mode" to "Au…" to make room for a model name loses the more important
+   word. */
+.composer-actions .option-picker {
+  flex: none;
+}
+.composer-actions .model-picker {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46%;
+}
+.composer-actions .send-btn {
+  flex: none;
 }
 .send-btn {
   display: inline-flex;
@@ -4454,6 +4474,18 @@ a.files-pill:hover {
   color: var(--text);
   padding: 5px 8px;
   border-radius: var(--radius-sm);
+  /* One line, always. These labels carry values of wildly different lengths —
+     "Auto" next to "opencode-go/deepseek-v4-flash" — and a wrapped label makes
+     the whole control row two rows tall and ragged. Overflow is truncated; the
+     button's `title` carries the full value. */
+  white-space: nowrap;
+  min-width: 0;
+}
+.pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .composer-pill:hover {
   background: var(--surface);
@@ -4468,10 +4500,29 @@ a.files-pill:hover {
   color: var(--text);
   padding: 5px 4px;
   border-radius: var(--radius-sm);
+  white-space: nowrap;
+  min-width: 0;
 }
 .composer-bare:hover {
   color: var(--text);
 }
+/* Budgets in the header: plan quota + context fill, read together as one
+   status cluster and separated from the icon buttons by a hairline so they
+   don't read as another row of actions. */
+/* The two read-only budgets, held together and never compressed — a number that
+   reflows or truncates stops being glanceable, which is the only reason it is
+   on screen. */
+.composer-budgets {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  white-space: nowrap;
+}
+.composer-budgets:empty {
+  display: none;
+}
+
 .model-menu,
 .option-menu {
   position: absolute;
@@ -4529,6 +4580,12 @@ a.files-pill:hover {
 .option-menu.align-right {
   left: auto;
   right: 0;
+}
+/* A picker in the header must open downward — the composer's default upward
+   menu would render off the top of the window. */
+.option-menu.drop-down {
+  bottom: auto;
+  top: calc(100% + 8px);
 }
 /* Rail menus open downward (composer menus open upward, above the box). */
 .option-menu.drop-down {

@@ -2397,6 +2397,25 @@ export function ChatPanel({
                 onChange={setComposerPersona}
                 locked={!!activeSession}
               />
+              {/* What this session works on, next to who is working — the branch
+                  is a project setting, not a per-message choice, so it reads
+                  with the persona rather than with the send controls. */}
+              <OptionPicker
+                choices={branches.map((b) => ({ id: b, label: b }))}
+                value={baselineBranch ?? null}
+                header="Baseline branch"
+                align="left"
+                variant="bare"
+                menuDirection="down"
+                title="Branch new baselines fork from"
+                onSelect={(b) => {
+                  if (b !== baselineBranch) {
+                    void updateProject(projectId, { baselineBranch: b }).catch((err) =>
+                      console.error("baseline branch:", err),
+                    );
+                  }
+                }}
+              />
             </>
           );
         })()}
@@ -2702,7 +2721,11 @@ export function ChatPanel({
             />
           </div>
           <div className="composer-actions">
-            {/* Bottom-left: permission mode. */}
+            {/* Only the three per-message choices live here — how the agent may
+                act, which model answers, how hard it thinks. Read-only budgets
+                and the project's branch moved to the header: mixing status into
+                a control row made six things compete for a narrow column, and
+                two of them weren't controls at all. */}
             <OptionPicker
               choices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
               value={composerSelection?.permissionMode ?? null}
@@ -2714,31 +2737,6 @@ export function ChatPanel({
               title="Permission mode for this chat"
               onSelect={setPermissionMode}
             />
-            {/* Fork point for new baselines — a project-level setting, placed
-                here so the working branch is always one glance away. */}
-            <OptionPicker
-              choices={branches.map((b) => ({ id: b, label: b }))}
-              value={baselineBranch ?? null}
-              header="Baseline branch"
-              align="left"
-              variant="bare"
-              title="Branch new baselines fork from"
-              onSelect={(b) => {
-                if (b !== baselineBranch) {
-                  void updateProject(projectId, { baselineBranch: b }).catch((err) =>
-                    console.error("baseline branch:", err),
-                  );
-                }
-              }}
-            />
-            <div style={{ flex: 1 }} />
-            {/* Plan-quota pill (our fork): percent left + reset for the active
-                harness. Sits before upstream's per-session context meter — the
-                two measure different things (plan budget vs context fill). */}
-            <UsagePill harness={harnesses.find((h) => h.id === composerSelection?.harness)} />
-            {/* Bottom-right: model, reasoning level, then context meter. The
-                picker reflects the open session (harness locked once it exists);
-                the global default only applies before the first message. */}
             <ModelPicker
               value={composerSelection}
               onSelect={selectModel}
@@ -2755,7 +2753,16 @@ export function ChatPanel({
               title="Reasoning level for this chat — Default sends no override, so the harness CLI's own configured effort applies"
               onSelect={setReasoningLevel}
             />
-            <ContextMeter usage={openSession?.contextUsage} />
+            <div style={{ flex: 1 }} />
+            {/* Read-only budgets, grouped and pushed against Send: plan quota and
+                context fill both answer "how much room is left", and separating
+                them from the pickers stops a status readout reading as a control.
+                The branch picker moved to the header — it is a project setting,
+                not something you choose per message. */}
+            <div className="composer-budgets">
+              <UsagePill harness={harnesses.find((h) => h.id === composerSelection?.harness)} />
+              <ContextMeter usage={openSession?.contextUsage} />
+            </div>
             {busy && !pendingQuestion ? (
               // Stop whenever the turn is busy and typed text has nowhere to
               // go — actively streaming, or held on a plan/permission card

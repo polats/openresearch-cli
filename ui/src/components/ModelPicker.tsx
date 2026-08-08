@@ -195,10 +195,13 @@ export function ModelPicker({
       <button
         type="button"
         className="composer-pill"
-        title="Harness + model for this chat"
+        title={`Harness + model for this chat — ${label}`}
         onClick={() => setOpen((v) => !v)}
       >
-        {label}
+        {/* Wrapped, not a bare text node: `text-overflow` needs an element to
+            apply to, and a flex child's text will otherwise overflow the button
+            instead of truncating. Model names are the longest label here. */}
+        <span className="pill-label">{label}</span>
         <ChevronDown size={12} />
       </button>
       {open && (
@@ -312,6 +315,7 @@ export function OptionPicker({
   variant = "pill",
   title,
   numbered = false,
+  menuDirection = "up",
   onSelect,
 }: {
   choices: OptionChoice[];
@@ -327,6 +331,10 @@ export function OptionPicker({
   title?: string;
   /** Show 1-based number hints on the right (like the mode menu). */
   numbered?: boolean;
+  /** Which way the menu opens. `up` suits the composer, which sits at the
+   *  bottom of the pane; a picker in the header needs `down` or its menu opens
+   *  off the top of the window. */
+  menuDirection?: "up" | "down";
   onSelect: (id: string) => void;
 }) {
   const { open, setOpen, ref } = usePopover();
@@ -358,11 +366,15 @@ export function OptionPicker({
         title={title}
         onClick={() => setOpen((v) => !v)}
       >
-        {label}
+        <span className="pill-label">{label}</span>
         <ChevronDown size={12} />
       </button>
       {open && (
-        <div className={`option-menu ${align === "right" ? "align-right" : ""}`}>
+        <div
+          className={`option-menu ${align === "right" ? "align-right" : ""} ${
+            menuDirection === "down" ? "drop-down" : ""
+          }`}
+        >
           {header && <div className="model-group">{header}</div>}
           {pinned && (
             <>
