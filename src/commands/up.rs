@@ -62,11 +62,31 @@ pub async fn run(args: UpArgs) -> Result<()> {
         chat: Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone())),
         claude: claude.clone(),
         harnesses: Arc::new(tokio::sync::Mutex::new(None)),
+        blender: Arc::new(tokio::sync::Mutex::new(None)),
+        blender_status: Arc::new(tokio::sync::Mutex::new(None)),
+        comfyui: Arc::new(tokio::sync::Mutex::new(None)),
+        comfyui_status: Arc::new(tokio::sync::Mutex::new(None)),
         project_lifecycle: Arc::new(ProjectLifecycle::default()),
         data_dir_move_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(port);
+
+    // Start the Blender MCP server before anything can spawn a harness. The order
+    // is the point: harness children are configured at spawn and live for many
+    // turns, so a server that arrived later would leave the first child without
+    // Blender tools for its whole life.
+    if let Some(server) = local::blender::server::start_if_available().await {
+        local::blender::server::spawn_watchdog(server.clone());
+        *state.blender.lock().await = Some(server);
+    }
+    // Same ordering requirement. ComfyUI itself is *not* started here — it's a GPU
+    // server that loads models, so it's adopted if already running and otherwise
+    // started on request from its card. The MCP server tolerates it being down.
+    if let Some(server) = local::comfyui::server::start_if_available().await {
+        local::comfyui::server::spawn_watchdog(server.clone());
+        *state.comfyui.lock().await = Some(server);
+    }
 
     spawn_hf_preflight();
     spawn_k8s_preflight();
@@ -201,6 +221,19 @@ struct AppState {
     /// Harness detection cache — detection shells out to CLIs, so it's rate-
     /// limited to once per TTL unless the UI asks for a refresh.
     harnesses: Arc<tokio::sync::Mutex<Option<(std::time::Instant, Value)>>>,
+    /// The managed `blender-mcp` child, when one started. `None` on a machine
+    /// without a usable install — Blender is optional, so that is a normal state,
+    /// not a failure.
+    blender: Arc<tokio::sync::Mutex<Option<local::blender::server::BlenderServer>>>,
+    /// Blender status cache. Same reason as `harnesses`: detection shells out and
+    /// opens a socket, so it must not run on every poll.
+    blender_status: Arc<tokio::sync::Mutex<Option<(std::time::Instant, Value)>>>,
+    /// The managed `comfyui-mcp` child, when one started.
+    comfyui: Arc<tokio::sync::Mutex<Option<local::comfyui::server::ComfyMcpServer>>>,
+    /// ComfyUI status cache. Its probe is the most expensive of the three — a
+    /// `--help` subprocess plus several HTTP calls, one of which pulls a ~1.4 MB
+    /// `/object_info` — so it must not run per poll.
+    comfyui_status: Arc<tokio::sync::Mutex<Option<(std::time::Instant, Value)>>>,
     project_lifecycle: Arc<ProjectLifecycle>,
     /// Set while a data-dir move is running. New chat turns and run launches
     /// check it and refuse (409) so nothing starts writing the store mid-move —
@@ -352,6 +385,21 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/settings/modal", get(modal_settings))
         .route("/api/settings/modal/provision", post(provision_modal))
+        .route("/api/settings/genai", get(genai_settings))
+        .route("/api/settings/comfyui/start", post(start_comfyui))
+        .route("/api/settings/scenario", get(scenario_settings))
+        .route("/api/settings/scenario/connect", post(connect_scenario))
+        .route(
+            "/api/settings/scenario/disconnect",
+            post(disconnect_scenario),
+        )
+        // Not under /api/settings: this is where Scenario's OAuth server sends the
+        // user's browser, and the path is baked into the client registration
+        // (`auth::DASHBOARD_CALLBACK_PATH`), so it can't be moved freely.
+        .route(
+            local::scenario::auth::DASHBOARD_CALLBACK_PATH,
+            get(scenario_callback),
+        )
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
             "/api/settings/env/{key}",
@@ -2512,6 +2560,294 @@ async fn provision_modal() -> ApiResult {
     Ok(Json(modal_settings_json(&modal::detect().await)))
 }
 
+// --- scenario (asset generation over MCP) --------------------------------------
+
+use crate::local::scenario;
+
+/// Connection state for the Settings card.
+///
+/// Verifies the login rather than just reporting the file's existence: a stored
+/// token whose refresh has been redeemed elsewhere looks present but fails on
+/// first use, and a card claiming "Connected" on the strength of a file on disk
+/// would be wrong exactly when it matters. One MCP round trip, on a page that
+/// isn't hot.
+async fn scenario_settings_json() -> Value {
+    let mut out = json!({
+        "authPath": scenario::auth::auth_path().to_string_lossy(),
+        // A login started from this dashboard that hasn't come back yet. Lets a
+        // reloaded page rejoin a login in flight instead of offering Connect
+        // again and being refused.
+        "connecting": scenario::auth::login_in_progress(),
+    });
+
+    if !scenario::is_connected() {
+        // "Not connected" and "cannot connect" are indistinguishable from here,
+        // and only the second is a problem the user can't fix by clicking
+        // Connect. Discovery needs no credentials, so answer it while we're here.
+        let reachable = scenario::auth::discover().await;
+        out["state"] = json!("disconnected");
+        out["reachable"] = json!(reachable.is_ok());
+        if let Err(e) = reachable {
+            out["error"] = json!(e.to_string());
+        }
+        return out;
+    }
+
+    match scenario::list_tools().await {
+        Ok(tools) => {
+            out["state"] = json!("connected");
+            out["toolCount"] = json!(tools.len());
+        }
+        // The one distinction the whole error split exists for: this is
+        // "reconnect", not "something broke".
+        Err(scenario::ScenarioError::NotConnected) => out["state"] = json!("expired"),
+        Err(e) => {
+            out["state"] = json!("error");
+            out["error"] = json!(e.to_string());
+        }
+    }
+    out
+}
+
+async fn scenario_settings() -> ApiResult {
+    Ok(Json(scenario_settings_json().await))
+}
+
+/// Start a Scenario login and return immediately with the authorize URL.
+///
+/// The login itself finishes on a background task: a human takes up to five
+/// minutes, and holding the response open for that would look like a hung request
+/// and die to any proxy read timeout. Progress arrives on `/api/events` as
+/// `scenario.connect.done` / `scenario.connect.error`.
+async fn connect_scenario(State(state): State<AppState>) -> ApiResult {
+    let port = state.chat.up_port().ok_or_else(|| {
+        bad_request("this server's port is unknown, so the login redirect can't be built")
+    })?;
+
+    let login = scenario::auth::begin(scenario::auth::Redirect::Dashboard { port })
+        .await
+        .map_err(bad_request)?;
+    let url = login.url.clone();
+
+    // Over SSH the browser is on the user's machine, not this one, so opening one
+    // here shows nobody anything — `up` skips it at startup for the same reason.
+    // Report that we didn't, and the card shows the URL to open by hand.
+    let opened = crate::remote::detect_ssh_session().is_none();
+    if opened {
+        browser::open_browser(&url);
+    }
+
+    let chat = state.chat.clone();
+    tokio::spawn(async move {
+        match login.finish().await {
+            Ok(scopes) => chat.emit_event("scenario.connect.done", json!({ "scopes": scopes })),
+            Err(e) => chat.emit_event("scenario.connect.error", json!({ "error": e.to_string() })),
+        }
+    });
+
+    Ok(Json(json!({
+        "started": true,
+        "authorizeUrl": url,
+        "browserOpened": opened,
+    })))
+}
+
+async fn disconnect_scenario() -> ApiResult {
+    scenario::auth::forget().map_err(bad_request)?;
+    Ok(Json(scenario_settings_json().await))
+}
+
+// --- generative-ai providers ---------------------------------------------------
+
+/// How long a Blender probe is reused.
+///
+/// Much shorter than `HARNESS_CACHE_TTL`: opening and closing Blender is something
+/// the user does *while looking at this card*, so a minute-long cache would show
+/// them a stale answer about a window they can see. Short enough to notice, long
+/// enough that the `blender-mcp --help` subprocess isn't paid per poll.
+const BLENDER_CACHE_TTL: Duration = Duration::from_secs(10);
+
+/// Blender's card payload: the three-layer probe, plus what the managed server
+/// advertises.
+async fn blender_settings_json(state: &AppState) -> Value {
+    let status = local::blender::detect().await;
+    let mut out = serde_json::to_value(&status).unwrap_or_else(|_| json!({}));
+    out["kind"] = json!("blender");
+    out["id"] = json!("blender");
+    out["name"] = json!("Blender");
+    out["ready"] = json!(status.ready());
+
+    // Whether *we* have a server running is a separate fact from whether one
+    // could run: a repaired install still needs an `orx up` restart before the
+    // child exists, and the card has to be able to say so.
+    let server = state.blender.lock().await.clone();
+    match server {
+        Some(server) => {
+            out["serverUrl"] = json!(server.url());
+            out["serverRunning"] = json!(true);
+            // Works with Blender closed — `tools/list` never touches the socket —
+            // so this reports the server, not the session.
+            match server.list_tools().await {
+                Ok(tools) => out["toolCount"] = json!(tools.len()),
+                Err(e) => out["serverError"] = json!(e.to_string()),
+            }
+        }
+        None => out["serverRunning"] = json!(false),
+    }
+    out
+}
+
+/// Cached Blender payload, refreshed on `?refresh=1`.
+async fn blender_settings_cached(state: &AppState, refresh: bool) -> Value {
+    let mut slot = state.blender_status.lock().await;
+    if !refresh {
+        if let Some((at, cached)) = slot.as_ref() {
+            if at.elapsed() < BLENDER_CACHE_TTL {
+                return cached.clone();
+            }
+        }
+    }
+    let fresh = blender_settings_json(state).await;
+    *slot = Some((std::time::Instant::now(), fresh.clone()));
+    fresh
+}
+
+#[derive(Deserialize)]
+struct RefreshQuery {
+    refresh: Option<u8>,
+}
+
+/// Every generative-AI provider, one entry per Settings sub-tab.
+///
+/// A discriminated list rather than a `Harness`-style trait: Scenario is a remote
+/// OAuth service verified by a live tool call, Blender is a local process plus a
+/// socket, and they share almost no fields. A common trait would force a shape
+/// neither one really has; `kind` lets the UI render each honestly.
+async fn genai_settings(State(state): State<AppState>, Query(q): Query<RefreshQuery>) -> ApiResult {
+    let refresh = q.refresh == Some(1);
+    let mut scenario = scenario_settings_json().await;
+    scenario["kind"] = json!("scenario");
+    scenario["id"] = json!("scenario");
+    scenario["name"] = json!("Scenario");
+    scenario["ready"] = json!(scenario.get("state").and_then(Value::as_str) == Some("connected"));
+
+    Ok(Json(json!({
+        "providers": [
+            scenario,
+            blender_settings_cached(&state, refresh).await,
+            comfyui_settings_cached(&state, refresh).await,
+        ],
+    })))
+}
+
+/// ComfyUI's card payload: the layered probe, plus the polled tool surface.
+async fn comfyui_settings_json(state: &AppState) -> Value {
+    let status = local::comfyui::detect().await;
+    let mut out = serde_json::to_value(&status).unwrap_or_else(|_| json!({}));
+    out["kind"] = json!("comfyui");
+    out["id"] = json!("comfyui");
+    out["name"] = json!("ComfyUI");
+    out["ready"] = json!(status.ready());
+
+    let server = state.comfyui.lock().await.clone();
+    match server {
+        Some(server) => {
+            out["serverUrl"] = json!(server.url());
+            out["serverRunning"] = json!(true);
+            // Polled, never hard-coded: `comfyui-mcp` is a third-party package and
+            // its surface moves. This also needs ComfyUI up — several of its tools
+            // introspect the live install — so a failure here is reported without
+            // contradicting `comfyReachable`.
+            match server.list_tools().await {
+                Ok(tools) => out["toolCount"] = json!(tools.len()),
+                Err(e) => out["mcpError"] = json!(e.to_string()),
+            }
+        }
+        None => out["serverRunning"] = json!(false),
+    }
+    out
+}
+
+async fn comfyui_settings_cached(state: &AppState, refresh: bool) -> Value {
+    let mut slot = state.comfyui_status.lock().await;
+    if !refresh {
+        if let Some((at, cached)) = slot.as_ref() {
+            if at.elapsed() < BLENDER_CACHE_TTL {
+                return cached.clone();
+            }
+        }
+    }
+    let fresh = comfyui_settings_json(state).await;
+    *slot = Some((std::time::Instant::now(), fresh.clone()));
+    fresh
+}
+
+/// Start ComfyUI, or report that something already answers on its port.
+///
+/// Adopt-then-start, and slow by nature: ComfyUI imports torch and scans models.
+/// Unlike the Scenario login this *does* hold the request open — there is no
+/// browser step to hand back, the card shows a spinner, and the honest answer is
+/// "it's up" or the reason it isn't.
+async fn start_comfyui(State(state): State<AppState>) -> ApiResult {
+    let started = local::comfyui::server::start_comfy()
+        .await
+        .map_err(bad_request)?;
+    // The cached status is stale the moment this returns.
+    *state.comfyui_status.lock().await = None;
+    Ok(Json(json!({
+        "started": started,
+        "adopted": !started,
+        "dashboardUrl": local::comfyui::dashboard_url(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct ScenarioCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+/// Where Scenario's OAuth server sends the user's browser after they sign in.
+///
+/// Mounted here rather than on a private loopback port so the remote modes work:
+/// `up --remote` already forwards this port to the user's laptop, so the redirect
+/// rides the tunnel that's there. The CLI keeps its own listener for the
+/// no-server-running case.
+async fn scenario_callback(Query(q): Query<ScenarioCallbackQuery>) -> Response {
+    // Clerk sends the human-readable reason in `error_description`; `error` is the
+    // machine code and the fallback.
+    let reason = q.error_description.as_deref().or(q.error.as_deref());
+    match scenario::auth::deliver_callback(q.state.as_deref(), q.code.as_deref(), reason) {
+        Ok(message) => (StatusCode::OK, Html(callback_page(message))).into_response(),
+        Err(message) => (StatusCode::BAD_REQUEST, Html(callback_page(&message))).into_response(),
+    }
+}
+
+/// The one page the user sees in the tab Scenario redirected. Deliberately
+/// dependency-free and self-contained — it renders in a tab that has no access to
+/// the SPA's assets yet, and its only job is to say what happened.
+fn callback_page(message: &str) -> String {
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+         <title>Crux — Scenario</title>\
+         <style>body{{font:15px/1.5 system-ui,sans-serif;margin:0;display:grid;\
+         place-items:center;min-height:100vh;background:#111;color:#eee}}\
+         p{{max-width:34rem;padding:0 1.5rem;text-align:center}}</style></head>\
+         <body><p>{}</p></body></html>",
+        html_escape(message)
+    )
+}
+
+/// Minimal HTML text escaping. The message can carry a server-supplied error
+/// string, so it does not go into the page unescaped.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 // --- kubernetes settings ------------------------------------------------------
 
 use crate::jobs::kubernetes as k8s;
@@ -3913,6 +4249,8 @@ async fn create_chat_session(
         title: None,
         title_source: None,
         model: nonempty(req.model),
+        // Observed during the first turn, not at creation.
+        effective_model: None,
         permission_mode: nonempty(req.permission_mode),
         reasoning_level: nonempty(req.reasoning_level),
         persona,
@@ -4029,6 +4367,8 @@ async fn approve_proposal(
         native_session_id: None,
         title: None,
         model,
+        // Observed during the first turn, not at creation.
+        effective_model: None,
         // An approved subagent runs autonomously in the background — there is no
         // human at its keyboard to answer per-tool permission prompts, so it would
         // hang on the first one. Default it to bypass (the human already approved

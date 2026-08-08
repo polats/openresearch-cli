@@ -10,9 +10,11 @@
 //! `resolve::{resolve_project, resolve_experiment, resolve_run}`, never by hand.
 
 pub mod agent_skills;
+pub mod blender;
 pub mod chat;
 pub mod claude;
 pub mod codex;
+pub mod comfyui;
 pub mod datadir;
 pub mod evaluator;
 pub mod experiments;
@@ -23,6 +25,7 @@ pub mod harness;
 pub mod hf;
 pub mod k8s;
 pub mod localrun;
+pub mod mcp_servers;
 pub mod memory;
 pub mod modal;
 pub mod model;
@@ -32,6 +35,7 @@ pub mod play;
 pub mod projects;
 pub mod ray;
 pub mod resolve;
+pub mod scenario;
 pub mod skills;
 pub mod slurm;
 pub mod ssh;

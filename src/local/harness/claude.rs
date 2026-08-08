@@ -842,33 +842,53 @@ pub(crate) fn write_plan_settings(repo: &std::path::Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Write the per-spawn `--mcp-config` file pointing Claude at `orx mcp-gate`
-/// (this same binary) and return its path. The bridge's env block carries the
-/// `orx up` port, the session id, and a fresh per-child token minted at spawn —
-/// everything the resident bridge needs to relay permission requests back to
-/// the running server for the child's whole life.
+/// Everything the plan-mode permission bridge needs in its env block: the
+/// `orx up` port, the session id, and the fresh per-child token minted at spawn.
+/// Together they let the resident bridge relay permission requests back to the
+/// running server for the child's whole life.
+pub(crate) struct GateSpec<'a> {
+    pub(crate) up_port: u16,
+    pub(crate) session_id: &'a str,
+    pub(crate) token: &'a str,
+}
+
+/// Write the per-spawn `--mcp-config` file and return its path, or `None` when
+/// there is nothing to configure.
+///
+/// Two independent servers can land in this file, gated separately on purpose:
+///
+/// * **`orx`** — the plan-mode permission bridge (`orx mcp-gate`, this same
+///   binary). Written only when `gate` is `Some`, i.e. only in Plan mode. Writing
+///   it in other modes would put a tool in the model's list that the CLI never
+///   consults, because `--permission-prompt-tool` stays Plan-only.
+/// * **The managed MCP servers** (Blender, ComfyUI — see `local::mcp_servers`), in
+///   *every* mode. These are the user's own tools; there is no reason to withhold
+///   them outside Plan.
+///
+/// The split matters beyond tidiness: `bridge_active` (and therefore the respawn
+/// decision in `local::claude::child_action`) must keep tracking only the
+/// permission bridge. If it came to mean "an MCP config was written", the wanted
+/// value would be Plan-gated while the achieved value was not, and the child would
+/// be killed and `--resume`d on every single turn.
+///
+/// `--mcp-config` is *additive* to the user's own configured servers — that is why
+/// the title path needs `--strict-mcp-config` to avoid booting them — so nothing
+/// here displaces anything the user set up.
+/// `servers` is passed in rather than read from `local::mcp_servers` so this stays
+/// a pure function of its arguments — the emit-only-what-the-mode-needs logic is
+/// the part worth testing.
 pub(crate) fn write_mcp_config(
     repo: &std::path::Path,
-    up_port: u16,
-    session_id: &str,
-    token: &str,
-) -> Result<PathBuf> {
-    let orx = std::env::current_exe()
-        .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
-    let config = serde_json::json!({
-        "mcpServers": {
-            "orx": {
-                "type": "stdio",
-                "command": orx.to_string_lossy(),
-                "args": ["mcp-gate"],
-                "env": {
-                    "ORX_UP_PORT": up_port.to_string(),
-                    "ORX_SESSION_ID": session_id,
-                    "ORX_GATE_TOKEN": token,
-                },
-            },
-        }
-    });
+    gate: Option<GateSpec<'_>>,
+    servers: &[(&str, serde_json::Value)],
+) -> Result<Option<PathBuf>> {
+    let config = match mcp_config_json(gate, servers)? {
+        Some(config) => config,
+        // Nothing to say: no bridge wanted and no Blender server. Writing an empty
+        // `mcpServers` would still cost a `--mcp-config` flag and a file for no
+        // gain.
+        None => return Ok(None),
+    };
     let path = repo.join(MCP_CONFIG_REL);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -876,7 +896,39 @@ pub(crate) fn write_mcp_config(
     }
     std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap())
         .map_err(|e| anyhow!("cannot write {}: {e}", path.display()))?;
-    Ok(path)
+    Ok(Some(path))
+}
+
+/// The `mcpServers` document, or `None` when there is nothing to configure.
+fn mcp_config_json(
+    gate: Option<GateSpec<'_>>,
+    servers: &[(&str, serde_json::Value)],
+) -> Result<Option<serde_json::Value>> {
+    let mut out = serde_json::Map::new();
+    if let Some(gate) = gate {
+        let orx = std::env::current_exe()
+            .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
+        out.insert(
+            "orx".to_string(),
+            serde_json::json!({
+                "type": "stdio",
+                "command": orx.to_string_lossy(),
+                "args": ["mcp-gate"],
+                "env": {
+                    "ORX_UP_PORT": gate.up_port.to_string(),
+                    "ORX_SESSION_ID": gate.session_id,
+                    "ORX_GATE_TOKEN": gate.token,
+                },
+            }),
+        );
+    }
+    for (name, entry) in servers {
+        out.insert((*name).to_string(), entry.clone());
+    }
+    if out.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::json!({ "mcpServers": out })))
 }
 
 /// Session reasoning id → Claude's `--effort` value.
@@ -1856,6 +1908,103 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
+
+    fn gate() -> GateSpec<'static> {
+        GateSpec {
+            up_port: 3333,
+            session_id: "sess-1",
+            token: "tok-1",
+        }
+    }
+
+    fn server_names(config: &serde_json::Value) -> Vec<String> {
+        let mut names: Vec<String> = config["mcpServers"]
+            .as_object()
+            .expect("mcpServers object")
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn blender() -> Vec<(&'static str, serde_json::Value)> {
+        vec![(
+            "blender",
+            serde_json::json!({ "type": "http", "url": "http://127.0.0.1:41999/" }),
+        )]
+    }
+
+    /// No bridge and no managed servers means no file and no `--mcp-config` flag.
+    /// Writing an empty `mcpServers` would cost a flag for nothing.
+    #[test]
+    fn mcp_config_is_absent_when_there_is_nothing_to_configure() {
+        assert!(mcp_config_json(None, &[]).unwrap().is_none());
+    }
+
+    /// The whole point of the split: outside Plan mode Blender is offered but the
+    /// permission bridge is NOT. A gate server the CLI never consults (because
+    /// `--permission-prompt-tool` is Plan-only) would just be a broken tool in the
+    /// model's list.
+    #[test]
+    fn non_plan_modes_get_blender_without_the_gate() {
+        let config = mcp_config_json(None, &blender())
+            .unwrap()
+            .expect("a config with just Blender");
+        assert_eq!(server_names(&config), ["blender"]);
+        assert_eq!(config["mcpServers"]["blender"]["type"], "http");
+        assert_eq!(
+            config["mcpServers"]["blender"]["url"],
+            "http://127.0.0.1:41999/"
+        );
+    }
+
+    /// Plan mode with no Blender server available: the gate alone, exactly as
+    /// before this change.
+    #[test]
+    fn plan_mode_without_blender_gets_only_the_gate() {
+        let config = mcp_config_json(Some(gate()), &[])
+            .unwrap()
+            .expect("a config with just the gate");
+        assert_eq!(server_names(&config), ["orx"]);
+        let orx = &config["mcpServers"]["orx"];
+        assert_eq!(orx["type"], "stdio");
+        assert_eq!(orx["args"][0], "mcp-gate");
+        // The env block is the bridge's whole contract with `orx mcp-gate`.
+        assert_eq!(orx["env"]["ORX_UP_PORT"], "3333");
+        assert_eq!(orx["env"]["ORX_SESSION_ID"], "sess-1");
+        assert_eq!(orx["env"]["ORX_GATE_TOKEN"], "tok-1");
+    }
+
+    /// Both, when both apply — and they must coexist rather than one replacing
+    /// the other.
+    #[test]
+    fn plan_mode_with_blender_gets_both_servers() {
+        let config = mcp_config_json(Some(gate()), &blender())
+            .unwrap()
+            .expect("a config with both");
+        assert_eq!(server_names(&config), ["blender", "orx"]);
+    }
+
+    /// Several managed servers must all land alongside the gate — the registry's
+    /// whole purpose, and the case a third provider introduces.
+    #[test]
+    fn every_managed_server_lands_in_the_config() {
+        let mut servers = blender();
+        servers.push((
+            "comfyui",
+            serde_json::json!({ "type": "http", "url": "http://127.0.0.1:9100/mcp" }),
+        ));
+        let config = mcp_config_json(Some(gate()), &servers)
+            .unwrap()
+            .expect("a config with all three");
+        assert_eq!(server_names(&config), ["blender", "comfyui", "orx"]);
+        // The endpoint paths differ between providers; neither may be rewritten.
+        assert_eq!(
+            config["mcpServers"]["comfyui"]["url"],
+            "http://127.0.0.1:9100/mcp"
+        );
+    }
 
     /// A `list_models` response in the live 2.1.212 shape (fields we don't
     /// read trimmed). Covers the four things the parser decides: the `default`

@@ -111,6 +111,9 @@ pub fn classify_line(line: &str) -> Line {
 pub enum ServerReqKind {
     Approval,
     UserInput,
+    /// An MCP server elicitation. Codex uses this for two different things, and
+    /// they need opposite answers — see `mcp_elicitation_is_tool_approval`.
+    McpElicitation,
     Other,
 }
 
@@ -123,8 +126,37 @@ pub fn server_req_kind(method: &str) -> ServerReqKind {
             ServerReqKind::Approval
         }
         "item/tool/requestUserInput" => ServerReqKind::UserInput,
+        "mcpServer/elicitation/request" => ServerReqKind::McpElicitation,
         _ => ServerReqKind::Other,
     }
+}
+
+/// Whether an `mcpServer/elicitation/request` is codex asking permission to run
+/// an MCP **tool call**, as opposed to a server asking the human to fill in a
+/// form.
+///
+/// The distinction decides the answer, so it must not be guessed. Codex marks
+/// the approval flavour with `_meta.codex_approval_kind = "mcp_tool_call"`;
+/// everything else is a real elicitation (`mode: "form"` with a schema to fill,
+/// or `"url"`), which orx has no surface for and must decline rather than
+/// blank-accept.
+///
+/// Auto-accepting the approval flavour is deliberate: the only MCP servers codex
+/// sees are the ones orx started and injected itself (`local::mcp_servers`), on
+/// loopback. Carding them would ask the user to approve tools orx handed the
+/// agent on purpose — and Claude and OpenCode don't gate them either, so
+/// accepting keeps the three harnesses behaving the same.
+///
+/// Found the hard way: before this existed the method fell through to
+/// `ServerReqKind::Other`, which replies "method unsupported" — and codex
+/// reports that to the model as **"user rejected MCP tool call"**, so every
+/// ComfyUI/Blender call from codex failed while looking like a user decision.
+pub fn mcp_elicitation_is_tool_approval(params: &Value) -> bool {
+    params
+        .get("_meta")
+        .and_then(|m| m.get("codex_approval_kind"))
+        .and_then(Value::as_str)
+        == Some("mcp_tool_call")
 }
 
 /// One event delivered to the session's in-flight turn.
@@ -276,6 +308,11 @@ impl CodexClient {
             let msg = match kind {
                 ServerReqKind::Approval => json!({ "id": id, "result": { "decision": "cancel" } }),
                 ServerReqKind::UserInput => json!({ "id": id, "result": { "answers": {} } }),
+                // Elicitations answer `{action}`; cancel is the shutdown-time
+                // equivalent of the approval path's cancel.
+                ServerReqKind::McpElicitation => {
+                    json!({ "id": id, "result": { "action": "cancel" } })
+                }
                 ServerReqKind::Other => json!({
                     "id": id,
                     "error": { "code": -32601, "message": "orx does not handle this request type" },
@@ -430,6 +467,9 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
                         ServerReqKind::UserInput => {
                             let _ = client.respond(&id, json!({ "answers": {} })).await;
                         }
+                        ServerReqKind::McpElicitation => {
+                            let _ = client.respond(&id, json!({ "action": "cancel" })).await;
+                        }
                         ServerReqKind::Other => {
                             let _ = client.respond_method_unsupported(&id).await;
                         }
@@ -477,8 +517,15 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
 async fn spawn_client(session_id: &str) -> Result<Arc<CodexClient>> {
     let bin = find_codex_required()?;
     let mut cmd = Command::new(&bin);
-    cmd.arg("app-server")
-        .stdin(Stdio::piped())
+    cmd.arg("app-server");
+    // Every managed MCP server crux is running. Dotted-path overrides, so they add
+    // entries to `mcp_servers` and leave the user's own servers in
+    // `~/.codex/config.toml` untouched — which is also why crux still never writes
+    // that file.
+    for over in crate::local::mcp_servers::codex_overrides() {
+        cmd.arg("-c").arg(over);
+    }
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(crate::local::chat::harness_log("codex")?))
         .kill_on_drop(true);
@@ -686,6 +733,71 @@ impl CodexHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Captured live from codex-cli 0.146 by driving an app-server turn that
+    /// calls an MCP tool: the approval arrives as an *elicitation*, flagged in
+    /// `_meta`. Trimmed to the fields the classifier reads.
+    const MCP_TOOL_APPROVAL: &str = r#"{
+        "threadId":"019fde64","turnId":"019fde64","serverName":"comfyui","mode":"form",
+        "message":"Allow this tool call?",
+        "_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"]}
+    }"#;
+
+    /// An MCP tool approval must be recognised, or it falls through to `Other` →
+    /// "method unsupported" → codex telling the model **"user rejected MCP tool
+    /// call"**. That is how every ComfyUI and Blender call from codex failed
+    /// while looking like a decision the user had made.
+    #[test]
+    fn mcp_tool_approval_is_classified_and_recognised() {
+        assert!(matches!(
+            server_req_kind("mcpServer/elicitation/request"),
+            ServerReqKind::McpElicitation
+        ));
+        let params: Value = serde_json::from_str(MCP_TOOL_APPROVAL).unwrap();
+        assert!(mcp_elicitation_is_tool_approval(&params));
+    }
+
+    /// A *real* elicitation — a server asking the human to fill a form or visit
+    /// a URL — carries no approval marker and must not be blanket-accepted: orx
+    /// has no surface to fill one in, so accepting would answer with nothing.
+    #[test]
+    fn a_genuine_elicitation_is_not_treated_as_an_approval() {
+        for raw in [
+            r#"{"serverName":"x","mode":"form","message":"Your API key?","requestedSchema":{}}"#,
+            r#"{"serverName":"x","mode":"url","message":"Sign in","url":"https://e.example",
+                "elicitationId":"e1"}"#,
+            // Marked, but not the tool-call flavour.
+            r#"{"serverName":"x","mode":"form","message":"?","_meta":{"codex_approval_kind":"other"}}"#,
+        ] {
+            let params: Value = serde_json::from_str(raw).unwrap();
+            assert!(
+                !mcp_elicitation_is_tool_approval(&params),
+                "wrongly treated as a tool approval: {raw}"
+            );
+        }
+    }
+
+    /// The other server→client requests must keep their existing classification;
+    /// the new arm must not shadow them.
+    #[test]
+    fn the_other_request_kinds_are_unchanged() {
+        assert!(matches!(
+            server_req_kind("item/commandExecution/requestApproval"),
+            ServerReqKind::Approval
+        ));
+        assert!(matches!(
+            server_req_kind("item/fileChange/requestApproval"),
+            ServerReqKind::Approval
+        ));
+        assert!(matches!(
+            server_req_kind("item/tool/requestUserInput"),
+            ServerReqKind::UserInput
+        ));
+        assert!(matches!(
+            server_req_kind("item/permissions/requestApproval"),
+            ServerReqKind::Other
+        ));
+    }
 
     #[test]
     fn classify_discriminates_the_three_wire_shapes() {

@@ -363,6 +363,7 @@ impl Store {
             "ALTER TABLE local_experiments ADD COLUMN merge_parent_experiment_id TEXT",
             "ALTER TABLE local_projects ADD COLUMN auto_prompts TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN context_usage_json TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN effective_model TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN title_source TEXT",
             "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
         ] {
@@ -918,6 +919,19 @@ impl Store {
     /// Does not bump `updated_at` — usage is a passive by-product of a turn that
     /// already bumped it, and re-ordering the session on every token report would
     /// be noise.
+    /// Record the model the harness actually ran, for display.
+    ///
+    /// Deliberately does **not** touch `updated_at`: this is an observation made
+    /// during a turn, not a user action, and bumping the timestamp would reorder
+    /// Recents (which sorts by `updated_at`) for a purely cosmetic field.
+    pub fn set_chat_session_effective_model(&self, id: &str, model: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET effective_model = ?2 WHERE id = ?1",
+            params![id, model],
+        )?;
+        Ok(())
+    }
+
     pub fn set_chat_session_context_usage(&self, id: &str, json: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE chat_sessions SET context_usage_json = ?2 WHERE id = ?1",
@@ -1164,7 +1178,17 @@ pub struct StoredChatSession {
     /// (harness auto-title), `"user"` (Rename). NULL on legacy rows, which the
     /// conditional setter treats as "unknown, don't overwrite".
     pub title_source: Option<String>,
+    /// The model the user *pinned* for this session; None = harness default.
     pub model: Option<String>,
+    /// The model the harness actually resolved and ran, observed at turn time.
+    ///
+    /// Display only, and deliberately separate from [`model`](Self::model): that
+    /// field means "the user chose this", and writing a resolved default into it
+    /// would silently pin a model the user never picked — freezing a default that
+    /// is otherwise free to move. This one just answers "what am I actually
+    /// talking to", which is unanswerable from config alone: OpenCode picks a
+    /// default from the authenticated providers and reports it only at runtime.
+    pub effective_model: Option<String>,
     /// Permission-mode wire id (`"auto"` / `"plan"` / …); None = harness default.
     pub permission_mode: Option<String>,
     /// Reasoning-level wire id (`"low"` / `"medium"` / `"high"`); None = default.
@@ -1198,7 +1222,7 @@ pub struct StoredChatMessage {
 
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, \
      permission_mode, reasoning_level, archived, context_usage_json, created_at, updated_at, \
-     title_source, persona, parent_session_id";
+     title_source, persona, parent_session_id, effective_model";
 
 fn row_to_chat_session(
     row: &rusqlite::Row<'_>,
@@ -1219,6 +1243,7 @@ fn row_to_chat_session(
         title_source: row.get(12)?,
         persona: row.get(13)?,
         parent_session_id: row.get(14)?,
+        effective_model: row.get(15)?,
     })
 }
 
@@ -1402,6 +1427,7 @@ mod tests {
             title: None,
             title_source: None,
             model: None,
+            effective_model: None,
             permission_mode: None,
             reasoning_level: None,
             archived: false,
@@ -1619,6 +1645,7 @@ mod tests {
             native_session_id: None,
             title: None,
             model: None,
+            effective_model: None,
             permission_mode: None,
             reasoning_level: None,
             persona: persona.map(str::to_string),
@@ -1665,6 +1692,46 @@ mod tests {
         assert!(listed
             .iter()
             .any(|s| s.id == "chat_g" && s.persona.as_deref() == Some("game-designer")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The observed model round-trips, stays out of the pinned `model`, and does
+    /// not reorder Recents.
+    ///
+    /// The separation is the point: writing an observed default into `model`
+    /// would silently pin a model the user never chose. And `updated_at` must not
+    /// move, because Recents sorts by it — a cosmetic observation must not
+    /// resurface an old session to the top of the list.
+    #[test]
+    fn effective_model_is_recorded_without_pinning_or_reordering() {
+        let (store, dir) = temp_store("chat-effective-model");
+        store
+            .create_chat_session(&test_chat_session("chat_d", None))
+            .unwrap();
+        let before = store.get_chat_session("chat_d").unwrap().unwrap();
+        assert_eq!(
+            before.effective_model, None,
+            "unset until a turn observes it"
+        );
+        let updated_at = before.updated_at;
+
+        store
+            .set_chat_session_effective_model("chat_d", "opencode-go/deepseek-v4-flash")
+            .unwrap();
+
+        let after = store.get_chat_session("chat_d").unwrap().unwrap();
+        assert_eq!(
+            after.effective_model.as_deref(),
+            Some("opencode-go/deepseek-v4-flash")
+        );
+        assert_eq!(after.model, None, "an observation must not become a pin");
+        assert_eq!(after.updated_at, updated_at, "Recents order must not move");
+
+        // Survives the list path, which uses the same column list.
+        let listed = store.list_chat_sessions_by_project("p1").unwrap();
+        assert!(listed.iter().any(|s| s.id == "chat_d"
+            && s.effective_model.as_deref() == Some("opencode-go/deepseek-v4-flash")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

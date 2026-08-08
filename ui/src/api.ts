@@ -590,6 +590,153 @@ export const getModalSettings = () => get<ModalSettings>("/api/settings/modal");
 /** Build the orx-managed Modal env (first run downloads the SDK, ~30–60s). */
 export const provisionModal = () => post<ModalSettings>("/api/settings/modal/provision");
 
+// --- settings: scenario ------------------------------------------------------
+
+/** `connected` is verified against the live server, not inferred from the token
+ * file: `expired` is the stored-but-dead case, and the only one where the fix is
+ * to log in again. */
+export type ScenarioState = "connected" | "expired" | "disconnected" | "error";
+
+export interface ScenarioSettings {
+  state: ScenarioState;
+  /** Where the token lives, so the card can say it out loud. */
+  authPath: string;
+  /** A login started from this dashboard is still waiting for its redirect. */
+  connecting: boolean;
+  /** Tools the connected workspace advertises. Only set when `connected`. */
+  toolCount?: number;
+  /** Scenario's OAuth metadata was discoverable. Only set when `disconnected` —
+   * false means a login can't succeed, which Connect alone won't fix. */
+  reachable?: boolean;
+  error?: string;
+}
+
+export interface ScenarioConnectStarted {
+  started: boolean;
+  /** Where the user has to sign in. Shown when we couldn't open a browser. */
+  authorizeUrl: string;
+  /** False over SSH, where the browser is on the user's machine, not the
+   * server's — the card then asks them to open the URL themselves. */
+  browserOpened: boolean;
+}
+
+export const getScenarioSettings = () => get<ScenarioSettings>("/api/settings/scenario");
+
+/** Kicks off the browser login and returns at once; watch `onScenarioConnect`
+ * for the outcome. */
+export const connectScenario = () =>
+  post<ScenarioConnectStarted>("/api/settings/scenario/connect");
+
+export const disconnectScenario = () =>
+  post<ScenarioSettings>("/api/settings/scenario/disconnect");
+
+// --- settings: generative-ai providers ---------------------------------------
+
+/** Blender, reached through the Blender Lab MCP server.
+ *
+ * Three separate booleans rather than one `ready` because their fixes differ:
+ * the server can be missing, or present-but-not-runnable (a pipx venv whose
+ * interpreter a Python upgrade removed), and Blender itself can simply be closed. */
+export interface BlenderSettings {
+  kind: "blender";
+  id: string;
+  name: string;
+  /** Server runnable AND Blender reachable — what a tool call needs. */
+  ready: boolean;
+  serverFound: boolean;
+  serverRunnable: boolean;
+  blenderReachable: boolean;
+  /** Crux has a server child running. Distinct from `serverRunnable`: a freshly
+   * repaired install is runnable but needs a `crux up` restart to be running. */
+  serverRunning: boolean;
+  /** The `host:port` probed, so an override is visible rather than implied. */
+  addonAddress: string;
+  serverPath?: string;
+  serverUrl?: string;
+  blenderVersion?: string;
+  /** Absent for an unsaved file. */
+  blendFile?: string;
+  objectCount?: number;
+  toolCount?: number;
+  serverError?: string;
+  blenderError?: string;
+}
+
+/** A custom-node pack serving workflow templates whose node classes never
+ *  registered — the templates look available and every submission fails. */
+export interface BrokenPack {
+  pack: string;
+  templates: number;
+  missingNodes: string[];
+}
+
+/** ComfyUI, reached through the community `comfyui-mcp` server.
+ *
+ * Four independent layers because the fixes differ: the MCP server can be missing
+ * or unrunnable, ComfyUI itself can be down, and its custom nodes can have failed
+ * to import while still advertising templates. */
+export interface ComfyuiSettings {
+  kind: "comfyui";
+  id: string;
+  name: string;
+  /** MCP server runnable AND ComfyUI reachable. */
+  ready: boolean;
+  mcpFound: boolean;
+  mcpRunnable: boolean;
+  comfyReachable: boolean;
+  /** Crux has an MCP child running. */
+  serverRunning: boolean;
+  /** Crux started ComfyUI, as opposed to adopting the user's own instance. */
+  comfyManaged: boolean;
+  installPath: string;
+  /** ComfyUI's own web UI — the card links here. */
+  dashboardUrl: string;
+  mcpPath?: string;
+  serverUrl?: string;
+  comfyVersion?: string;
+  pythonVersion?: string;
+  torchVersion?: string;
+  device?: string;
+  vramTotal?: number;
+  vramFree?: number;
+  /** Registered node classes — the catalog's size, not its contents. */
+  nodeClasses?: number;
+  queueDepth?: number;
+  /** Polled from the live server, never hard-coded. */
+  toolCount?: number;
+  brokenPacks?: BrokenPack[];
+  mcpError?: string;
+  comfyError?: string;
+}
+
+/** Fields every provider carries, so the sub-tab strip can be generic. */
+export interface GenAiCommon {
+  id: string;
+  name: string;
+  ready: boolean;
+}
+
+export type ScenarioProvider = ScenarioSettings & GenAiCommon & { kind: "scenario" };
+
+export type GenAiProvider = ScenarioProvider | BlenderSettings | ComfyuiSettings;
+
+export interface ComfyStartResult {
+  /** We spawned it. */
+  started: boolean;
+  /** Something was already listening, so we took that instead. */
+  adopted: boolean;
+  dashboardUrl: string;
+}
+
+/** Start ComfyUI (or adopt a running one). Slow — it imports torch and scans
+ *  models, so the caller should show a spinner rather than assume a quick reply. */
+export const startComfyui = () => post<ComfyStartResult>("/api/settings/comfyui/start");
+
+export const getGenAi = (refresh = false) =>
+  get<{ providers: GenAiProvider[] }>(
+    `/api/settings/genai${refresh ? "?refresh=1" : ""}`,
+  ).then((r) => r.providers);
+
 // --- settings: env vars / git / harnesses ------------------------------------
 
 export interface EnvVar {
@@ -1167,7 +1314,13 @@ export interface ChatSession {
   /** Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
    * (harness auto-title), `"user"` (rename). Null on legacy sessions. */
   titleSource?: string | null;
+  /** The model the user pinned for this session; null = harness default. */
   model: string | null;
+  /** The model the harness actually resolved and ran, observed at turn time.
+   *  Display only — never send it back as a pin. Fills in the blank when `model`
+   *  is null, which is otherwise unanswerable: OpenCode picks its default from
+   *  the authenticated providers and reports it only at runtime. */
+  effectiveModel?: string | null;
   permissionMode: string | null;
   reasoningLevel: string | null;
   /** The session's own persona wire id; null = inherit the project's persona. */

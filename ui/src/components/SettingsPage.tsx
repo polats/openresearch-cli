@@ -12,6 +12,7 @@ import {
   RadioTower,
   RefreshCw,
   Server,
+  Sparkles,
   SquareTerminal,
   Trash2,
   X,
@@ -33,6 +34,14 @@ import {
   getLocalMachine,
   getModalSettings,
   getOpenResearchSettings,
+  getGenAi,
+  connectScenario,
+  disconnectScenario,
+  startComfyui,
+  type ComfyuiSettings,
+  type BlenderSettings,
+  type GenAiProvider,
+  type ScenarioProvider,
   getRaySettings,
   getSlurmSettings,
   getSshHosts,
@@ -84,7 +93,7 @@ import {
   type SshPreflight,
   harnessModelLabel,
 } from "../api";
-import { onDataDirMove, onHarnessAuth } from "../events";
+import { onDataDirMove, onHarnessAuth, onScenarioConnect } from "../events";
 import { GitTokenForm } from "./GitTokenForm";
 import { Md } from "./Md";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
@@ -95,6 +104,7 @@ export type SettingsTab =
   | "appearance"
   | "persona"
   | "harnesses"
+  | "generative-ai"
   | "compute"
   | "instances"
   | "environment"
@@ -311,6 +321,472 @@ function HarnessesTab() {
         </div>
       )}
     </>
+  );
+}
+
+// --- generative ai (scenario, blender) ------------------------------------------
+
+/** Sub-tab dot + card badge for one provider, the way `harnessStatus` does it for
+ *  harnesses — one function driving both so they can't disagree. */
+function genAiStatus(p: GenAiProvider): { cls: string; label: string } {
+  if (p.ready) return { cls: "ok", label: "Ready" };
+  if (p.kind === "scenario") {
+    if (p.state === "expired") return { cls: "err", label: "Login expired" };
+    if (p.state === "error") return { cls: "err", label: "Error" };
+    if (p.reachable === false) return { cls: "err", label: "Unreachable" };
+    return { cls: "", label: "Not connected" };
+  }
+  if (p.kind === "comfyui") {
+    if (p.mcpFound && !p.mcpRunnable) return { cls: "err", label: "Server broken" };
+    if (!p.mcpFound) return { cls: "", label: "Not installed" };
+    // Not running is a state the card can fix with its Start button, so it's a
+    // warning rather than an error.
+    return { cls: "warn", label: "ComfyUI not running" };
+  }
+  // Blender: "installed but broken" is a harder failure than "Blender is closed",
+  // which is just the user's window state and not something to alarm about.
+  if (p.serverFound && !p.serverRunnable) return { cls: "err", label: "Server broken" };
+  if (!p.serverFound) return { cls: "", label: "Not installed" };
+  return { cls: "warn", label: "Blender not running" };
+}
+
+function GenerativeAiTab() {
+  const [providers, setProviders] = useState<GenAiProvider[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [active, setActive] = useState("scenario");
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = (refresh = false) => {
+    setRefreshing(true);
+    return getGenAi(refresh)
+      .then((next) => {
+        setProviders(next);
+        setLoadError(null);
+      })
+      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setRefreshing(false));
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const p = providers?.find((x) => x.id === active);
+
+  return (
+    <>
+      <h1>Generative AI</h1>
+      <p className="settings-sub">
+        Asset-generation backends the agent can drive. Scenario runs in the cloud on your own
+        account; Blender and ComfyUI run on this machine, each through its own MCP server.
+      </p>
+      {loadError ? (
+        <div className="error">{loadError}</div>
+      ) : !providers ? (
+        <div className="settings-loading">
+          <span className="spinner" /> Checking providers…
+        </div>
+      ) : (
+        <>
+          <div className="harness-tabs">
+            {providers.map((x) => (
+              <button
+                key={x.id}
+                className={x.id === active ? "active" : ""}
+                onClick={() => setActive(x.id)}
+              >
+                {x.name}
+                <span className={`harness-dot ${genAiStatus(x).cls}`} />
+              </button>
+            ))}
+          </div>
+          {p?.kind === "scenario" && <ScenarioCard s={p} onChanged={load} />}
+          {p?.kind === "blender" && (
+            <BlenderCard s={p} refreshing={refreshing} onRefresh={() => void load(true)} />
+          )}
+          {p?.kind === "comfyui" && (
+            <ComfyuiCard s={p} refreshing={refreshing} onRefresh={() => void load(true)} />
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
+/** Blender's card: one row per independently fixable fact, and the command that
+ *  fixes whichever one is broken. Reports only — no start/stop or install. */
+function BlenderCard({
+  s,
+  refreshing,
+  onRefresh,
+}: {
+  s: BlenderSettings;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const status = genAiStatus(s);
+  return (
+    <div className="settings-card">
+      <div className="settings-card-head">
+        <span className={`badge ${status.cls}`}>{status.label}</span>
+        <div className="spacer" style={{ flex: 1 }} />
+        <button className="btn sm" onClick={onRefresh} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "spin" : ""} /> Refresh
+        </button>
+      </div>
+      <div className="kv">
+        <span className="k">MCP server</span>
+        <span className="v">
+          {!s.serverFound
+            ? "not installed"
+            : !s.serverRunnable
+              ? "installed, but will not run"
+              : s.serverRunning
+                ? `running on ${s.serverUrl}`
+                : "installed — restart crux to start it"}
+        </span>
+        {s.serverPath && (
+          <>
+            <span className="k">Path</span>
+            <span className="v">
+              <code>{s.serverPath}</code>
+            </span>
+          </>
+        )}
+        <span className="k">Blender</span>
+        <span className="v">
+          {s.blenderReachable
+            ? [
+                s.blenderVersion,
+                s.blendFile ?? "unsaved file",
+                s.objectCount !== undefined ? `${s.objectCount} objects` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            : `not reachable on ${s.addonAddress}`}
+        </span>
+        {s.toolCount !== undefined && (
+          <>
+            <span className="k">Tools</span>
+            <span className="v">{s.toolCount} offered to the agent</span>
+          </>
+        )}
+      </div>
+      {!s.serverFound && (
+        <p className="settings-note">
+          Install the Blender MCP server with <code>pipx install blender-mcp</code>, then restart
+          crux so it can start one.
+        </p>
+      )}
+      {s.serverFound && !s.serverRunnable && s.serverError && (
+        <p className="settings-note">{s.serverError}</p>
+      )}
+      {/* Only worth saying once the server side is sound — otherwise it's the
+          second problem, and fixing it wouldn't help yet. */}
+      {s.serverRunnable && !s.blenderReachable && (
+        <p className="settings-note">
+          {s.blenderError ??
+            `Nothing answered on ${s.addonAddress}.`}{" "}
+          Blender-backed tools will fail until Blender is open; documentation tools keep working.
+        </p>
+      )}
+      {s.serverRunnable && !s.serverRunning && (
+        <p className="settings-note">
+          The server is usable but crux has no child running — it starts one at launch, so restart{" "}
+          <code>crux up</code> to pick it up.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** ComfyUI's card: the four layers, the polled tool count, a link into ComfyUI's
+ *  own web UI, and a Start button when nothing is listening. */
+function ComfyuiCard({
+  s,
+  refreshing,
+  onRefresh,
+}: {
+  s: ComfyuiSettings;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const status = genAiStatus(s);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function start() {
+    if (starting) return;
+    setStarting(true);
+    setError(null);
+    try {
+      await startComfyui();
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  const gb = (bytes?: number) =>
+    bytes === undefined ? null : `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+
+  return (
+    <div className="settings-card">
+      <div className="settings-card-head">
+        <span className={`badge ${status.cls}`}>{status.label}</span>
+        <div className="spacer" style={{ flex: 1 }} />
+        {/* The dashboard is where the real work happens — the graph editor, the
+            queue, the outputs — so the card's job is to get you there, not to
+            reproduce it. Only offered once ComfyUI is actually up. */}
+        {s.comfyReachable && (
+          <a
+            className="btn sm"
+            href={s.dashboardUrl}
+            target="_blank"
+            rel="noreferrer"
+            title="Open ComfyUI's own web UI"
+          >
+            Open ComfyUI <ExternalLink size={12} />
+          </a>
+        )}
+        <button className="btn sm" onClick={onRefresh} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "spin" : ""} /> Refresh
+        </button>
+      </div>
+      <div className="kv">
+        <span className="k">MCP server</span>
+        <span className="v">
+          {!s.mcpFound
+            ? "not installed"
+            : !s.mcpRunnable
+              ? "installed, but will not run"
+              : s.serverRunning
+                ? `running on ${s.serverUrl}`
+                : "installed — restart crux to start it"}
+        </span>
+        <span className="k">ComfyUI</span>
+        <span className="v">
+          {s.comfyReachable
+            ? [
+                s.comfyVersion && `v${s.comfyVersion}`,
+                s.comfyManaged ? "started by crux" : "already running",
+                s.nodeClasses !== undefined && `${s.nodeClasses} nodes`,
+                s.queueDepth !== undefined &&
+                  (s.queueDepth === 0 ? "queue idle" : `${s.queueDepth} queued`),
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            : `not running at ${s.dashboardUrl}`}
+        </span>
+        {s.device && (
+          <>
+            <span className="k">Device</span>
+            <span className="v">
+              {s.device}
+              {s.vramTotal !== undefined && ` — ${gb(s.vramFree)} free of ${gb(s.vramTotal)}`}
+            </span>
+          </>
+        )}
+        {s.toolCount !== undefined && (
+          <>
+            <span className="k">Tools</span>
+            <span className="v">{s.toolCount} offered to the agent</span>
+          </>
+        )}
+        <span className="k">Install</span>
+        <span className="v">
+          <code>{s.installPath}</code>
+        </span>
+      </div>
+      {!s.mcpFound && (
+        <p className="settings-note">
+          Install the MCP server with <code>npm install -g comfyui-mcp</code>, then restart crux so
+          it can start one. There is no official local server yet — Comfy's own is in private test,
+          and their hosted Cloud one doesn't drive a self-hosted install.
+        </p>
+      )}
+      {s.mcpFound && !s.mcpRunnable && s.mcpError && <p className="settings-note">{s.mcpError}</p>}
+      {s.mcpRunnable && !s.comfyReachable && (
+        <p className="settings-note">
+          Nothing is listening at <code>{s.dashboardUrl}</code>. Start it below, or run it yourself
+          from <code>{s.installPath}</code> — the agent's ComfyUI tools fail until it's up.
+        </p>
+      )}
+      {/* The finding no other surface reports: a pack can serve templates whose
+          node classes never imported, so the templates look fine and every run
+          fails on an unknown node type. */}
+      {s.brokenPacks?.map((b) => (
+        <p className="settings-note" key={b.pack}>
+          <strong>{b.pack}</strong> serves {b.templates} workflow
+          {b.templates === 1 ? "" : "s"} referencing node classes that aren't registered, so those
+          workflows cannot run. Missing: <code>{b.missingNodes.slice(0, 4).join(", ")}</code>
+          {b.missingNodes.length > 4 && ` and ${b.missingNodes.length - 4} more`}. Either the pack
+          failed to import — a compiled dependency built against a different torch does this, and
+          ComfyUI's own log says which — or the templates need other packs you haven't installed.
+        </p>
+      ))}
+      {error && <div className="error">{error}</div>}
+      {s.mcpRunnable && !s.comfyReachable && (
+        <div className="actions">
+          <button className="btn primary" onClick={() => void start()} disabled={starting}>
+            {starting ? "Starting… (imports torch, ~30s+)" : "Start ComfyUI"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScenarioCard({ s, onChanged }: { s: ScenarioProvider; onChanged: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  /** Set when the server couldn't open a browser (it's on another machine over
+   * SSH), so the user has to open the URL themselves. */
+  const [manualUrl, setManualUrl] = useState<string | null>(null);
+
+  const load = () =>
+    onChanged().then(() => {
+      // The server is the authority on whether a login is still in flight, so
+      // let it overrule our local optimism — otherwise a missed outcome event
+      // would leave the card stuck on "waiting" with no way back.
+      setBusy(false);
+    });
+
+  // The POST returns as soon as the browser opens, so the outcome arrives here.
+  // Re-fetch on success rather than trusting the event's scopes: the card's whole
+  // claim is that the login *works*, which only a live check establishes.
+  useEffect(
+    () =>
+      onScenarioConnect((ev) => {
+        setBusy(false);
+        setManualUrl(null);
+        if (ev.type === "error") setError(ev.error);
+        else setError(null);
+        void onChanged();
+      }),
+    [onChanged],
+  );
+
+  async function connect() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setManualUrl(null);
+    try {
+      const started = await connectScenario();
+      if (!started.browserOpened) setManualUrl(started.authorizeUrl);
+      // Reflect "waiting for the browser" immediately; `busy` stays set until an
+      // SSE event lands or the five-minute login window times out.
+      await onChanged();
+    } catch (err) {
+      setBusy(false);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function disconnect() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setManualUrl(null);
+    try {
+      await disconnectScenario();
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const waiting = busy || s.connecting;
+  const status = genAiStatus(s);
+
+  return (
+    <div className="settings-card">
+      <div className="settings-card-head">
+        <span className={`badge ${status.cls}`}>
+          {s.state === "connected" ? "Connected" : status.label}
+        </span>
+        <div className="spacer" style={{ flex: 1 }} />
+        {/* Deliberately usable while waiting: it's a read-only check, and it's
+            the way out if a login's outcome event was missed (the page was
+            reloaded mid-login, say) and the card would otherwise sit waiting
+            until the five-minute window lapsed. */}
+        <button className="btn sm" onClick={() => void load()}>
+          <RefreshCw size={12} /> Refresh
+        </button>
+      </div>
+      <div className="kv">
+        <span className="k">Login</span>
+        <span className="v">
+          {s.state === "connected"
+            ? "Signed in and working"
+            : s.state === "expired"
+              ? "Stored, but no longer accepted"
+              : s.state === "error"
+                ? "Stored, but the check failed"
+                : "Not signed in"}
+        </span>
+        {s.toolCount !== undefined && (
+          <>
+            <span className="k">Tools</span>
+            <span className="v">{s.toolCount} available in this workspace</span>
+          </>
+        )}
+        <span className="k">Token</span>
+        <span className="v">
+          <code>{s.authPath}</code> (private to your user)
+        </span>
+      </div>
+      {s.state === "disconnected" && s.reachable === false && (
+        <p className="settings-note">
+          Scenario didn't answer with the OAuth details a login needs, so signing in can't succeed
+          right now — the service may be down. {s.error}
+        </p>
+      )}
+      {s.state === "expired" && (
+        <p className="settings-note">
+          The stored login no longer works — signing in again replaces it. This happens when the same
+          account is re-authorised somewhere else.
+        </p>
+      )}
+      {s.state === "error" && s.error && <p className="settings-note">{s.error}</p>}
+      {waiting && (
+        <p className="settings-note">
+          Waiting for you to finish signing in
+          {manualUrl ? "" : " in the browser tab that just opened"}…
+          {manualUrl && (
+            <>
+              {" "}
+              This server has no browser of its own, so open this yourself:{" "}
+              <a href={manualUrl} target="_blank" rel="noreferrer">
+                the Scenario login page <ExternalLink size={11} />
+              </a>
+            </>
+          )}
+        </p>
+      )}
+      {error && <div className="error">{error}</div>}
+      <div className="actions">
+        <button className="btn primary" onClick={() => void connect()} disabled={waiting}>
+          {waiting
+            ? "Waiting for the browser…"
+            : s.state === "connected"
+              ? "Sign in again"
+              : s.state === "expired"
+                ? "Reconnect"
+                : "Connect"}
+        </button>
+        {s.state !== "disconnected" && (
+          <button className="btn" onClick={() => void disconnect()} disabled={waiting}>
+            Disconnect
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -2702,6 +3178,7 @@ export const SETTINGS_NAV: { id: Tab; label: string; icon: React.ReactNode }[] =
   { id: "appearance", label: "Appearance", icon: <Palette size={15} /> },
   { id: "persona", label: "Persona", icon: <Drama size={15} /> },
   { id: "harnesses", label: "Harnesses", icon: <Blocks size={15} /> },
+  { id: "generative-ai", label: "Generative AI", icon: <Sparkles size={15} /> },
   { id: "compute", label: "Compute", icon: <Cpu size={15} /> },
   { id: "instances", label: "Instances", icon: <Server size={15} /> },
   { id: "environment", label: "Environment", icon: <SquareTerminal size={15} /> },
@@ -2726,6 +3203,7 @@ export function SettingsView({
       {tab === "appearance" && <AppearanceTab />}
       {tab === "persona" && <PersonaTab project={project} onProjectUpdated={onProjectUpdated} />}
       {tab === "harnesses" && <HarnessesTab />}
+      {tab === "generative-ai" && <GenerativeAiTab />}
       {tab === "compute" && <ComputeTab />}
       {tab === "environment" && (
         <>

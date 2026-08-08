@@ -44,7 +44,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::{anyhow, Result};
 use crate::local::harness::claude::{
-    claude_permission_mode, find_claude, write_mcp_config, write_plan_settings,
+    claude_permission_mode, find_claude, write_mcp_config, write_plan_settings, GateSpec,
 };
 use crate::local::harness::{HarnessAuthState, PermissionMode};
 
@@ -365,7 +365,8 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     // today's no-bridge plan gating, never worse.
     let mut config = spec.config.clone();
     config.bridge_active = false;
-    if spec.config.permission_mode == Some(PermissionMode::Plan) {
+    let want_bridge = spec.config.permission_mode == Some(PermissionMode::Plan);
+    if want_bridge {
         match write_plan_settings(&spec.repo) {
             Ok(path) => {
                 cmd.arg("--settings").arg(path);
@@ -376,27 +377,46 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
                 );
             }
         }
-        // The gate token is minted HERE and ONLY here — once per child, riding
-        // the mcp-gate bridge for the child's whole life. Re-minting mid-child
-        // (e.g. per turn) would strand a live bridge: `request_permission`
-        // equality-checks the token with no expiry (chat/mod.rs), so a fresh
-        // token invalidates the resident bridge child's held requests.
-        if let Some(port) = spec.chat.up_port() {
-            let token = spec.chat.mint_gate_token(&spec.session_id);
-            match write_mcp_config(&spec.repo, port, &spec.session_id, &token) {
-                Ok(path) => {
-                    cmd.arg("--mcp-config").arg(path);
-                    cmd.args(["--permission-prompt-tool", "mcp__orx__approve"]);
-                    // Give a held approval an hour before the CLI abandons the
-                    // tool call; orx denies at 55 min, safely inside it.
-                    cmd.env("MCP_TOOL_TIMEOUT", "3600000");
-                    config.bridge_active = true;
-                }
-                Err(e) => {
-                    eprintln!(
-                        "orx up: mcp bridge not configured, gray-area tools will be denied: {e}"
-                    );
-                }
+    }
+    // The gate token is minted HERE and ONLY here — once per child, riding
+    // the mcp-gate bridge for the child's whole life. Re-minting mid-child
+    // (e.g. per turn) would strand a live bridge: `request_permission`
+    // equality-checks the token with no expiry (chat/mod.rs), so a fresh
+    // token invalidates the resident bridge child's held requests.
+    let gate = want_bridge
+        .then(|| spec.chat.up_port())
+        .flatten()
+        .map(|port| (port, spec.chat.mint_gate_token(&spec.session_id)));
+    // Written in every mode now, because it also carries the Blender server — but
+    // the *bridge* half stays Plan-only, and so does `bridge_active`. Conflating
+    // them would make the wanted/achieved values disagree in every non-Plan turn
+    // and respawn the child each time (see `write_mcp_config`).
+    match write_mcp_config(
+        &spec.repo,
+        gate.as_ref().map(|(port, token)| GateSpec {
+            up_port: *port,
+            session_id: &spec.session_id,
+            token,
+        }),
+        &crate::local::mcp_servers::claude_entries(),
+    ) {
+        Ok(Some(path)) => {
+            cmd.arg("--mcp-config").arg(path);
+            if gate.is_some() {
+                cmd.args(["--permission-prompt-tool", "mcp__orx__approve"]);
+                // Give a held approval an hour before the CLI abandons the
+                // tool call; orx denies at 55 min, safely inside it.
+                cmd.env("MCP_TOOL_TIMEOUT", "3600000");
+                config.bridge_active = true;
+            }
+        }
+        // Nothing to configure: no bridge wanted and no Blender server.
+        Ok(None) => {}
+        Err(e) => {
+            if want_bridge {
+                eprintln!("orx up: mcp bridge not configured, gray-area tools will be denied: {e}");
+            } else {
+                eprintln!("orx up: Blender tools not configured for this session: {e}");
             }
         }
     }

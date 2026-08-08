@@ -51,6 +51,13 @@ rust-embed = "8"
 futures = "0.3"
 # async fns in the Harness trait (object-safe `dyn Harness` in the registry).
 async-trait = "0.1"
+# MCP client for the Scenario bridge (`local::scenario`). `reqwest` is the
+# feature that turns on rustls — `transport-streamable-http-client-reqwest` only
+# adds the dependency (`__reqwest`), so without it every https URL fails at
+# connect with "invalid URL, scheme is not http". Deliberately the rustls flavor,
+# not `reqwest-native-tls`, so no OpenSSL enters the tree and the static musl
+# release builds keep linking.
+rmcp = { version = "3.1.1", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest", "auth"] }
 
 [target.'cfg(unix)'.dependencies]
 # Free-space pre-check for the data-dir move (statvfs). Already in the tree

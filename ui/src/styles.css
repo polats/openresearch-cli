@@ -1515,10 +1515,30 @@ textarea::placeholder {
 }
 .composer-actions {
   display: flex;
-  justify-content: flex-end;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 6px 8px 8px;
+  /* Never a second row: the controls compress before they wrap, and the send
+     button is pinned by `flex: none` below so it is the one thing that never
+     gives up space. */
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+/* The model label is the elastic one — it is the only value that can be very
+   long (`provider/model`), so it alone absorbs the squeeze. Mode and reasoning
+   hold their intrinsic width: their labels are short and fixed, and truncating
+   "Auto mode" to "Au…" to make room for a model name loses the more important
+   word. */
+.composer-actions .option-picker {
+  flex: none;
+}
+.composer-actions .model-picker {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46%;
+}
+.composer-actions .send-btn {
+  flex: none;
 }
 .send-btn {
   display: inline-flex;
@@ -3600,6 +3620,13 @@ a.files-pill:hover {
   --persona-idea-foundry: var(--accent-purple);
   --persona-analyst: var(--accent-teal);
   --persona-producer: var(--accent-pink);
+  /* amber = blender artist. Deliberately not --accent-orange (the game
+     designer's) even though Blender's own brand is orange: the two personas hand
+     work to each other constantly, so their badges must not read as the same. */
+  --persona-blender: var(--accent-amber);
+  /* green = comfyui artist. The last unused accent that isn't red, which would
+     read as an error state on a badge rather than an identity. */
+  --persona-comfyui: var(--accent-green);
 }
 .persona-swatch {
   flex: none;
@@ -3628,6 +3655,8 @@ a.files-pill:hover {
 .persona-badge.persona-idea-foundry { color: var(--persona-idea-foundry); }
 .persona-badge.persona-analyst { color: var(--persona-analyst); }
 .persona-badge.persona-producer { color: var(--persona-producer); }
+.persona-badge.persona-blender { color: var(--persona-blender); }
+.persona-badge.persona-comfyui { color: var(--persona-comfyui); }
 /* compact variant for dense rows (icon only, or tiny label) */
 .persona-badge.compact { padding: 2px; border-color: transparent; background: transparent; }
 
@@ -3861,6 +3890,30 @@ a.files-pill:hover {
 .persona-active-pill.persona-producer {
   color: var(--persona-producer);
   border-color: var(--persona-producer);
+}
+/* blender persona (amber) — the 3D asset author */
+.persona-swatch.persona-blender,
+.persona-bar.persona-blender {
+  background: var(--persona-blender);
+}
+.persona-card.persona-blender {
+  border-left: 3px solid var(--persona-blender);
+}
+.persona-active-pill.persona-blender {
+  color: var(--persona-blender);
+  border-color: var(--persona-blender);
+}
+/* comfyui persona (green) — the 2D asset generator */
+.persona-swatch.persona-comfyui,
+.persona-bar.persona-comfyui {
+  background: var(--persona-comfyui);
+}
+.persona-card.persona-comfyui {
+  border-left: 3px solid var(--persona-comfyui);
+}
+.persona-active-pill.persona-comfyui {
+  color: var(--persona-comfyui);
+  border-color: var(--persona-comfyui);
 }
 /* Recents row: title + a muted provider·model subline (glanceable per-session). */
 .session-row .session-titlewrap {
@@ -4421,6 +4474,18 @@ a.files-pill:hover {
   color: var(--text);
   padding: 5px 8px;
   border-radius: var(--radius-sm);
+  /* One line, always. These labels carry values of wildly different lengths —
+     "Auto" next to "opencode-go/deepseek-v4-flash" — and a wrapped label makes
+     the whole control row two rows tall and ragged. Overflow is truncated; the
+     button's `title` carries the full value. */
+  white-space: nowrap;
+  min-width: 0;
+}
+.pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .composer-pill:hover {
   background: var(--surface);
@@ -4435,10 +4500,29 @@ a.files-pill:hover {
   color: var(--text);
   padding: 5px 4px;
   border-radius: var(--radius-sm);
+  white-space: nowrap;
+  min-width: 0;
 }
 .composer-bare:hover {
   color: var(--text);
 }
+/* Budgets in the header: plan quota + context fill, read together as one
+   status cluster and separated from the icon buttons by a hairline so they
+   don't read as another row of actions. */
+/* The two read-only budgets, held together and never compressed — a number that
+   reflows or truncates stops being glanceable, which is the only reason it is
+   on screen. */
+.composer-budgets {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  white-space: nowrap;
+}
+.composer-budgets:empty {
+  display: none;
+}
+
 .model-menu,
 .option-menu {
   position: absolute;
@@ -4496,6 +4580,12 @@ a.files-pill:hover {
 .option-menu.align-right {
   left: auto;
   right: 0;
+}
+/* A picker in the header must open downward — the composer's default upward
+   menu would render off the top of the window. */
+.option-menu.drop-down {
+  bottom: auto;
+  top: calc(100% + 8px);
 }
 /* Rail menus open downward (composer menus open upward, above the box). */
 .option-menu.drop-down {

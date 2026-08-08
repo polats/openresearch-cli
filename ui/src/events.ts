@@ -121,6 +121,27 @@ function emitProjectClone(ev: ProjectCloneEvent) {
   projectCloneListeners.forEach((fn) => fn(ev));
 }
 
+// A Scenario login finishing fans out the same way: the POST that started it
+// returned as soon as the browser opened, so this is how the Settings card learns
+// whether the human ever came back.
+export type ScenarioConnectEvent =
+  | { type: "done"; scopes: string[] }
+  | { type: "error"; error: string };
+
+type ScenarioConnectListener = (ev: ScenarioConnectEvent) => void;
+const scenarioConnectListeners = new Set<ScenarioConnectListener>();
+
+export function onScenarioConnect(fn: ScenarioConnectListener): () => void {
+  scenarioConnectListeners.add(fn);
+  return () => {
+    scenarioConnectListeners.delete(fn);
+  };
+}
+
+function emitScenarioConnect(ev: ScenarioConnectEvent) {
+  scenarioConnectListeners.forEach((fn) => fn(ev));
+}
+
 export interface OrxEventHandlers {
   onRun: (run: Run) => void;
   onExperiment: (experiment: Experiment) => void;
@@ -217,6 +238,14 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
     es.addEventListener("datadir.move.error", (e) => {
       const d = parse<{ error: string }>(e as MessageEvent);
       if (d) emitDataDirMove({ type: "error", error: d.error });
+    });
+    es.addEventListener("scenario.connect.done", (e) => {
+      const d = parse<{ scopes?: string[] }>(e as MessageEvent);
+      if (d) emitScenarioConnect({ type: "done", scopes: d.scopes ?? [] });
+    });
+    es.addEventListener("scenario.connect.error", (e) => {
+      const d = parse<{ error: string }>(e as MessageEvent);
+      if (d?.error) emitScenarioConnect({ type: "error", error: d.error });
     });
     es.addEventListener("project.clone.progress", (e) => {
       const d = parse<ProjectCloneEvent>(e as MessageEvent);

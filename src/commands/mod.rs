@@ -42,6 +42,7 @@ pub mod projects;
 pub mod query;
 pub mod report;
 pub mod runs;
+pub mod scenario;
 pub mod search_logs;
 pub mod serve;
 pub mod skill;

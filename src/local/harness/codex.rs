@@ -2055,6 +2055,21 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                                 }
                             }
                         }
+                        ServerReqKind::McpElicitation => {
+                            // Codex asking to run a tool on one of the MCP servers
+                            // orx itself injected → accept; anything else is a
+                            // form/url elicitation we have no surface for.
+                            let accept =
+                                crate::local::codex::mcp_elicitation_is_tool_approval(&params);
+                            let _ = client
+                                .respond(
+                                    &id,
+                                    serde_json::json!({
+                                        "action": if accept { "accept" } else { "decline" }
+                                    }),
+                                )
+                                .await;
+                        }
                         ServerReqKind::Other => {
                             // A reply schema we don't speak — fail the call
                             // rather than answer in a shape codex can't parse.
@@ -2110,6 +2125,12 @@ async fn settle_request(client: &CodexClient, id: &Value, kind: ServerReqKind) {
         ServerReqKind::UserInput => {
             let _ = client
                 .respond(id, serde_json::json!({ "answers": {} }))
+                .await;
+        }
+        ServerReqKind::McpElicitation => {
+            // Its own reply shape: `{action}`, not `{decision}`.
+            let _ = client
+                .respond(id, serde_json::json!({ "action": "decline" }))
                 .await;
         }
         ServerReqKind::Other => {
@@ -2616,6 +2637,13 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     // Reasoning level → Codex's own `model_reasoning_effort` config override.
     if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref()) {
         cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
+    }
+    // The managed MCP servers, matching the app-server path so a turn's tools don't
+    // depend on which transport it happened to take. Dotted paths, so unlike
+    // `writable_roots` above these *add* to the user's `mcp_servers` rather than
+    // replacing the table.
+    for over in crate::local::mcp_servers::codex_overrides() {
+        cmd.args(["-c", &over]);
     }
     if let Some(model) = &ctx.model {
         cmd.args(["-m", model]);
