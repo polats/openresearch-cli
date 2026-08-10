@@ -12,6 +12,7 @@ import { resolveSyntaxLanguage } from "../syntaxLanguage";
 import { highlight } from "../syntaxHighlight";
 // Must match rehype-katex's bundled katex — a version skew breaks \boxed.
 import "katex/dist/katex.min.css";
+import { mediaKind } from "./mediaKind";
 
 // Chat blocks are short; cap tokenizing well below the file viewer's limit.
 const HIGHLIGHT_MAX_BYTES = 100_000;
@@ -111,12 +112,53 @@ function FileChip({
   path,
   lines,
   onOpenFile,
+  fileSrc,
 }: {
   path: string;
   lines?: string;
   onOpenFile?: (path: string) => void;
+  /** Resolves a mentioned path to a fetchable URL. Absent → chip only. */
+  fileSrc?: (path: string) => string | null;
 }) {
   const name = path.split("/").pop() || path;
+  const kind = mediaKind(path);
+  const src = kind && fileSrc ? fileSrc(path) : null;
+  // A mention can name a repo file rather than a files-dir artifact, and the two
+  // are indistinguishable from the string. Optimistically resolve, then fall back
+  // to the chip if the fetch fails — better than a broken-image glyph in chat.
+  const [mediaFailed, setMediaFailed] = useState(false);
+  if (src && !mediaFailed && (kind === "image" || kind === "video")) {
+    // Inline, and clicking opens the full viewer — an agent that just produced a
+    // sprite sheet should show it, not name it.
+    //
+    // Images and video only. A .glb would need its own WebGL context, and a
+    // transcript can mention many; browsers cap live contexts at around 16, so
+    // meshes stay a chip that opens the one-at-a-time viewer tab.
+    return (
+      <span className="chat-media">
+        <button
+          className="chat-media-open"
+          title={`Open ${path}`}
+          onClick={() => onOpenFile?.(path)}
+          disabled={!onOpenFile}
+        >
+          {kind === "image" ? (
+            <img src={src} alt={name} loading="lazy" onError={() => setMediaFailed(true)} />
+          ) : (
+            <video
+              src={src}
+              controls
+              loop
+              muted
+              playsInline
+              onError={() => setMediaFailed(true)}
+            />
+          )}
+        </button>
+        <span className="chat-media-name">{name}</span>
+      </span>
+    );
+  }
   // `lines` may be a single line or a range ("20-40"); show the first.
   const line = lines ? Number.parseInt(lines, 10) || undefined : undefined;
   const label = line != null ? `${name}:${line}` : name;
@@ -199,19 +241,24 @@ export const mdCodeComponents: Record<string, (props: any) => ReactNode> = {
 export const Md = memo(function Md({
   text,
   onOpenFile,
+  fileSrc,
 }: {
   text: string;
   onOpenFile?: (path: string) => void;
+  /** Resolves a mentioned files-dir path to a URL, enabling inline previews.
+   *  Md stays project-agnostic: the caller supplies the resolver, as it already
+   *  supplies `onOpenFile`. */
+  fileSrc?: (path: string) => string | null;
 }) {
   const components: Record<string, (props: any) => ReactNode> = {
     "file-mention": (props) => (
-      <FileChip path={props.path} lines={props.lines} onOpenFile={onOpenFile} />
+      <FileChip path={props.path} lines={props.lines} onOpenFile={onOpenFile} fileSrc={fileSrc} />
     ),
     a: ({ node: _node, href, children, ...rest }) => {
       // Agents sometimes link files as plain markdown links; open those as
       // file tabs instead of navigating the dashboard away.
       if (href && isFileHref(href) && onOpenFile) {
-        return <FileChip path={decodeURI(href)} onOpenFile={onOpenFile} />;
+        return <FileChip path={decodeURI(href)} onOpenFile={onOpenFile} fileSrc={fileSrc} />;
       }
       return (
         <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>

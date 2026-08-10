@@ -41,6 +41,8 @@ import {
   type ComfyuiSettings,
   type BlenderSettings,
   type GenAiProvider,
+  type KimodoSettings,
+  type UnirigSettings,
   type ScenarioProvider,
   getRaySettings,
   getSlurmSettings,
@@ -343,6 +345,16 @@ function genAiStatus(p: GenAiProvider): { cls: string; label: string } {
     // warning rather than an error.
     return { cls: "warn", label: "ComfyUI not running" };
   }
+  if (p.kind === "unirig") {
+    // Something else holding the port is a real misconfiguration; nothing there at
+    // all just means the container is stopped, which is a start away.
+    if (p.portOpen) return { cls: "err", label: "Wrong service on port" };
+    return { cls: "warn", label: "Container not running" };
+  }
+  if (p.kind === "kimodo") {
+    if (!p.repoFound) return { cls: "", label: "Not installed" };
+    return { cls: "warn", label: "No checkpoint" };
+  }
   // Blender: "installed but broken" is a harder failure than "Blender is closed",
   // which is just the user's window state and not something to alarm about.
   if (p.serverFound && !p.serverRunnable) return { cls: "err", label: "Server broken" };
@@ -404,6 +416,8 @@ function GenerativeAiTab() {
           {p?.kind === "blender" && (
             <BlenderCard s={p} refreshing={refreshing} onRefresh={() => void load(true)} />
           )}
+          {p?.kind === "unirig" && <UnirigCard s={p} refreshing={refreshing} onRefresh={() => load(true)} />}
+          {p?.kind === "kimodo" && <KimodoCard s={p} refreshing={refreshing} onRefresh={() => load(true)} />}
           {p?.kind === "comfyui" && (
             <ComfyuiCard s={p} refreshing={refreshing} onRefresh={() => void load(true)} />
           )}
@@ -415,6 +429,111 @@ function GenerativeAiTab() {
 
 /** Blender's card: one row per independently fixable fact, and the command that
  *  fixes whichever one is broken. Reports only — no start/stop or install. */
+/** UniRig: reachability and where to POST. Deliberately spare — inventing fields to
+ *  match the MCP-backed cards would imply a lifecycle this service does not have. */
+function UnirigCard({
+  s,
+  refreshing,
+  onRefresh,
+}: {
+  s: UnirigSettings;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const status = genAiStatus(s);
+  return (
+    <div className="settings-card">
+      <div className="settings-card-head">
+        <span className={`badge ${status.cls}`}>{status.label}</span>
+        <div className="spacer" style={{ flex: 1 }} />
+        <button className="btn sm" onClick={onRefresh} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "spin" : ""} /> Refresh
+        </button>
+      </div>
+      <div className="kv">
+        <span className="k">Service</span>
+        <span className="v">
+          {s.serviceReachable
+            ? "answering"
+            : s.portOpen
+              ? "port open, but not the UniRig API"
+              : "not running"}
+        </span>
+        <span className="k">Address</span>
+        <span className="v">
+          <code>{s.address}</code>
+        </span>
+        <span className="k">Rig endpoint</span>
+        <span className="v">
+          <code>POST {s.rigUrl}</code>
+        </span>
+        {s.docsUrl && (
+          <>
+            <span className="k">API docs</span>
+            <span className="v">
+              <a href={s.docsUrl} target="_blank" rel="noopener noreferrer">
+                {s.docsUrl}
+              </a>
+            </span>
+          </>
+        )}
+      </div>
+      {s.error && <div className="settings-note">{s.error}</div>}
+      <p className="settings-sub">
+        Runs as a container rather than an MCP server — crux posts a mesh to it directly.
+      </p>
+    </div>
+  );
+}
+
+/** Kimodo: what is on disk. There is no service to probe, so every field here is a
+ *  filesystem fact — checkout, Python env, downloaded checkpoints. */
+function KimodoCard({
+  s,
+  refreshing,
+  onRefresh,
+}: {
+  s: KimodoSettings;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const status = genAiStatus(s);
+  return (
+    <div className="settings-card">
+      <div className="settings-card-head">
+        <span className={`badge ${status.cls}`}>{status.label}</span>
+        <div className="spacer" style={{ flex: 1 }} />
+        <button className="btn sm" onClick={onRefresh} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "spin" : ""} /> Refresh
+        </button>
+      </div>
+      <div className="kv">
+        <span className="k">Checkout</span>
+        <span className="v">{s.repoFound ? <code>{s.repoPath}</code> : "not found"}</span>
+        <span className="k">Python env</span>
+        <span className="v">
+          {s.venvFound ? <code>{s.pythonPath}</code> : "none — run `uv sync` in the checkout"}
+        </span>
+        <span className="k">Checkpoints</span>
+        <span className="v">
+          {s.checkpoints.length === 0
+            ? "none downloaded"
+            : s.checkpoints.map((c) => (
+                <div key={c.repo}>
+                  <code>{c.repo}</code>
+                </div>
+              ))}
+        </span>
+      </div>
+      {s.error && <div className="settings-note">{s.error}</div>}
+      <p className="settings-sub">
+        Nothing to start — Kimodo runs as a Python job against the checkout, so this card reports
+        disk state rather than a process.
+      </p>
+    </div>
+  );
+}
+
 function BlenderCard({
   s,
   refreshing,

@@ -79,6 +79,14 @@ const META: Record<string, PersonaMeta> = {
     cls: "persona-comfyui",
     role: "Generates 2D art on your local ComfyUI and checks the result.",
   },
+  "game-artist": {
+    id: "game-artist",
+    label: "Game artist",
+    Icon: Clapperboard,
+    color: "var(--persona-game-artist)",
+    cls: "persona-game-artist",
+    role: "Animates characters — walk, idle, attack — by whichever local route fits.",
+  },
   research: {
     id: "research",
     label: "Research",
@@ -103,6 +111,7 @@ export const PERSONA_ORDER = [
   "game-designer",
   "blender",
   "comfyui",
+  "game-artist",
   "research",
 ] as const;
 

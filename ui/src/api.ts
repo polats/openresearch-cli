@@ -742,7 +742,51 @@ export interface GenAiCommon {
 
 export type ScenarioProvider = ScenarioSettings & GenAiCommon & { kind: "scenario" };
 
-export type GenAiProvider = ScenarioProvider | BlenderSettings | ComfyuiSettings;
+/** UniRig: a container exposing POST /rig. No MCP layer to report on — the only
+ *  question is whether the service answers, so the shape is smaller than the
+ *  MCP-backed providers rather than padded out to match them. */
+export interface UnirigSettings {
+  kind: "unirig";
+  id: string;
+  name: string;
+  ready: boolean;
+  /** Something is listening on the port. */
+  portOpen: boolean;
+  /** …and it answered as the UniRig API, not some other service holding the port. */
+  serviceReachable: boolean;
+  address: string;
+  rigUrl: string;
+  docsUrl?: string;
+  error?: string;
+}
+
+/** One downloaded Kimodo checkpoint. */
+export interface KimodoCheckpoint {
+  repo: string;
+}
+
+/** Kimodo: a Python job against a checkout plus a checkpoint. Filesystem facts
+ *  only, because there is no service to probe. */
+export interface KimodoSettings {
+  kind: "kimodo";
+  id: string;
+  name: string;
+  ready: boolean;
+  repoFound: boolean;
+  venvFound: boolean;
+  modelPresent: boolean;
+  repoPath?: string;
+  pythonPath?: string;
+  checkpoints: KimodoCheckpoint[];
+  error?: string;
+}
+
+export type GenAiProvider =
+  | ScenarioProvider
+  | BlenderSettings
+  | ComfyuiSettings
+  | UnirigSettings
+  | KimodoSettings;
 
 export interface ComfyStartResult {
   /** We spawned it. */

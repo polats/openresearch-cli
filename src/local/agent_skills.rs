@@ -79,10 +79,15 @@ pub enum Persona {
     /// tools. Like Blender, its output is a file, not a run — but on a *shared
     /// GPU*, which is why its playbook is mostly about checking before queuing.
     Comfyui,
+    /// Game artist: produces animated character assets by either route — ComfyUI
+    /// image-to-video, or the 3D chain through UniRig and Kimodo. Sits ABOVE the
+    /// Blender and ComfyUI personas rather than replacing them: those each drive
+    /// one backend, this one owns the outcome and picks the route.
+    GameArtist,
 }
 
 impl Persona {
-    pub const ALL: [Persona; 7] = [
+    pub const ALL: [Persona; 8] = [
         Persona::Research,
         Persona::GameDesigner,
         Persona::IdeaFoundry,
@@ -90,6 +95,7 @@ impl Persona {
         Persona::Producer,
         Persona::Blender,
         Persona::Comfyui,
+        Persona::GameArtist,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -101,6 +107,7 @@ impl Persona {
             Persona::Producer => "producer",
             Persona::Blender => "blender",
             Persona::Comfyui => "comfyui",
+            Persona::GameArtist => "game-artist",
         }
     }
 
@@ -115,8 +122,9 @@ impl Persona {
             Some("producer") => Ok(Persona::Producer),
             Some("blender") => Ok(Persona::Blender),
             Some("comfyui") => Ok(Persona::Comfyui),
+            Some("game-artist") => Ok(Persona::GameArtist),
             Some(other) => Err(format!(
-                "unknown persona '{other}' (expected 'research', 'game-designer', 'idea-foundry', 'analyst', 'producer', 'blender', or 'comfyui')"
+                "unknown persona '{other}' (expected 'research', 'game-designer', 'idea-foundry', 'analyst', 'producer', 'blender', 'comfyui', or 'game-artist')"
             )),
         }
     }
@@ -130,6 +138,7 @@ impl Persona {
             Persona::Producer => "Producer",
             Persona::Blender => "Blender artist",
             Persona::Comfyui => "ComfyUI artist",
+            Persona::GameArtist => "Game artist",
         }
     }
 
@@ -168,6 +177,11 @@ impl Persona {
                  models, builds a graph from one that already worked, renders, \
                  and looks at the result before delivering it."
             }
+            Persona::GameArtist => {
+                "Makes animated character assets — walk cycles, idles, attacks — \
+                 by whichever local route suits the job: ComfyUI image-to-video, \
+                 or the 3D chain through UniRig and Kimodo."
+            }
         }
     }
 }
@@ -176,6 +190,9 @@ impl Persona {
 // `SKILL.local.md` / `SKILL.game.md` siblings are the local-mode and
 // game-persona body variants under the same public skill name) ----------------
 
+const ANIMATION: &str = include_str!("../../agent-skills/orx-animation/SKILL.md");
+const MAPPROPS: &str = include_str!("../../agent-skills/orx-mapprops/SKILL.md");
+const SPRITE: &str = include_str!("../../agent-skills/orx-sprite/SKILL.md");
 const COMPUTE_LOCAL: &str = include_str!("../../agent-skills/orx-compute/SKILL.local.md");
 const COMPUTE_CLOUD: &str = include_str!("../../agent-skills/orx-compute/SKILL.md");
 const COMPUTE_K8S: &str = include_str!("../../agent-skills/orx-compute-k8s/SKILL.md");
@@ -381,6 +398,21 @@ const S_BLENDER: AgentSkill = AgentSkill {
     description: "Author 3D assets in the user's running Blender through the Blender MCP tools: inspect the scene before editing, drive bpy in small verified steps, render and read the image back to check the result, and export glTF to the files dir. Use when making or fixing a 3D asset, inspecting a .blend, or when a Blender tool reports it cannot reach Blender.",
     content: BLENDER,
 };
+const S_ANIMATION: AgentSkill = AgentSkill {
+    name: "orx-animation",
+    description: "Produce character animation locally by either route — ComfyUI image-to-video, or the 3D chain (T-pose, mesh, UniRig, Kimodo) — including the endpoint-conditioning rule that makes a generated loop actually loop, prompting for motion, and judging whether motion is real. Use when asked for a walk cycle, idle, attack or flourish, or when a loop does not loop.",
+    content: ANIMATION,
+};
+const S_MAPPROPS: AgentSkill = AgentSkill {
+    name: "orx-mapprops",
+    description: "Turn 2D art into 3D props for a game map — conditioning render with Z-Image plus ControlNet, form recovery with Depth-Anything-3, then mesh, poly budget and silhouette-variety checks. Use when asked for map props, trees, rocks or structures, when a render is too flat to become a mesh, or when props must vary without breaking one art direction.",
+    content: MAPPROPS,
+};
+const S_SPRITE: AgentSkill = AgentSkill {
+    name: "orx-sprite",
+    description: "Fit rendered frames to a pixel-art game's sprite contract and verify they hold, using that game's own pixel maths. Use when frames must match a shipping sprite tier, when a contract check rejects art the game already ships, or when a clip needs one scale and a common ground line rather than per-frame normalisation.",
+    content: SPRITE,
+};
 const S_COMFYUI: AgentSkill = AgentSkill {
     name: "orx-comfyui",
     description: "Generate images on the local ComfyUI through its MCP tools: check installed models first, build a graph by adapting one from execution history rather than composing blind, validate before enqueuing, free VRAM, then fetch the render and look at it. Use when making or iterating on a generated asset, when a workflow fails to submit, or when a render runs out of memory.",
@@ -447,6 +479,15 @@ pub fn skills_for_persona(persona: Persona) -> Vec<&'static AgentSkill> {
         // Same shape as Blender: one skill for the generation work, plus git for
         // when a delivered asset gets committed to the game's branch.
         Persona::Comfyui => vec![&S_COMFYUI, &S_GIT],
+        // Both backends, because the persona chooses between them at run time.
+        Persona::GameArtist => vec![
+            &S_ANIMATION,
+            &S_MAPPROPS,
+            &S_SPRITE,
+            &S_COMFYUI,
+            &S_BLENDER,
+            &S_GIT,
+        ],
     }
 }
 
@@ -467,6 +508,9 @@ pub fn find(name: &str, set: SkillSet) -> Option<&'static AgentSkill> {
             &S_PRODUCE,
             &S_BLENDER,
             &S_COMFYUI,
+            &S_ANIMATION,
+            &S_MAPPROPS,
+            &S_SPRITE,
         ])
         .find(|s| s.name == want || s.name.strip_prefix("orx-") == Some(want))
 }

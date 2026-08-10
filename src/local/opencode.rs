@@ -139,6 +139,7 @@ const SYSTEM_PROMPT_BLENDER: &str = include_str!("../../SYSTEM_PROMPT_BLENDER.md
 /// ComfyUI via its MCP tools. Launches no experiment compute; its output is a
 /// file, produced on a GPU shared with everything else on the machine.
 const SYSTEM_PROMPT_COMFYUI: &str = include_str!("../../SYSTEM_PROMPT_COMFYUI.md");
+const SYSTEM_PROMPT_ARTIST: &str = include_str!("../../SYSTEM_PROMPT_ARTIST.md");
 
 /// Appended to EVERY persona's playbook (not just the producer) so any session
 /// knows the one correct way to involve another agent. Without this, a worker
@@ -185,6 +186,7 @@ pub fn persona_template(persona: Persona) -> &'static str {
         Persona::Producer => SYSTEM_PROMPT_PRODUCER,
         Persona::Blender => SYSTEM_PROMPT_BLENDER,
         Persona::Comfyui => SYSTEM_PROMPT_COMFYUI,
+        Persona::GameArtist => SYSTEM_PROMPT_ARTIST,
     };
     raw.split_once("-->\n\n")
         .map(|(_, rest)| rest)
@@ -801,6 +803,7 @@ mod tests {
                 Persona::Producer => "# OpenResearch producer agent",
                 Persona::Blender => "# OpenResearch Blender agent",
                 Persona::Comfyui => "# OpenResearch ComfyUI agent",
+                Persona::GameArtist => "# OpenResearch game artist",
             };
             assert!(md.starts_with(title), "template comment not stripped");
             assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
@@ -874,6 +877,21 @@ mod tests {
                     assert!(md.contains("orx-comfyui"));
                     assert!(md.contains("orx-git"));
                     assert!(!md.contains("orx-blender"));
+                    assert!(!md.contains("orx-compute"));
+                    assert!(!md.contains("orx-evidence"));
+                    assert!(!md.contains("orx-play"));
+                    assert!(!md.contains("orx-reports"));
+                    assert!(!md.contains("orx-lit"));
+                    assert!(!md.contains("orx-ideate"));
+                }
+                // The artist owns the outcome across both backends, so unlike
+                // Comfyui it legitimately carries orx-blender too. It still
+                // launches nothing, so no compute/evidence/play modules.
+                Persona::GameArtist => {
+                    assert!(md.contains("orx-animation"));
+                    assert!(md.contains("orx-comfyui"));
+                    assert!(md.contains("orx-blender"));
+                    assert!(md.contains("orx-git"));
                     assert!(!md.contains("orx-compute"));
                     assert!(!md.contains("orx-evidence"));
                     assert!(!md.contains("orx-play"));

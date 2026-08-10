@@ -2821,8 +2821,35 @@ async fn genai_settings(State(state): State<AppState>, Query(q): Query<RefreshQu
             scenario,
             blender_settings_cached(&state, refresh).await,
             comfyui_settings_cached(&state, refresh).await,
+            unirig_settings_json().await,
+            kimodo_settings_json().await,
         ],
     })))
+}
+
+/// UniRig's card payload. No MCP layer to report on — it is a container exposing a
+/// FastAPI endpoint, so the only question is whether it answers.
+async fn unirig_settings_json() -> Value {
+    let status = local::unirig::detect().await;
+    let mut out = serde_json::to_value(&status).unwrap_or_else(|_| json!({}));
+    out["kind"] = json!("unirig");
+    out["id"] = json!("unirig");
+    out["name"] = json!("UniRig");
+    out["ready"] = json!(status.ready());
+    out
+}
+
+/// Kimodo's card payload. Filesystem-only: a checkout, a venv and the downloaded
+/// checkpoints, each with the licence it carries — the licence being the field that
+/// actually gates shipping generated motion.
+async fn kimodo_settings_json() -> Value {
+    let status = local::kimodo::detect().await;
+    let mut out = serde_json::to_value(&status).unwrap_or_else(|_| json!({}));
+    out["kind"] = json!("kimodo");
+    out["id"] = json!("kimodo");
+    out["name"] = json!("Kimodo");
+    out["ready"] = json!(status.ready());
+    out
 }
 
 /// ComfyUI's card payload: the layered probe, plus the polled tool surface.
