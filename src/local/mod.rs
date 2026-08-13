@@ -24,6 +24,8 @@ pub mod github;
 pub mod harness;
 pub mod hf;
 pub mod k8s;
+pub mod kimodo;
+pub mod localrepo;
 pub mod localrun;
 pub mod mcp_servers;
 pub mod memory;
@@ -40,6 +42,7 @@ pub mod skills;
 pub mod slurm;
 pub mod ssh;
 pub mod ssh_identity;
+pub mod unirig;
 
 use crate::error::{anyhow, Error, Result};
 use crate::store::{now_ms, Store, StoredRun};

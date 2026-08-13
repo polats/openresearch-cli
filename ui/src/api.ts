@@ -138,7 +138,31 @@ export interface NewProject {
   /** Fork-by-copy the repo into a fresh `<repo>-<hash>` repo on the user's
    * account. Applied automatically when they lack push access. */
   forkRepo?: boolean;
+  /** Publish this local checkout — which has no `origin` — to a new GitHub repo
+   * and push its history. Only send it when the user has explicitly opted in;
+   * it is the one create path that writes outside orx. */
+  publishLocalPath?: string;
 }
+
+/** What is at a local path, as the New Project form needs to explain it. Five
+ *  shapes, because each has a different fix. */
+export type LocalRepoInfo =
+  | { kind: "missing" }
+  | { kind: "notARepo" }
+  | { kind: "noRemote"; currentBranch?: string | null; suggestedName?: string | null }
+  | { kind: "foreignRemote"; remoteUrl: string }
+  | {
+      kind: "github";
+      owner: string;
+      repo: string;
+      remoteUrl: string;
+      currentBranch?: string | null;
+    };
+
+/** Inspect a directory on this machine. Read-only: reports the shape of what's
+ *  there, never file contents. */
+export const inspectLocalRepo = (path: string) =>
+  get<LocalRepoInfo>(`/api/local-repo?path=${encodeURIComponent(path)}`);
 
 export const createProject = (body: NewProject) =>
   post<{ project: Project }>("/api/projects", body).then((r) => r.project);
@@ -718,7 +742,51 @@ export interface GenAiCommon {
 
 export type ScenarioProvider = ScenarioSettings & GenAiCommon & { kind: "scenario" };
 
-export type GenAiProvider = ScenarioProvider | BlenderSettings | ComfyuiSettings;
+/** UniRig: a container exposing POST /rig. No MCP layer to report on — the only
+ *  question is whether the service answers, so the shape is smaller than the
+ *  MCP-backed providers rather than padded out to match them. */
+export interface UnirigSettings {
+  kind: "unirig";
+  id: string;
+  name: string;
+  ready: boolean;
+  /** Something is listening on the port. */
+  portOpen: boolean;
+  /** …and it answered as the UniRig API, not some other service holding the port. */
+  serviceReachable: boolean;
+  address: string;
+  rigUrl: string;
+  docsUrl?: string;
+  error?: string;
+}
+
+/** One downloaded Kimodo checkpoint. */
+export interface KimodoCheckpoint {
+  repo: string;
+}
+
+/** Kimodo: a Python job against a checkout plus a checkpoint. Filesystem facts
+ *  only, because there is no service to probe. */
+export interface KimodoSettings {
+  kind: "kimodo";
+  id: string;
+  name: string;
+  ready: boolean;
+  repoFound: boolean;
+  venvFound: boolean;
+  modelPresent: boolean;
+  repoPath?: string;
+  pythonPath?: string;
+  checkpoints: KimodoCheckpoint[];
+  error?: string;
+}
+
+export type GenAiProvider =
+  | ScenarioProvider
+  | BlenderSettings
+  | ComfyuiSettings
+  | UnirigSettings
+  | KimodoSettings;
 
 export interface ComfyStartResult {
   /** We spawned it. */

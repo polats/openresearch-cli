@@ -5,11 +5,98 @@
 // the code browser.
 
 import { Code, FileText, RotateCw } from "lucide-react";
-import { useEffect, useState } from "react";
-import { getFileReport, getFilesDirFileText, getProjectFile, type ProjectFile } from "../api";
+import { lazy, Suspense, useEffect, useState } from "react";
+import {
+  fileUrl,
+  getFileReport,
+  getFilesDirFileText,
+  getProjectFile,
+  type ProjectFile,
+} from "../api";
 import { CodeView } from "./CodeView";
 import { ReportMd } from "./FilesTab";
 import { Md } from "./Md";
+import { mediaKind } from "./mediaKind";
+
+/** three.js is ~600kB and only a .glb needs it, so the viewer is a separate
+ *  chunk fetched on first use rather than carried by every page load. */
+const ModelViewer = lazy(() =>
+  import("./ModelViewer").then((m) => ({ default: m.ModelViewer })),
+);
+
+/** Same reasoning as the mesh viewer, an order of magnitude more so: Spark bundles
+ *  its own sorting worker and shaders, which is a ~4.9 MB chunk. Lazy, so only a
+ *  file that is actually a splat pays for it. */
+const SplatViewer = lazy(() =>
+  import("./SplatViewer").then((m) => ({ default: m.SplatViewer })),
+);
+
+/**
+ * Raw-bytes preview for a media file: image, video, audio, PDF, or a 3D mesh.
+ *
+ * The URL is always the files-dir endpoint, because that is the only route that
+ * serves raw bytes. A tab opened from chat is tagged `source: "repo"` even when it
+ * names a files-dir artifact — `parseFilePath` only tags `"files"` for ABSOLUTE
+ * paths under the files dir, and chat mentions are relative — so gating this on the
+ * source meant a clicked `.glb` never reached the viewer. Try the bytes regardless
+ * and report it plainly if they aren't there.
+ */
+function MediaView({
+  kind,
+  src,
+  name,
+}: {
+  kind: NonNullable<ReturnType<typeof mediaKind>>;
+  src: string;
+  name: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <div className="file-view-note">
+        No preview — this isn&rsquo;t a file in the project&rsquo;s files dir.{" "}
+        <a href={src} target="_blank" rel="noopener noreferrer">
+          Open raw
+        </a>
+      </div>
+    );
+  }
+  if (kind === "image") {
+    return (
+      <a className="fpreview-image" href={src} target="_blank" rel="noopener noreferrer">
+        <img src={src} alt={name} onError={() => setFailed(true)} />
+      </a>
+    );
+  }
+  if (kind === "video") {
+    return (
+      <video
+        className="fpreview-video"
+        src={src}
+        controls
+        loop
+        playsInline
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  if (kind === "audio") {
+    return <audio className="fpreview-audio" src={src} controls onError={() => setFailed(true)} />;
+  }
+  if (kind === "pdf") return <iframe className="fpreview-pdf" title={name} src={src} />;
+  if (kind === "splat") {
+    return (
+      <Suspense fallback={<div className="file-view-note">Loading splat viewer…</div>}>
+        <SplatViewer src={src} name={name} />
+      </Suspense>
+    );
+  }
+  return (
+    <Suspense fallback={<div className="file-view-note">Loading 3D viewer…</div>}>
+      <ModelViewer src={src} name={name} />
+    </Suspense>
+  );
+}
 
 export function FileViewer({
   projectId,
@@ -39,6 +126,20 @@ export function FileViewer({
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
   const isFiles = source === "files";
+  /**
+   * Media never goes through the text path.
+   *
+   * The loader fetches a file as a string and hands it to <pre>; for a PNG or an
+   * MP4 that is at best the "Binary file — no inline preview" note and at worst
+   * megabytes of mojibake. Media is served straight from the raw-bytes endpoint
+   * instead, so nothing is read into memory as text.
+   *
+   * Not gated on the source. A tab opened from a chat mention is tagged "repo"
+   * even when it names a files-dir artifact, so gating here meant a clicked .glb
+   * fell through to the text loader and reported "Binary file — no inline preview".
+   * MediaView falls back to a note if the bytes really aren't there.
+   */
+  const media = mediaKind(path);
   // Markdown renders by default; the header toggle shows the raw source.
   const isMarkdown = /\.(md|mdx|markdown)$/i.test(path);
   // `<folder>/report.md` names a files-dir report folder; repo paths can
@@ -55,6 +156,13 @@ export function FileViewer({
   const filesMode = isFiles || viaFiles;
 
   useEffect(() => {
+    if (media) {
+      // Nothing to fetch — the <img>/<video> element does its own loading.
+      setLoaded(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setBinary(false);
@@ -113,7 +221,7 @@ export function FileViewer({
     };
     // isFiles/isReport/filesFolder are pure derivations of path+source, which
     // are already deps — no need to list them.
-  }, [projectId, path, source, sessionId, gitRef, nonce]);
+  }, [projectId, path, source, sessionId, gitRef, nonce, media]);
 
   const notFoundCopy = (d: ProjectFile) => {
     if (isFiles) return "File not found in the project's files.";
@@ -155,7 +263,9 @@ export function FileViewer({
         </button>
       </div>
       <div className="file-view-body">
-        {error ? (
+        {media ? (
+          <MediaView kind={media} src={fileUrl(projectId, path)} name={path} />
+        ) : error ? (
           <div className="file-view-note">Failed to load file: {error}</div>
         ) : data === null ? (
           <div className="file-view-note">Loading…</div>

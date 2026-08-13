@@ -173,6 +173,13 @@ pub fn content_type_for_path(path: &str) -> &'static str {
         Some("wav") => "audio/wav",
         Some("mp4") => "video/mp4",
         Some("webm") => "video/webm",
+        Some("mov") => "video/quicktime",
+        Some("flac") => "audio/flac",
+        // Meshes: the files browser orbits these in a WebGL viewer, which needs a
+        // real model MIME rather than octet-stream. `.bin` (a glTF's external
+        // buffer) stays octet-stream, which is what the spec asks for.
+        Some("glb") => "model/gltf-binary",
+        Some("gltf") => "model/gltf+json",
         _ => "application/octet-stream",
     }
 }
@@ -441,6 +448,27 @@ fn hash_dir(base: &Path, dir: &Path, hasher: &mut DefaultHasher, seen: &mut usiz
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    /// Media must not fall through to octet-stream: the browser decides whether it
+    /// can render a file from this header, and a mesh served as a generic blob is a
+    /// download prompt instead of an orbit view.
+    #[test]
+    fn content_type_covers_generated_media() {
+        for (path, want) in [
+            ("sprites/warrior/walk.png", "image/png"),
+            ("sprites/warrior/turnaround.mp4", "video/mp4"),
+            ("sprites/warrior/loop.webm", "video/webm"),
+            ("sprites/warrior/model.glb", "model/gltf-binary"),
+            ("sprites/warrior/scene.gltf", "model/gltf+json"),
+        ] {
+            assert_eq!(content_type_for_path(path), want, "wrong type for {path}");
+        }
+        // A glTF's external buffer stays a generic blob, which is what the spec says.
+        assert_eq!(
+            content_type_for_path("scene.bin"),
+            "application/octet-stream"
+        );
+    }
 
     /// Fresh scratch dir with a `base/` (the files dir under test) and an
     /// `outside/` holding a file symlinks will try to escape to.

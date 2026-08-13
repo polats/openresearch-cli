@@ -31,6 +31,7 @@ import {
   chatAttachmentUrl,
   createChatSession,
   deleteChatSession,
+  fileUrl,
   getChatMessages,
   getSkills,
   interruptChat,
@@ -438,11 +439,14 @@ function PromptCard({
   onRespond,
   onOpenFile,
   onOpenPlan,
+  fileSrc,
 }: {
   part: ChatPart;
   onRespond?: (answer: PromptAnswer) => void;
   onOpenFile?: (path: string) => void;
   onOpenPlan?: (plan: string, promptId: string) => void;
+  /** Resolves a files-dir path to a URL so media mentions render inline. */
+  fileSrc?: (path: string) => string | null;
 }) {
   const p = part.prompt as ChatPrompt;
   const [picked, setPicked] = useState<string[]>([]);
@@ -485,7 +489,7 @@ function PromptCard({
             <span className={`prompt-outcome ${outcomeClass}`}>{outcome}</span>
           </summary>
           <div className="prompt-collapsed-body">
-            <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
+            <Md text={p.plan ?? ""} onOpenFile={onOpenFile} fileSrc={fileSrc} />
             {p.note && <div className="prompt-collapsed-note">{p.note}</div>}
           </div>
         </details>
@@ -533,7 +537,7 @@ function PromptCard({
           {p.synthesized ? "Plan mode — ready to proceed?" : "Proposed plan"}
         </div>
         <div className={`prompt-plan ${docked ? "clamped" : ""}`}>
-          <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
+          <Md text={p.plan ?? ""} onOpenFile={onOpenFile} fileSrc={fileSrc} />
         </div>
         {docked && (
           <button className="prompt-plan-open" onClick={() => onOpenPlan(p.plan ?? "", part.id)}>
@@ -672,6 +676,7 @@ const Message = memo(function Message({
   onOpenPlan,
   onOpenSubagent,
   skills,
+  fileSrc,
 }: {
   message: ChatMessage;
   onOpenFile?: (path: string) => void;
@@ -682,6 +687,8 @@ const Message = memo(function Message({
   onOpenSubagent?: (spawnPartId: string) => void;
   /** Known slash-skills, for rendering a leading `/name` as a command chip. */
   skills?: SkillInfo[];
+  /** Resolves a files-dir path to a URL so media mentions render inline. */
+  fileSrc?: (path: string) => string | null;
 }) {
   if (message.role === "user") {
     const text = message.parts
@@ -720,7 +727,7 @@ const Message = memo(function Message({
   }
   return (
     <div className="msg-assistant">
-      {renderParts(message.parts, { onOpenFile, onRespond, onOpenPlan, onOpenSubagent })}
+      {renderParts(message.parts, { onOpenFile, onRespond, onOpenPlan, onOpenSubagent, fileSrc })}
     </div>
   );
 });
@@ -737,9 +744,10 @@ function renderParts(
     onRespond?: (answer: PromptAnswer) => void;
     onOpenPlan?: (plan: string, promptId: string) => void;
     onOpenSubagent?: (spawnPartId: string) => void;
+    fileSrc?: (path: string) => string | null;
   },
 ): React.ReactNode[] {
-  const { onOpenFile, onRespond, onOpenPlan, onOpenSubagent } = opts;
+  const { onOpenFile, onRespond, onOpenPlan, onOpenSubagent, fileSrc } = opts;
   const rendered: React.ReactNode[] = [];
   let toolRun: ChatPart[] = [];
   const flushTools = () => {
@@ -775,7 +783,9 @@ function renderParts(
     // The visibility skip above guarantees text/reasoning parts here are
     // non-empty.
     if (part.type === "text")
-      rendered.push(<Md key={part.id} text={part.text!} onOpenFile={onOpenFile} />);
+      rendered.push(
+        <Md key={part.id} text={part.text!} onOpenFile={onOpenFile} fileSrc={fileSrc} />,
+      );
     else if (part.type === "reasoning")
       rendered.push(
         <details key={part.id} className="reasoning">
@@ -791,6 +801,7 @@ function renderParts(
           onRespond={onRespond}
           onOpenFile={onOpenFile}
           onOpenPlan={onOpenPlan}
+          fileSrc={fileSrc}
         />,
       );
   }
@@ -883,6 +894,7 @@ const Transcript = memo(function Transcript({
   onOpenPlan,
   onOpenSubagent,
   skills,
+  fileSrc,
 }: {
   messages: ChatMessage[];
   onOpenFile?: (path: string) => void;
@@ -890,6 +902,8 @@ const Transcript = memo(function Transcript({
   onOpenPlan?: (plan: string, promptId: string) => void;
   onOpenSubagent?: (spawnPartId: string) => void;
   skills?: SkillInfo[];
+  /** Must be referentially stable — see this component's memo contract. */
+  fileSrc?: (path: string) => string | null;
 }) {
   return (
     <>
@@ -902,6 +916,7 @@ const Transcript = memo(function Transcript({
           onOpenPlan={onOpenPlan}
           onOpenSubagent={onOpenSubagent}
           skills={skills}
+          fileSrc={fileSrc}
         />
       ))}
     </>
@@ -2183,6 +2198,16 @@ export function ChatPanel({
   /** Deliver a card answer; resolves `false` when delivery failed (so a
    * caller can e.g. restore a consumed draft). Stable per session so the
    * memoized Message rows don't re-render on unrelated state changes. */
+  /** A mentioned path resolved against the project's files dir, so media the
+   *  agent just wrote renders inline. useCallback because Transcript's memo
+   *  boundary requires referential stability across composer keystrokes.
+   *  A path that is not a files-dir file 404s here, and FileChip falls back to
+   *  the plain chip when the media fails to load. */
+  const fileSrcForProject = useCallback(
+    (path: string) => fileUrl(projectId, path),
+    [projectId],
+  );
+
   const respond = useCallback(
     (answer: PromptAnswer): Promise<boolean> => {
       if (!activeId) return Promise.resolve(false);
@@ -2519,6 +2544,7 @@ export function ChatPanel({
               onOpenPlan={openPlan}
               onOpenSubagent={openSubagent}
               skills={skills}
+              fileSrc={fileSrcForProject}
             />
             {/* Subagent-dispatch suggestions from THIS session render inline as
                 approval cards, like plan/permission cards. Kept outside the

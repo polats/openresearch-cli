@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import {
   createProject,
+  inspectLocalRepo,
   listGithubRepos,
   githubAccount,
   repoAccess,
   resolvePaper,
   searchPapers,
   type GithubRepo,
+  type LocalRepoInfo,
   type PaperHit,
   type Project,
   type ResolvedPaper,
@@ -53,8 +55,59 @@ function cleanTitle(title: string): string {
   return title.replace(/^\[[^\]]*\]\s*/, "").replace(/\s*[-–|]\s*arXiv\s*$/i, "");
 }
 
-type Mode = "existing" | "new" | "paper";
+type Mode = "local" | "existing" | "new" | "paper";
 type RepoMode = "use" | "fork";
+
+/** The server slugifies the project name for a created repo; mirror it so the
+ *  publish checkbox names the repo that will actually appear. */
+function slugifyName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+/** What was found at the typed folder. Each outcome names its own fix — the
+ *  point of distinguishing five shapes rather than showing one "invalid". */
+function LocalRepoHint({ info, checking }: { info: LocalRepoInfo | null; checking: boolean }) {
+  if (checking && !info) return <span className="repo-hint">Checking that folder…</span>;
+  if (!info) return null;
+  switch (info.kind) {
+    case "github":
+      return (
+        <span className="repo-hint">
+          Found <strong>{`${info.owner}/${info.repo}`}</strong>
+          {info.currentBranch ? ` · ${info.currentBranch}` : ""} — crux will use this repo.
+        </span>
+      );
+    case "noRemote":
+      return info.currentBranch ? (
+        <span className="repo-hint">
+          A git repo with no GitHub remote. Publish it below, or add a remote first.
+        </span>
+      ) : (
+        <span className="repo-hint">
+          A git repo with nothing to publish yet — commit something, or check out a branch.
+        </span>
+      );
+    case "foreignRemote":
+      return (
+        <span className="repo-hint">
+          Its remote is <code>{info.remoteUrl}</code>, which isn&apos;t GitHub. crux clones from
+          GitHub when it runs experiments, so this repo can&apos;t be used yet.
+        </span>
+      );
+    case "notARepo":
+      return (
+        <span className="repo-hint">
+          That folder isn&apos;t a git repo. Run <code>git init</code> there, or use New blank repo.
+        </span>
+      );
+    case "missing":
+      return <span className="repo-hint">No folder at that path.</span>;
+  }
+}
 
 export function NewProjectForm({
   onCreated,
@@ -63,8 +116,18 @@ export function NewProjectForm({
   onCreated: (project: Project) => void;
   onCancel?: () => void;
 }) {
-  const [mode, setMode] = useState<Mode>("paper");
+  // Local leads: the repo is usually already checked out on this machine, and
+  // pointing at it beats looking up a slug to type back in.
+  const [mode, setMode] = useState<Mode>("local");
   const [repoMode, setRepoMode] = useState<RepoMode>("use");
+  // "Local repo" mode.
+  const [localPath, setLocalPath] = useState("");
+  const [local, setLocal] = useState<LocalRepoInfo | null>(null);
+  const [localChecking, setLocalChecking] = useState(false);
+  const [publish, setPublish] = useState(false);
+  // Guards against a slow inspect landing after a newer one, which would show
+  // the previous folder's verdict against the current path.
+  const localSeq = useRef(0);
   const [repoInput, setRepoInput] = useState("");
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
@@ -107,9 +170,16 @@ export function NewProjectForm({
   const ghOwner = ghLogin ?? "you";
 
   const parsed = parseRepo(repoInput);
+  // A local folder with no origin can still become a project, but only by
+  // publishing — so the tick, not the folder, is what makes it valid.
+  const localRepoNeedsPublish = local?.kind === "noRemote" && !!local.currentBranch;
+  const publishTarget = `${slugifyName(name) || "project"}`;
+  const localReady =
+    local?.kind === "github" || (localRepoNeedsPublish && publish);
   const valid = Boolean(
     name.trim() &&
       (mode === "new" ||
+        (mode === "local" && localReady) ||
         (mode === "existing" && parsed !== null) ||
         (mode === "paper" && paper !== null && (repoInput.trim() === "" || parsed !== null))),
   );
@@ -120,6 +190,20 @@ export function NewProjectForm({
   const chooseMode = (next: Mode) => {
     setMode(next);
     if (next !== "paper") setRepoMode("use");
+    // Publishing is a per-folder decision; leaving the tab drops it so it can
+    // never be carried back in unnoticed.
+    if (next !== "local") setPublish(false);
+  };
+
+  const onLocalPathChange = (value: string) => {
+    setLocalPath(value);
+    setPublish(false);
+    setLocal(null);
+    // Name follows the folder until the user edits it themselves.
+    if (!nameTouched) {
+      const leaf = value.trim().replace(/\/+$/, "").split("/").pop() ?? "";
+      setName(leaf);
+    }
   };
 
   const onRepoChange = (value: string) => {
@@ -134,6 +218,35 @@ export function NewProjectForm({
     // Name follows the repo until the user edits it themselves.
     if (!nameTouched) setName(parseRepo(value)?.repo ?? "");
   };
+
+  // Inspect the typed folder, debounced — it shells out to git, and every
+  // keystroke of a path would otherwise be a subprocess.
+  useEffect(() => {
+    if (mode !== "local") return;
+    const path = localPath.trim();
+    if (path === "") {
+      setLocal(null);
+      setLocalChecking(false);
+      return;
+    }
+    const seq = ++localSeq.current;
+    setLocalChecking(true);
+    const timer = setTimeout(() => {
+      inspectLocalRepo(path)
+        .then((info) => {
+          if (seq !== localSeq.current) return;
+          setLocal(info);
+        })
+        .catch(() => {
+          if (seq !== localSeq.current) return;
+          setLocal(null);
+        })
+        .finally(() => {
+          if (seq === localSeq.current) setLocalChecking(false);
+        });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [mode, localPath]);
 
   // Repo autocomplete: the signed-in user's repos (most recently pushed
   // first), fetched once when the Existing-repo field first shows and
@@ -267,7 +380,13 @@ export function NewProjectForm({
     setError(null);
     try {
       const project = await createProject(
-        mode === "new"
+        mode === "local" && local?.kind === "github"
+          ? // Resolved to an owner/repo — indistinguishable from the Existing-repo
+            // tab from here on, which is the point of this mode.
+            { name: name.trim(), githubOwner: local.owner, githubRepo: local.repo }
+          : mode === "local"
+            ? { name: name.trim(), publishLocalPath: localPath.trim() }
+            : mode === "new"
           ? { name: name.trim(), createRepo: true }
           : mode === "paper" && !parsed
             ? { name: name.trim(), createRepo: true, paperId: paper!.paperId }
@@ -366,10 +485,10 @@ export function NewProjectForm({
       <div className="seg form-seg">
         <button
           type="button"
-          className={mode === "paper" ? "active" : ""}
-          onClick={() => chooseMode("paper")}
+          className={mode === "local" ? "active" : ""}
+          onClick={() => chooseMode("local")}
         >
-          From a paper
+          Local repo
         </button>
         <button
           type="button"
@@ -385,7 +504,48 @@ export function NewProjectForm({
         >
           New blank repo
         </button>
+        <button
+          type="button"
+          className={mode === "paper" ? "active" : ""}
+          onClick={() => chooseMode("paper")}
+        >
+          From a paper
+        </button>
       </div>
+
+      {mode === "local" && (
+        <>
+          <label>
+            <span>Folder on this machine</span>
+            <input
+              autoFocus
+              type="text"
+              placeholder="~/projects/my-game"
+              value={localPath}
+              onChange={(e) => onLocalPathChange(e.target.value)}
+              spellCheck={false}
+            />
+          </label>
+          {localPath.trim() !== "" && <LocalRepoHint info={local} checking={localChecking} />}
+          {/* Only once something usable was found — naming a project for a
+              folder that turned out not to be a repo is busywork. Above the
+              publish tick, because the tick names the GitHub repo after it. */}
+          {(local?.kind === "github" || localRepoNeedsPublish) && nameField}
+          {localRepoNeedsPublish && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={publish}
+                onChange={(e) => setPublish(e.target.checked)}
+              />
+              <span>
+                Create <code>{publishTarget}</code> on GitHub and push this history to it. This
+                also sets the folder&apos;s <code>origin</code>.
+              </span>
+            </label>
+          )}
+        </>
+      )}
 
       {mode === "existing" && (
         <>

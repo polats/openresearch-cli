@@ -10,7 +10,7 @@ import {
   Settings2,
   Trash2,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -25,6 +25,7 @@ import {
   type ProjectFiles,
 } from "../api";
 import { CodeView } from "./CodeView";
+import { IMAGE_RE, MD_RE, mediaKind } from "./mediaKind";
 import { mdCodeComponents, normalizeMathDelimiters, remarkMathOptions } from "./Md";
 
 /** Top-level folder reserved for project-wide reports (mirrors the backend). */
@@ -43,8 +44,8 @@ function stripFrontmatter(md: string): string {
   return end === -1 ? md : md.slice(end + 4).replace(/^\r?\n/, "");
 }
 
-const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg)$/i;
-const MD_RE = /\.(md|mdx|markdown)$/i;
+// Media detection is shared with FileViewer so the two cannot disagree about
+// whether a file is showable — see components/mediaKind.ts.
 /** Raw text preview cap — matches the repo file viewer's truncation cap. */
 const MAX_TEXT_PREVIEW = 512 * 1024;
 
@@ -144,16 +145,32 @@ export function ReportMd({
   );
 }
 
-type PreviewKind = "report" | "markdown" | "image" | "pdf" | "text";
+/** three.js is ~600kB and only a .glb needs it, so the viewer is a separate
+ *  chunk fetched on first use rather than carried by every page load. */
+const ModelViewer = lazy(() =>
+  import("./ModelViewer").then((m) => ({ default: m.ModelViewer })),
+);
+const SplatViewer = lazy(() =>
+  import("./SplatViewer").then((m) => ({ default: m.SplatViewer })),
+);
+
+type PreviewKind =
+  | "report"
+  | "markdown"
+  | "image"
+  | "video"
+  | "audio"
+  | "model"
+  | "splat"
+  | "pdf"
+  | "text";
 
 function previewKind(entry: FileEntry): PreviewKind {
   // Only report folders are selectable (plain dirs merely toggle open), so
   // a dir here always has a report.md to render.
   if (entry.isDir) return "report";
   if (MD_RE.test(entry.name)) return "markdown";
-  if (IMAGE_RE.test(entry.name)) return "image";
-  if (/\.pdf$/i.test(entry.name)) return "pdf";
-  return "text";
+  return mediaKind(entry.name) ?? "text";
 }
 
 /** Fetched body for kinds that need text: report md, file md, or raw text.
@@ -225,6 +242,24 @@ function PreviewPane({
       <a className="fpreview-image" href={rawUrl} target="_blank" rel="noopener noreferrer">
         <img src={rawUrl} alt={entry.name} />
       </a>
+    );
+  } else if (kind === "video") {
+    // Generated clips are short and meant to be watched repeatedly, so they loop;
+    // `controls` keeps scrubbing available for picking a frame.
+    body = <video className="fpreview-video" src={rawUrl} controls loop playsInline />;
+  } else if (kind === "audio") {
+    body = <audio className="fpreview-audio" src={rawUrl} controls />;
+  } else if (kind === "model") {
+    body = (
+      <Suspense fallback={<div className="file-view-note">Loading 3D viewer…</div>}>
+        <ModelViewer src={rawUrl} name={entry.name} />
+      </Suspense>
+    );
+  } else if (kind === "splat") {
+    body = (
+      <Suspense fallback={<div className="file-view-note">Loading splat viewer…</div>}>
+        <SplatViewer src={rawUrl} name={entry.name} />
+      </Suspense>
     );
   } else if (kind === "pdf") {
     body = <iframe className="fpreview-pdf" title={entry.name} src={rawUrl} />;
