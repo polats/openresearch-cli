@@ -10,6 +10,16 @@ user can see. Two routes exist. **Pick one deliberately; do not run both by defa
 
 ## Choosing the route
 
+**Video route** — ComfyUI, image-to-video from a conditioning frame. Best for one
+character's specific performance. Its weakness is pose control: it will not put a limb
+where you ask, and no amount of prompt insistence changes that.
+
+**3D route** — T-pose → mesh → UniRig (rig) → Kimodo (motion). Best when one motion
+must serve a whole roster, or when the deliverable is a rigged mesh. Its weakness is
+texturing, and retargeting realistic proportions onto stylised characters.
+
+Animation output goes under `$FILES/sprites/<class>/`.
+
 | | Video route (ComfyUI) | 3D route (T-pose → mesh → UniRig → Kimodo) |
 |---|---|---|
 | Best at | per-character performance, gestures, style fidelity | one motion shared across many characters |
