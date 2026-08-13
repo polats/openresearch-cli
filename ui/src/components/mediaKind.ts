@@ -12,10 +12,16 @@ export const VIDEO_RE = /\.(mp4|webm|mov|m4v)$/i;
 export const AUDIO_RE = /\.(mp3|ogg|wav|flac|m4a)$/i;
 /** Meshes the 3D viewer can orbit. Anything else 3D lists and downloads only. */
 export const MODEL_RE = /\.(glb|gltf)$/i;
+/** Gaussian splats, which orbit in their own viewer — a splat has no scene graph
+ *  or materials, so it cannot go through the mesh loader. `.ply` is ambiguous in
+ *  general (it is also a plain point/mesh format) but every .ply this pipeline
+ *  produces is a splat, and the splat loader reports a clear error on one that
+ *  isn't. */
+export const SPLAT_RE = /\.(ply|spz|splat|ksplat)$/i;
 export const PDF_RE = /\.pdf$/i;
 export const MD_RE = /\.(md|mdx|markdown)$/i;
 
-export type MediaKind = "image" | "video" | "audio" | "model" | "pdf";
+export type MediaKind = "image" | "video" | "audio" | "model" | "splat" | "pdf";
 
 /** The media kind a filename renders as, or null when it is text/unknown. */
 export function mediaKind(name: string): MediaKind | null {
@@ -23,6 +29,7 @@ export function mediaKind(name: string): MediaKind | null {
   if (VIDEO_RE.test(name)) return "video";
   if (AUDIO_RE.test(name)) return "audio";
   if (MODEL_RE.test(name)) return "model";
+  if (SPLAT_RE.test(name)) return "splat";
   if (PDF_RE.test(name)) return "pdf";
   return null;
 }

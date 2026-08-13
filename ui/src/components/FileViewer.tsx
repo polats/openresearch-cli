@@ -24,6 +24,13 @@ const ModelViewer = lazy(() =>
   import("./ModelViewer").then((m) => ({ default: m.ModelViewer })),
 );
 
+/** Same reasoning as the mesh viewer, an order of magnitude more so: Spark bundles
+ *  its own sorting worker and shaders, which is a ~4.9 MB chunk. Lazy, so only a
+ *  file that is actually a splat pays for it. */
+const SplatViewer = lazy(() =>
+  import("./SplatViewer").then((m) => ({ default: m.SplatViewer })),
+);
+
 /**
  * Raw-bytes preview for a media file: image, video, audio, PDF, or a 3D mesh.
  *
@@ -77,6 +84,13 @@ function MediaView({
     return <audio className="fpreview-audio" src={src} controls onError={() => setFailed(true)} />;
   }
   if (kind === "pdf") return <iframe className="fpreview-pdf" title={name} src={src} />;
+  if (kind === "splat") {
+    return (
+      <Suspense fallback={<div className="file-view-note">Loading splat viewer…</div>}>
+        <SplatViewer src={src} name={name} />
+      </Suspense>
+    );
+  }
   return (
     <Suspense fallback={<div className="file-view-note">Loading 3D viewer…</div>}>
       <ModelViewer src={src} name={name} />

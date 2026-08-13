@@ -150,8 +150,20 @@ export function ReportMd({
 const ModelViewer = lazy(() =>
   import("./ModelViewer").then((m) => ({ default: m.ModelViewer })),
 );
+const SplatViewer = lazy(() =>
+  import("./SplatViewer").then((m) => ({ default: m.SplatViewer })),
+);
 
-type PreviewKind = "report" | "markdown" | "image" | "video" | "audio" | "model" | "pdf" | "text";
+type PreviewKind =
+  | "report"
+  | "markdown"
+  | "image"
+  | "video"
+  | "audio"
+  | "model"
+  | "splat"
+  | "pdf"
+  | "text";
 
 function previewKind(entry: FileEntry): PreviewKind {
   // Only report folders are selectable (plain dirs merely toggle open), so
@@ -241,6 +253,12 @@ function PreviewPane({
     body = (
       <Suspense fallback={<div className="file-view-note">Loading 3D viewer…</div>}>
         <ModelViewer src={rawUrl} name={entry.name} />
+      </Suspense>
+    );
+  } else if (kind === "splat") {
+    body = (
+      <Suspense fallback={<div className="file-view-note">Loading splat viewer…</div>}>
+        <SplatViewer src={rawUrl} name={entry.name} />
       </Suspense>
     );
   } else if (kind === "pdf") {
