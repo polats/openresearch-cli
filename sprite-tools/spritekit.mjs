@@ -24,7 +24,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 // --- contract defaults ----------------------------------------------------------
-// Mirrors TacticaArena's tools/bakery/map48.mjs. Defaults, not hardcoded truth:
+// Mirrors the target game's tools/bakery/map48.mjs. Defaults, not hardcoded truth:
 // every one is overridable, because a second game would have different numbers.
 const DEFAULTS = {
   frame: 96, // MAP

@@ -1,6 +1,6 @@
 # Map-sprite animation via image-to-video — spec and workflow
 
-**Date: 9 August 2026.** This is the recipe that produced TacticaArena's first
+**Date: 9 August 2026.** This is the recipe that produced the target game's first
 real walk cycle, written down so the idle set and the remaining 24 classes can be
 made the same way. Everything here was measured on `warrior`, not assumed.
 
@@ -143,8 +143,8 @@ the loop is exact rather than searched for.
 
 ```
 node crux/sprite-tools/spritekit.mjs fit <raw.png> <out.png> \
-  --pixel  TacticaArena/tools/bakery/pixel.mjs \
-  --meta   TacticaArena/tools/baked-staging/<class>/meta.json \
+  --pixel  <game>/tools/bakery/pixel.mjs \
+  --meta   <game>/tools/baked-staging/<class>/meta.json \
   --chroma 255,0,255 --outline \
   --frame 128 --figure 109 --ground 4
 ```
@@ -312,8 +312,8 @@ trap from §1 is the correct behaviour here.
 |---|---|
 | Fitting/verification tool | `crux/sprite-tools/spritekit.mjs` |
 | Saved ComfyUI graph | `scratchpad/sprite/h3_fast.json` |
-| Generated frames, videos | `~/Documents/tacticaarena-sprite-research/` |
-| Dev-only game assets | `TacticaArena/dev/newsprites/` (outside `src/`, not a build entry) |
-| Comparison modal | `TacticaArena/src/sprites/dev/compare.ts` |
+| Generated frames, videos | `~/Documents/<game>-sprite-research/` |
+| Dev-only game assets | `<game>/dev/newsprites/` (outside `src/`, not a build entry) |
+| Comparison modal | `<game>/src/sprites/dev/compare.ts` |
 
-`TacticaArena/tools/bakery/` is imported read-only and never modified.
+`<game>/tools/bakery/` is imported read-only and never modified.

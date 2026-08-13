@@ -3,7 +3,7 @@
 **Date of research: 8 August 2026.** All links checked on that date; this is a
 fast-moving area and the conclusions below have a short shelf life.
 
-**Context.** TacticaArena ships one still front-facing 96×96 map sprite per class
+**Context.** The target game ships one still front-facing 96×96 map sprite per class
 (20-colour palette, ~82px figure) and synthesises its 16-frame sheet at boot by
 shifting horizontal bands of that one image. The question was whether crux could
 generate real per-frame walk art instead, using the local ComfyUI install.

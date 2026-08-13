@@ -77,7 +77,7 @@ don't. Constants that *look* exact are often one-sided:
 Demanding equality on any of these will reject art the game itself ships. That is
 the worst way for a contract checker to be wrong, because it stops good work.
 
-*(Worked example — TacticaArena's map tier: frame 96, target figure 82, ground 3,
+*(Worked example — the target game's map tier: frame 96, target figure 82, ground 3,
 cap 20. Its shipped roster actually measures 79–82 figure height, 5–6 ground rows,
 and one class carries 21 colours. All 25 pass with the bounds read correctly.)*
 

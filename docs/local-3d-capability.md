@@ -36,7 +36,7 @@ document covers whether we can actually run it here.
 - **`nvdiffrast` imports cleanly** — the one compiled 3D dependency that works.
 - **Blender via MCP** — scene building, orthographic rendering and PNG output with
   alpha all verified working during the sprite experiments.
-- **`pixel.mjs`** (TacticaArena, imported read-only) enforces the sprite contract:
+- **`pixel.mjs`** (the target game, imported read-only) enforces the sprite contract:
   `keyBackground`, `trim`, `planFit`, `renderFit`, `remapToPalette`,
   `alphaThreshold`, `selOutRepair`.
 

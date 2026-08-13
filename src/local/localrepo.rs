@@ -146,10 +146,10 @@ mod tests {
 
     #[test]
     fn parses_the_two_forms_git_actually_writes() {
-        // HTTPS — what `~/projects/TacticaArena` carries.
+        // HTTPS — what `~/projects/<game>` carries.
         assert_eq!(
-            parse_github_remote("https://github.com/mindless/TacticaArena.git"),
-            Some(("mindless".into(), "TacticaArena".into()))
+            parse_github_remote("https://github.com/acme/example-game.git"),
+            Some(("acme".into(), "example-game".into()))
         );
         // scp-like SSH — what an SSH clone carries.
         assert_eq!(

@@ -1,7 +1,7 @@
 # 2D → 3D map props, generated in crux
 
 **Date: 10 August 2026.** Verified against this machine and against
-TacticaArena at `3cf8913`. Re-check the node/model facts before acting — they
+The target game at `3cf8913`. Re-check the node/model facts before acting — they
 moved between 8 and 10 August already (see §1.3).
 
 Companion to [image-to-3d-candidates.md](./image-to-3d-candidates.md) and
@@ -15,7 +15,7 @@ criterion changes completely as a result.
 
 ### 1.1 The game's map is real 3D, and loads no meshes
 
-TacticaArena renders the map with **three.js 0.170** (`src/render/terrain.ts`,
+The target game renders the map with **three.js 0.170** (`src/render/terrain.ts`,
 `flora.ts`, `surround.ts`, `geobuild.ts`, `lighting.ts`). Characters are 2D
 billboards standing on it — HD-2D.
 

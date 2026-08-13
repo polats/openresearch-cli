@@ -1,4 +1,4 @@
-# Walk cycles for TacticaArena map sprites — plan
+# Walk cycles for the target game's map sprites — plan
 
 **Date: 8 August 2026.** Supersedes the first draft of this file, which planned a
 from-scratch hand-modelled pipeline in ignorance of `woid`.
@@ -8,7 +8,7 @@ diffusion-only is out) and [local-3d-capability.md](./local-3d-capability.md)
 (what this machine runs).
 
 **Boundary, set by the owner:** generation lives in crux.
-`TacticaArena/tools/bakery/` is not modified. The game may gain code to *consume*
+`<game>/tools/bakery/` is not modified. The game may gain code to *consume*
 real frames.
 
 ---
@@ -17,7 +17,7 @@ real frames.
 
 **The pipeline already exists**, in `woid/docs/design/e2e-character-pipeline.md`,
 and it is a direct answer to every failure this session hit. It was built for
-generating rigged game characters from a prompt; TacticaArena needs the same
+generating rigged game characters from a prompt; the target game needs the same
 thing, stopping at a different output format.
 
 | What failed here | What woid already does |
@@ -59,7 +59,7 @@ diffusion prior, fix it downstream where the operation is exact.
 
 ### Steps we skip
 
-- **(1) persona, (2) character creation, (3) avatar** — TacticaArena already has
+- **(1) persona, (2) character creation, (3) avatar** — the target game already has
   25 characters with names, designs and art.
 - **(8) kimodo web registry** — we render, we don't ship a GLB viewer.
 - **(7) wrist rotation** — *probably*. At 96×96 a hand is ~2 px. Verify on the
@@ -170,7 +170,7 @@ economics that make the whole thing worth doing.
 - Then `trim` → `planFit` → `renderFit` → `remapToPalette` → `alphaThreshold`,
   plus a companion normal map per frame in register
 
-### Phase 4 — consumption in TacticaArena (3 files)
+### Phase 4 — consumption in the game (3 files)
 
 `bakedtypes.ts` gains an optional `walk`; `bakedmap.ts` uses real frames when
 present and band-shifts when absent; `baked/<class>.ts` is the data, emitted by

@@ -7,7 +7,7 @@ Companions: [master plan](./sprite-pipeline-master-plan.md) (sequence),
 [research](./sprite-animation-research.md) (why diffusion-only is out),
 [local capability](./local-3d-capability.md) (what this machine runs),
 [candidates](./image-to-3d-candidates.md) (stage-2 shortlist).
-Visual record: `~/Documents/tacticaarena-sprite-research/`.
+Visual record: `~/Documents/<game>-sprite-research/`.
 
 ---
 

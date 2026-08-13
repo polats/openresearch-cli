@@ -52,7 +52,7 @@ src/local/unirig/mod.rs      ← UnirigStatus { mcp_found, mcp_runnable, service
 src/local/unirig/server.rs   ← managed spawn, url_for(port) -> http://127.0.0.1:<p>/mcp
 src/local/kimodo/mod.rs      ← KimodoStatus { mcp_found, mcp_runnable, model_present, vram_ok }
 src/local/kimodo/server.rs   ← managed spawn; TEXT_ENCODER_DEVICE=cpu
-src/local/sprite/mod.rs      ← SpriteStatus { mcp_found, tacticaarena_reachable }
+src/local/sprite/mod.rs      ← SpriteStatus { mcp_found, game_reachable }
 ```
 
 **Layered status, not a bool.** Blender's three-layer split
@@ -173,7 +173,7 @@ Each slice ends somewhere useful, so we can stop at any point without waste.
 
 ## 6. Non-goals
 
-- Modifying `TacticaArena/tools/bakery/` — unchanged boundary
+- Modifying `<game>/tools/bakery/` — unchanged boundary
 - Cloud services of any kind (the point of this plan is local)
 - Replacing ComfyUI's own UI — crux links to it, as it does today
 - Auto-routing or fallback between local and cloud backends

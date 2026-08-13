@@ -17,7 +17,7 @@
 tool calls, browse the artifacts in the Files tab, end with real walk frames the
 game can consume.
 
-**Boundaries.** Everything runs local. `TacticaArena/tools/bakery/` is never
+**Boundaries.** Everything runs local. `<game>/tools/bakery/` is never
 modified. The game gains only consumption code.
 
 ---
@@ -106,7 +106,7 @@ the checker reject valid work, which is its worst failure mode:
 ## Milestone 2 — Stage 1, T-pose, in ComfyUI — **DONE**
 
 **Result:** gate passed. Visual record in
-`~/Documents/tacticaarena-sprite-research/` (`01`–`05`).
+`~/Documents/<game>-sprite-research/` (`01`–`05`).
 
 **Stage 1 is two steps, not one** — this was the plan's biggest miss. A
 class-agnostic prompt collapses identity outright (pale skin, no tunic, sandals at
@@ -369,7 +369,7 @@ classes byte-identical**. Then `dev/sprites.html`, then watch a unit walk.
 
 ---
 
-## Milestone 10 — consumption in TacticaArena (3 files)
+## Milestone 10 — consumption in the game (3 files)
 
 `bakedtypes.ts` gains an optional `walk`; `bakedmap.ts` fills walk columns from
 real frames when present and band-shifts when absent; `baked/<class>.ts` is the

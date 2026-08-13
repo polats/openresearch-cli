@@ -108,7 +108,7 @@ def read_tiers(game: str) -> dict:
     textures = os.path.join(game, "src/render/textures.ts")
     for p in (scale, textures):
         if not os.path.isfile(p):
-            die(f"not found: {p}\n  --game must point at the TacticaArena checkout")
+            die(f"not found: {p}\n  --game must point at the target game's checkout")
 
     s = open(scale).read()
     m = re.search(r"FLORA_TILES:\s*Record<FloraKind,\s*number>\s*=\s*\{(.*?)\}", s, re.S)
