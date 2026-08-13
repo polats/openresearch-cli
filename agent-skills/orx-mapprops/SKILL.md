@@ -1,134 +1,151 @@
 ---
 name: orx-mapprops
-description: "Turn 2D art into 3D props for a game map — conditioning render with Z-Image plus ControlNet, form recovery with Depth-Anything-3, then mesh, poly budget and silhouette-variety checks. Use when asked for map props, trees, rocks or structures, when a render is too flat to become a mesh, or when props must vary without breaking one art direction."
+description: "Turn a game's 2D sprite art into a textured 3D map prop with sprite-tools/propkit.py: atlas, upres, isolate, then multi-view reconstruction for foliage or single-view for rock and built form, then texture, check and compare. Use for map props: trees, bushes, rocks, walls, houses."
 ---
 
-# Map props: 2D art to 3D geometry
+# Map props: 2D sprite to 3D prop
 
-Props are **not characters**. They never deform, so nothing here rigs, and the
-topology rules that dominate character meshes (clean joints, separated limbs) do
-not apply. What matters is silhouette, poly budget, and holding one art direction
-across a varied set.
+`sprite-tools/propkit.py` does the work. Your job is to run the steps in order, pick
+the route, and decide whether the result is good enough to keep.
 
-Two stages, and the first is where runs are lost:
+## The steps
+
+Run them in order. Each one's output is the next one's input.
 
 ```
-2D art or a prompt → CONCEPT RENDER (readable 3D form) → MESH → contract checks
+1  propkit.py atlas   --game DIR --kind oak -o 00-art.png
+2  propkit.py upres   00-art.png -o 01-big.png --refine
+3  propkit.py isolate 01-big.png -o 02-cut.png --refine
+4  build the geometry — see the route table below
+5  propkit.py texture 04-mesh.glb --ref views/cut-0.png -o 05-prop.glb
+6  propkit.py check   05-prop.glb --tier oak --game DIR --source 02-cut.png
+7  propkit.py compare 05-prop.glb --source 02-cut.png --tier oak --game DIR -o 06-compare.png
 ```
 
-## Stage 1: the concept render must contain form
+`propkit.py tiers --game DIR` lists the kinds and what each is allowed to be.
+`propkit.py preview 03-prop.glb -o previews/` renders it from four sides.
 
-A flat vector illustration cannot become a mesh. Hard outlines and flat colour
-fills give an image-to-3D model nothing to back-project, and it returns a cutout
-or mush. Measured: a text-to-image conifer came back as stacked silhouettes with
-almost no self-shading; the same subject with depth guidance came back with
-overlapping tiers, tier-on-tier shade and a modelled trunk.
+## Step 2 is not optional
 
-**Ask for sculpture, not illustration.** Name self-shading, form shadow and
-ambient occlusion; forbid `no hard black outline` and `no flat colour fill`.
-Ask for no *ground* shadow — but note the model often adds one anyway, so plan to
-remove it before the mesh stage rather than trusting the prompt.
+**A shipped sprite is tiny — an oak is 52×64 pixels. Never plan a prop from it.**
+Every later step reads the silhouette and the palette from this image, and a prop
+planned from 64 rows of chunky pixels comes out a colourless blob that still passes
+every structural check. That has happened. The tool now refuses a source under 384px
+and points back here.
 
-### Depth guidance, and the trap that wastes runs
+Two ways to up-res, and the choice matters:
 
-Depth is the strongest control for recovering form. It fails in one specific way,
-and the failure looks like a model problem when it is a data problem.
+- **`--refine`** adds form the sprite cannot contain (ESRGAN, then a light diffusion
+  pass). Use it for anything with volume — a canopy, a boulder.
+- **plain** is integer nearest-neighbour: faithful, palette preserved exactly. Use it
+  when the prop must keep the shipped colours precisely.
 
-**A raw depth map's background collides with the subject's far side.** Near is
-white, far is black — and an unmasked background is also black, so the subject's
-deepest parts are indistinguishable from empty space. The generator paints the
-whole region as one solid black mass roughly shaped like the subject.
+## Step 4: pick the route by subject
 
-Fix all three, in this order of actual effect:
+**Foliage — trees, bushes.** A canopy has no back in the source art, so ONE view is
+never enough: single-view reconstruction returns flat sheets. Give it four views.
 
-1. **Mask the background out** — this is the real fix. Force background to 0 and
-   remap the subject's depth into a band that starts well above it (e.g. 70–255),
-   so the subject's farthest surface can never equal the background.
-2. **Normalise for contrast.** A subject may occupy only a slice of the range;
-   stretch it. `min_max` over the default.
-3. **Strength.** Least important, and the intuitive direction is wrong: lowering
-   it crushes interior shadows and flattens the result back toward illustration.
-   Move it **up**, inside the model's documented range.
+```
+propkit.py author    02-cut.png --tier conifer --game DIR -o 03-scaffold.glb
+propkit.py views     03-scaffold.glb --kind "conifer tree" -o views/
+propkit.py meshviews views/ -o 04-mesh.glb
+propkit.py clean     04-mesh.glb --tier conifer --game DIR --repair -o 04b.glb
+```
 
-### Canny vs depth — different jobs
+`author` here is **only a camera rig** — a rough primitive mesh whose job is to say
+where the four cameras stand. `views` renders it from each yaw and restyles each
+render into the game's art, so the reconstructor gets real appearance from angles the
+2D art never showed. Measured on the same subject: single view 0.57 IoU, four views
+**0.93**.
 
-| | Canny | Depth |
+**Rock, wall, house, built form.** Solid shapes reconstruct from one view — a boulder
+matched its source to 0.93 that way.
+
+```
+propkit.py mesh  02-cut.png -o raw/
+propkit.py clean raw/raw-basic.glb --tier boulder --game DIR --repair -o 04b.glb
+```
+
+**Gaussian splat, when asked for by name.** A third route, and deliberately not the
+default: see `orx-splat`. It reconstructs real volume from ONE view — 0.91 IoU on the
+same oak plate where the single-view mesh route gave 0.57 — so it needs no scaffold
+and no four-view rig, and it finishes in about a minute.
+
+```
+splatkit.py splat 02-cut.png -o 03-splat.ply --mesh
+propkit.py  clean 03-splat-mesh.glb --tier oak --game DIR --repair -o 04b.glb --source 02-cut.png
+```
+
+Two reasons it stays opt-in. Its **back is inferred, not observed** — plausible
+rather than correct, and no check can tell you which, whereas `views` renders sides
+that actually derive from the game's art. And its mesh needs the same `clean` budget
+work as any other raw output: the splat mesh arrives at 79 MB. Choose it when someone
+asks for a splat, or when the routes above have failed on a subject.
+
+## Post each stage as you finish it
+
+Every command prints a ready-to-paste `link` field — markdown relative to the files
+dir, which is what the chat viewer resolves. Paste it in a one-line update rather than
+saving everything for the end. The stages worth showing, because each is a place the
+run can go wrong invisibly:
+
+| after | show | because |
 |---|---|---|
-| Locks | silhouette and internal edges | volume and layer ordering |
-| Best for | **variants of a known shape** — same outline, different material | **recovering form** from flat art |
-| Setup | none; works first try | needs the masking step above |
-| Watch | low thresholds capture surface noise as structure, so texture is inherited too | background collision |
+| `atlas` | the extracted sprite | proves you pulled the right kind |
+| `upres` | the up-resed plate | a tiny or cropped source dooms everything after it |
+| `isolate` | the cutout | a surviving background gets modelled as a box |
+| `views` | the four-view sheet | if the sides do not look like the same object, stop |
+| `meshviews` / `mesh` | the raw mesh | orbit it before spending a clean + texture on it |
+| `texture` | the textured prop | grey or torn colour is visible instantly |
+| `compare` | source beside prop | the only stage that answers "is this better?" |
 
-Canny is the reliable one. Reach for it when a prop must keep an established
-silhouette; reach for depth when the source is too flat to become geometry.
+A stage you did not show is a stage the reviewer has to take on trust.
 
-## Stage 2: mesh, and the contract
+## Steps 5 and 6 ask different questions
 
-Never invent the target's numbers — read them from the game, and state a budget
-in the plan rather than discovering one later. Props are consumed by a real-time
-renderer, so **triangle count and draw calls are part of the deliverable**, not an
-afterthought.
+`check` answers **"is this a legal asset?"** — budget, watertight, single piece,
+right height, origin at the base, silhouette close enough. It exits non-zero and
+names each failure. Fix them, or say plainly why one is acceptable.
 
-Check, per prop:
+**Texture with `propkit texture`, never by hand.** The shape models emit geometry
+only — no UVs, no materials. `texture` UV-unwraps, renders the mesh from six cameras,
+paints each view with the Hunyuan3D paint model and bakes one texture, so every side
+is coloured. Projecting the source image onto the mesh instead colours the front and
+leaves the sides grey.
 
-- **Silhouette still reads as that prop.** Compare against whatever the game
-  ships today — an existing billboard atlas slot is a legitimate ground truth when
-  no mesh exists yet.
-- **Variety is measured, not asserted.** Normalise each variant's silhouette and
-  compare pairwise; near-identical after normalisation means one shape wearing
-  hats, which fails a variety requirement even though every prop is "different".
-- **Height inside the authored band**, origin at the bottom-centre of the opaque
-  bounding box, Y-up, one material, zero animation clips.
-- **Generated PBR textures are usually discarded.** A stylised game has its own
-  palette and light response; a photoreal texture breaks art direction faster than
-  a wrong silhouette does.
+`compare` answers **"is this better than what we already have?"** — the prop beside
+the sprite at the size the game draws it. **`check` passing is not an answer to
+this.** A prop can be geometrically perfect and visually useless. Look at the
+comparison before delivering; if it reads worse than the sprite, say so. The honest
+outcome is sometimes to keep the billboard.
 
-## Probe, do not trust a list
+## What you still have to think about
 
-Model availability on a machine changes in days. A capability doc in this repo
-claimed image-to-3D weights were absent and was wrong within 48 hours.
-
-So: **read the live model list and the node list before planning a graph.** Treat
-any model name written in a skill or doc as a hint about shape, never as a fact
-about presence.
-
-## Two API traps in this ComfyUI
-
-**Enums report as `COMBO`,** so you cannot read valid option values from
-`object_info`. Get them from the official workflow templates instead — the
-templates are also the correct source for sampler settings and loader types,
-which are easy to get subtly wrong and expensive to debug.
-
-**Dynamic combos (`COMFY_DYNAMICCOMBO_V3`) need their nested inputs specified
-three ways at once** in the API format: the plain value, the nested inputs as
-plain siblings, *and* the same siblings under dotted `parent.child` keys.
-Validation demands the dotted form; `execute()` demands the plain one. Supplying
-only one side passes validation and then fails at run time, or the reverse. Four
-other encodings were tried and all failed one side.
+- **Never invent the target's numbers.** `--tier` reads height, slot and pixel
+  density from the game's own source. Don't pass remembered values.
+- **Colour must survive to the end.** The delivered prop needs more than one
+  material, drawn from the sprite's palette. Chaining `clean` after `author` without
+  `--source` throws the palette away.
+- **Variety is measured, not asserted.** Several props from one shape rescaled is not
+  variety. Compare silhouettes pairwise; near-identical after normalisation means one
+  shape wearing hats.
+- **Model availability changes weekly.** Read the live model list rather than trusting
+  any name written down, including here.
 
 ## Delivering
 
-Stage-numbered, under the project's files dir (absolute path from your playbook,
+Stage-numbered under the project's files dir (the absolute path from your playbook,
 never a bare relative path):
 
 ```
-$FILES/props/<kind>/00-source.png  01-control.png  02-concept.png
-                    03-mesh.glb    04-final.glb    05-manifest.json
+$FILES/props/<kind>/00-art.png 01-big.png 02-cut.png 03-prop.glb
+                    04-compare.png 05-manifest.json
 ```
 
-Link each artifact relative to the files dir — `[mesh](props/oak-a/04-final.glb)`
-— because that is what the viewer resolves against. Images and video render inline
-in chat; a `.glb` becomes a chip that opens an orbit viewer, so a delivered mesh is
-inspectable immediately.
+Link each artifact **relative to the files dir** — `[prop](props/oak/03-prop.glb)` —
+which is what the viewer resolves against. A `.glb` becomes a chip that opens an
+orbit viewer, so a delivered prop is inspectable straight from the reply.
 
-**Record how each artifact was made** in the manifest: model, control type and
-strength, sampler settings, seed, and the poly count per LOD. A prop whose
-provenance is unrecorded cannot be regenerated or matched by its siblings, which
-is exactly what a varied-but-consistent set requires.
-
-## Judging
-
-Measure, then look. A prop that passes every numeric check can still read worse
-than the flat billboard it replaces — faked volume on a billboard can be a lot of
-invested work, and raw geometry does not automatically beat it. Put them side by
-side, in the game, and orbit the camera before declaring a win.
+Record in the manifest which route you used, the flags you settled on, and `check`'s
+output. A prop whose provenance is unrecorded cannot be regenerated or matched by its
+siblings.

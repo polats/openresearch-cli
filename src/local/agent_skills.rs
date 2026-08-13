@@ -192,6 +192,7 @@ impl Persona {
 
 const ANIMATION: &str = include_str!("../../agent-skills/orx-animation/SKILL.md");
 const MAPPROPS: &str = include_str!("../../agent-skills/orx-mapprops/SKILL.md");
+const SPLAT: &str = include_str!("../../agent-skills/orx-splat/SKILL.md");
 const SPRITE: &str = include_str!("../../agent-skills/orx-sprite/SKILL.md");
 const COMPUTE_LOCAL: &str = include_str!("../../agent-skills/orx-compute/SKILL.local.md");
 const COMPUTE_CLOUD: &str = include_str!("../../agent-skills/orx-compute/SKILL.md");
@@ -405,8 +406,13 @@ const S_ANIMATION: AgentSkill = AgentSkill {
 };
 const S_MAPPROPS: AgentSkill = AgentSkill {
     name: "orx-mapprops",
-    description: "Turn 2D art into 3D props for a game map — conditioning render with Z-Image plus ControlNet, form recovery with Depth-Anything-3, then mesh, poly budget and silhouette-variety checks. Use when asked for map props, trees, rocks or structures, when a render is too flat to become a mesh, or when props must vary without breaking one art direction.",
+    description: "Turn a game's 2D sprite art into a textured 3D map prop with sprite-tools/propkit.py: atlas, upres, isolate, then multi-view reconstruction for foliage or single-view for rock and built form, then texture, check and compare. Use for map props: trees, bushes, rocks, walls, houses.",
     content: MAPPROPS,
+};
+const S_SPLAT: AgentSkill = AgentSkill {
+    name: "orx-splat",
+    description: "Turn one 2D image into a 3D gaussian splat with sprite-tools/splatkit.py on the local ComfyUI: verify the weights, generate, check the silhouette, compare. Use when a splat is asked for by name, or when a single view has to yield real volume — it measured 0.91 silhouette IoU where single-view mesh reconstruction gave 0.57 and flat sheets.",
+    content: SPLAT,
 };
 const S_SPRITE: AgentSkill = AgentSkill {
     name: "orx-sprite",
@@ -483,6 +489,7 @@ pub fn skills_for_persona(persona: Persona) -> Vec<&'static AgentSkill> {
         Persona::GameArtist => vec![
             &S_ANIMATION,
             &S_MAPPROPS,
+            &S_SPLAT,
             &S_SPRITE,
             &S_COMFYUI,
             &S_BLENDER,
@@ -510,6 +517,7 @@ pub fn find(name: &str, set: SkillSet) -> Option<&'static AgentSkill> {
             &S_COMFYUI,
             &S_ANIMATION,
             &S_MAPPROPS,
+            &S_SPLAT,
             &S_SPRITE,
         ])
         .find(|s| s.name == want || s.name.strip_prefix("orx-") == Some(want))
