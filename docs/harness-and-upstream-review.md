@@ -286,6 +286,7 @@ our size.
 | Cherry-pick 3 upstream fixes | ~85% | Medium — fixes bugs we plausibly have | **Done** (§6) |
 | Tailwind port | ~70% | Zero on its own; option value on everything upstream | **Next** — gating, per §5 |
 | Full tranche-5 (8 commits) | ~60% | Low-medium | **After the port**, in upstream order |
+| Tier 2 of the port | ~50% at 3–4 days | High — unblocks the UI half | **One atomic branch**, 8–10 days — see §5 |
 | Flush skip-if-unchanged | ~90% | Low, but ~2 hours | If chats feel sluggish |
 | Approval outcome type | ~90% | **Near zero on its own** | Only as part of Pi |
 | Pi harness | ~40% at 1–2 weeks | **Unclear** | No, absent a driver |
@@ -327,6 +328,51 @@ Sequence from here:
    projects — one of the two has to give.
 4. Everything else (Pi, the approval type, the event log) still waits for a
    concrete trigger. This decision does not change their scoring.
+
+### Tier 2 is one operation, not a file-at-a-time tier
+
+Established by attempting it and backing out (14 Aug). The tier-1 shape — take a
+file, re-apply our diff, verify, commit — **does not carry over**, because the
+tier-2 files are joined by contracts rather than merely sitting near each other.
+
+The tool for the re-apply is settled and it works: `git merge-file` with the
+merge-base as ancestor. `SettingsPage` came out at 19 conflicts / 373 lines from
+a 3342-line file, `api.ts` at 5 conflicts / 192 lines. Hand re-application would
+have been far worse. That is not the problem.
+
+The problem is the dependency shape:
+
+- **`SettingsPage` cannot move without `api.ts`.** Upstream's version reads
+  fields ours doesn't declare — `toolsFound` on the SSH/Slurm preflights,
+  `projectId`, `enabled` on `ComputeTargetSummary`.
+- **`api.ts` cannot move alone.** Merging it immediately broke `App`,
+  `ChatPanel`, and `DetailDrawer`: upstream restructured the file-access
+  functions, so `getFiles`, `ProjectFiles`, `fileUrl`, `getCommitDiff`, and
+  `getWorkingTree` vanish from under three consumers we have not converted.
+- **`TreeView` cannot move without `CodeTab`**, which is itself deferred: its
+  converted version imports `type CodeView` from it, and our `CodeTab` does not
+  export that type. Note the dependency scan reports `TreeView` as clean —
+  the file exists, only the *export* is missing. File-existence checks are
+  necessary, not sufficient.
+
+So tier 2 is `api.ts` plus every consumer, in one branch, landing together:
+`SettingsPage`, `ChatPanel`, `App`, `DetailDrawer`, `TreeView`, `CodeTab`,
+`WorktreeTab`, plus the three deferred from tier 1 (`Header`, `SubagentTab`,
+`PlanStrip`) and the two components the code browser needs (`BranchChanges`,
+`CodeBrowserHeader`). Fold `055e6bf` into it rather than sequencing around it —
+`PlanStrip`'s `"bypassPermissions"`/`"bypass"` mismatch is the same problem it
+fixes.
+
+**Upstream's settings also carry features our server does not implement.** The
+merge pulled in a `ProjectDefaultsTab` and a rewritten `GitTab` calling
+`/api/settings/projects`, project git status, and GitHub enable/disable; upstream's
+`api.ts` adds 11 endpoints we have no handler for. Those must be dropped on the
+way through, not adopted — a UI that typechecks against a missing endpoint fails
+at runtime, where neither tsc nor the screenshots will catch it.
+
+**Estimate:** the 3–4 days in §4's table was per-file thinking. As one atomic
+operation with a server-contract review inside it, budget closer to 8–10 days,
+and do it on a branch that can be abandoned.
 
 ---
 
