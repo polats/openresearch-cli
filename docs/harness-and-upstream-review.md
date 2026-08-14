@@ -17,10 +17,10 @@ Companions: [scenario integration spec](./scenario-integration-spec.md),
 
 | Question | Answer |
 |---|---|
-| Merge upstream? | 3 bug fixes yes; the other 45 commits depend on a strategic decision |
+| Merge upstream? | **Yes — keep tracking** (decided 14 Aug 2026). 3 bug fixes landed; the rest is gated on the Tailwind port |
 | Add Pi as a harness? | No, absent a concrete driver |
 | Adopt anything from `dsh`/Cordis? | No architecture; two ideas parked for later |
-| Live decision | **Keep tracking upstream, or hard-fork?** Blocks everything else |
+| Next gating item | **Port the Crux theme to Tailwind** — see §5 |
 
 ---
 
@@ -283,33 +283,50 @@ our size.
 
 | Change | Ships as estimated | Real benefit | Verdict |
 |---|---|---|---|
-| Cherry-pick 3 upstream fixes | ~85% | Medium — fixes bugs we plausibly have | **Do** |
-| Full tranche-5 (8 commits) | ~60% | Low-medium | Depends on the upstream decision |
+| Cherry-pick 3 upstream fixes | ~85% | Medium — fixes bugs we plausibly have | **Done** (§6) |
+| Tailwind port | ~70% | Zero on its own; option value on everything upstream | **Next** — gating, per §5 |
+| Full tranche-5 (8 commits) | ~60% | Low-medium | **After the port**, in upstream order |
 | Flush skip-if-unchanged | ~90% | Low, but ~2 hours | If chats feel sluggish |
 | Approval outcome type | ~90% | **Near zero on its own** | Only as part of Pi |
 | Pi harness | ~40% at 1–2 weeks | **Unclear** | No, absent a driver |
 | Event-sourced chat log | ~50% | Low today | No |
-| Tailwind port | ~70% | Zero product value | Only if we keep tracking upstream |
 
 ---
 
-## 5. The live decision
+## 5. Decision: keep tracking upstream
 
-**Keep tracking upstream, or hard-fork?** Both are defensible.
+**Decided 14 August 2026.** We keep merging from `upstream/main` rather than
+hard-forking. The reasoning: their harness layer (Codex approvals, streaming
+markdown, file rendering, the permission-card work) is real engineering we would
+otherwise maintain alone, and that layer is inherited infrastructure — not our
+differentiator, and not where we want to spend solo-team time.
 
-**Keep tracking** — we inherit their harness work (Codex approvals, streaming
-markdown, file rendering) for free, which is real: that's the layer we'd otherwise
-maintain alone. Cost: the Tailwind port, plus a merge tax that grows every week.
+The accepted cost is the Tailwind port plus a recurring merge tax. §6 measures
+what that tax actually looks like.
 
-**Hard fork** — declare independence, cherry-pick individual bug fixes when we
-notice one, never merge again. Cost: we own the harness layer forever. Benefit: we
-stop paying a tax on a codebase heading somewhere else, and Tailwind becomes a
-non-question.
+### What this makes the next gating item
 
-Everything else scores differently depending on this answer. The Tailwind port is
-either mandatory or moot. Tranche 5 is either the first of many or the last one.
+**Port the Crux theme to Tailwind.** Until it's done, every upstream UI commit
+after 10 August needs its markup hand-translated (as `a94c399` did in §6), and
+roughly 15 upstream commits stay unavailable. Concretely:
 
-**Nothing else on this list should go on the calendar until this is decided.**
+- `8100bdf` deletes `ui/src/styles.css` (6,162 lines) for `tailwind.css` +
+  `styleClasses.ts` across 45 UI files; our brand is +1,167 lines in that file.
+- The merge reports `UD ui/src/styles.css` and `AA ui/src/theme.ts`.
+- Scored ~70% to ship as estimated, with zero product value on its own. It buys
+  option value on everything upstream does next, which is exactly why it only
+  makes sense under this decision and not the other one.
+
+Sequence from here:
+
+1. **Tailwind port** — gating; nothing else in the UI half moves without it.
+2. **Tranche 5**, in upstream order, not cherry-picked across gaps (§6). Start
+   with `055e6bf` (Codex approvals + permission cards), then `4738715` (Skills
+   tab), `c43180c`, `4cffa77`.
+3. **Read `6e4f998`** against our `3cf8913` before building further on local
+   projects — one of the two has to give.
+4. Everything else (Pi, the approval type, the event log) still waits for a
+   concrete trigger. This decision does not change their scoring.
 
 ---
 
