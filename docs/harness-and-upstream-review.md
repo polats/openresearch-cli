@@ -286,7 +286,7 @@ our size.
 | Cherry-pick 3 upstream fixes | ~85% | Medium — fixes bugs we plausibly have | **Done** (§6) |
 | Tailwind port | ~70% | Zero on its own; option value on everything upstream | **Next** — gating, per §5 |
 | Full tranche-5 (8 commits) | ~60% | Low-medium | **After the port**, in upstream order |
-| Tier 2 of the port | ~50% at 3–4 days | High — unblocks the UI half | **One atomic branch**, 8–10 days — see §5 |
+| Tier 2 of the port | ~65% | High — unblocks the UI half | Per file, 3–4 days, with `api.ts` frozen — see §5 |
 | Flush skip-if-unchanged | ~90% | Low, but ~2 hours | If chats feel sluggish |
 | Approval outcome type | ~90% | **Near zero on its own** | Only as part of Pi |
 | Pi harness | ~40% at 1–2 weeks | **Unclear** | No, absent a driver |
@@ -329,7 +329,50 @@ Sequence from here:
 4. Everything else (Pi, the approval type, the event log) still waits for a
    concrete trigger. This decision does not change their scoring.
 
-### Tier 2 is one operation, not a file-at-a-time tier
+### Tier 2: freeze `api.ts`
+
+**This supersedes the section below, which drew the wrong conclusion from the
+same evidence.** Tier 2 is per-file after all. The rule that makes it so:
+
+> `ui/src/api.ts` is our contract of record and **does not move**. Any upstream
+> UI referencing a symbol or field it doesn't have is UI for a backend commit we
+> haven't merged. Rewrite the reference to our spelling, or delete that feature.
+> Never widen `api.ts` to make it compile.
+
+Merging `api.ts` is what turned this into a cascade: it broke `App`, `ChatPanel`
+and `DetailDrawer` at once, and — the real cost — removed the only check that was
+catching the problem. With `api.ts` frozen, `tsc` names every offending line, and
+a green build is evidence that no unmerged-backend UI slipped through. Widen the
+contract and the compiler stops being able to tell you.
+
+The hazards in `SettingsPage` are **renames, not missing features**, so each is a
+one-token edit:
+
+| upstream | ours | sites |
+|---|---|---|
+| `toolsFound` | `gitFound` | 4 |
+| `configuredDefaultBackend` | `defaultBackend` | 1 |
+| `enabled` (on `ComputeTargetSummary`) | `configured` | 7 |
+
+Two things genuinely can't be taken and must keep our version: components backed
+by endpoints we don't serve (`ProjectDefaultsTab`, upstream's rewritten `GitTab`
+— see the endpoint note below), and components upstream restructured where our
+shape differs (`InstancesTab`, which upstream split into `ComputeActivity` +
+`InstancesTable` + `InstanceHistory`). Both surface as `tsc` errors; neither
+needs predicting in advance.
+
+**Do not build tooling for this.** I wrote a preflight to predict the keep-ours
+list and a companion to swap components, and put the same brace-matching bug in
+both three times — an apostrophe inside a comment swallowed the rest of the file,
+and the fix for that made it skip components instead. Each version printed a
+confident, wrong list. `tsc` already answers the question exactly, for free, and
+cannot silently under-report the way a hand-rolled parser can.
+
+**Revised estimate:** back to roughly the original 3–4 days, per file, resumable
+between files. The 8–10 day figure below assumed the cascade was inherent; it was
+self-inflicted.
+
+### Superseded: "tier 2 is one operation"
 
 Established by attempting it and backing out (14 Aug). The tier-1 shape — take a
 file, re-apply our diff, verify, commit — **does not carry over**, because the
