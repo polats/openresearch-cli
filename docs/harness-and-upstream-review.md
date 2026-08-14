@@ -30,11 +30,13 @@ Companions: [scenario integration spec](./scenario-integration-spec.md),
 `5e25afa` — *"Surface silently-dropped chat turns (v0.1.87) (#139)"*, **29 July
 2026**, landed via `upstream-sync-tranche1..4` (all four merged into `main`).
 
-- `main` is **50 behind / 50 ahead**. Upstream is on v0.1.101; we version on our
-  own 1.x line.
+- `origin/main` is **92 ahead / 50 behind**. Upstream is on v0.1.101; we version
+  on our own 1.x line.
 - Two of the 50 we already cherry-picked out of order — `4ff8e3a` (Claude auth
   recovery) and `3e93476` (Ray Jobs) — so **48 are genuinely new**.
-- `splats/pipeline-and-viewer` is 8 ahead of `main`, nothing behind.
+- Measured against `origin/main` (which includes PR #17, the splats work). The
+  behind-count is the number that matters and it does not move when we ship:
+  every commit we add widens the gap on the ahead side only.
 
 A trial merge of `upstream/main` into `main` (throwaway worktree, discarded):
 
