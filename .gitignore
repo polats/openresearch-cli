@@ -15,3 +15,6 @@ Claude.local.md
 
 # This repo uses pnpm; ignore an accidental npm lockfile
 ui/package-lock.json
+
+# Visual baselines for the Tailwind port (scripts/screenshots.sh)
+ui/.screenshots/
