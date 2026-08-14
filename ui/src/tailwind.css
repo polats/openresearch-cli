@@ -1,0 +1,117 @@
+/* Tailwind v4 setup — tier 0 of the theme port (see docs/harness-and-upstream-review.md §5).
+   Tailwind v4 is CSS-first: there is no tailwind.config.js, the theme lives here.
+
+   This file contributes UTILITIES ONLY. `styles.css` remains the source of truth
+   for the tokens themselves (`:root`, the dark palette), the base element styles,
+   the keyframes, and every component rule — and stays imported alongside this one
+   until the last component is converted.
+
+   `@theme inline` maps Tailwind's utility namespace onto those same variables, so
+   `bg-background` compiles to `background-color: var(--base)` rather than baking a
+   literal. That is what keeps the brand working: `theme.ts` writes the palette onto
+   <html> at runtime, and every converted utility re-tints with it, exactly as the
+   hand-written CSS does today.
+
+   Layer order is what makes the port incremental. Tailwind's output is layered, and
+   unlayered CSS beats layered CSS regardless of specificity. `styles.css` is
+   unlayered, so it keeps winning until a component's rules are deleted as part of
+   converting it — there is no window where a half-converted screen renders wrong
+   because a utility silently lost. */
+
+@layer theme, base, vendor, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@source "../index.html";
+@source ".";
+
+@theme inline {
+  /* Drop Tailwind's stock palette: the only colors we want are our own tokens,
+     so a typo'd `bg-slate-500` fails to emit instead of quietly shipping an
+     off-brand color. */
+  --color-*: initial;
+  --color-transparent: transparent;
+  --color-current: currentColor;
+  --color-white: #fff;
+  --color-black: #000;
+
+  --color-background: var(--base);
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-surface: var(--surface);
+  --color-surface-bright: var(--surface-bright);
+  --color-highlight: var(--highlight);
+  --color-text: var(--text);
+  --color-subtext: var(--subtext);
+  --color-muted: var(--muted);
+  --color-primary: var(--primary);
+  --color-primary-subtle: var(--primary-subtle);
+  --color-secondary: var(--secondary);
+  --color-error: var(--error);
+  --color-border: var(--border);
+  --color-border-variant: var(--border-variant);
+  --color-border-strong: var(--border-strong);
+  --color-accent: var(--accent);
+  --color-accent-orange: var(--accent-orange);
+  --color-accent-red: var(--accent-red);
+  --color-accent-teal: var(--accent-teal);
+  --color-accent-blue: var(--accent-blue);
+  --color-accent-pink: var(--accent-pink);
+  --color-accent-amber: var(--accent-amber);
+  --color-accent-green: var(--accent-green);
+  --color-accent-purple: var(--accent-purple);
+  --color-accent-green-subtle: var(--accent-green-subtle);
+  --color-accent-amber-subtle: var(--accent-amber-subtle);
+  --color-accent-teal-subtle: var(--accent-teal-subtle);
+  --color-accent-red-subtle: var(--accent-red-subtle);
+  --color-accent-blue-subtle: var(--accent-blue-subtle);
+  --color-accent-purple-subtle: var(--accent-purple-subtle);
+  --color-dots-muted: var(--dots-muted);
+  --color-dots-strong: var(--dots-strong);
+
+  /* Ours, not upstream's: the per-persona accents. Already consumed as
+     `var(--persona-*)` inline styles in personaMeta.tsx; mapping them here makes
+     `text-persona-producer` available when the persona chrome is converted. */
+  --color-persona-research: var(--persona-research);
+  --color-persona-game-designer: var(--persona-game-designer);
+  --color-persona-game-artist: var(--persona-game-artist);
+  --color-persona-idea-foundry: var(--persona-idea-foundry);
+  --color-persona-producer: var(--persona-producer);
+  --color-persona-analyst: var(--persona-analyst);
+  --color-persona-blender: var(--persona-blender);
+  --color-persona-comfyui: var(--persona-comfyui);
+
+  --font-sans: var(--sans);
+  --font-mono: var(--mono);
+  --font-weight-normal: var(--fw-regular);
+  --font-weight-medium: var(--fw-medium);
+  --font-weight-semibold: var(--fw-semibold);
+  --font-weight-display: var(--fw-display);
+  --ease-standard: ease;
+
+  /* Same reset reasoning as `--color-*`: our scale is not Tailwind's, so an
+     unmapped size should fail rather than render at a stock value. */
+  --text-*: initial;
+  --text-2xs: var(--fs-2xs);
+  --text-xs: var(--fs-xs);
+  --text-sm: var(--fs-sm);
+  --text-md: var(--fs-md);
+  --text-base: var(--fs-base);
+  --text-lg: var(--fs-lg);
+  --text-xl: var(--fs-xl);
+  --text-2xl: var(--fs-2xl);
+  --text-3xl: var(--fs-3xl);
+  --text-4xl: var(--fs-4xl);
+  --text-5xl: var(--fs-5xl);
+
+  --container-readable: var(--readable-col);
+
+  /* Literals, not `var(--radius-*)`: Tailwind's radius namespace is spelled
+     `--radius-*` too, so indirection here would read as self-referential. These
+     match the `--radius-*` values in styles.css `:root`; change both together. */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-full: 999px;
+}

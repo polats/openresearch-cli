@@ -1,6 +1,10 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+// Both, for the duration of the Tailwind port: tailwind.css contributes layered
+// utilities, styles.css the (unlayered, therefore winning) tokens and component
+// rules. styles.css goes away when the last component is converted.
+import "./tailwind.css";
 import "./styles.css";
 import "@xyflow/react/dist/style.css";
 import "@xterm/xterm/css/xterm.css";
