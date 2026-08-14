@@ -9,9 +9,13 @@
 // snapshot of the data dir so the same screens render the same way every run.
 //
 //     scripts/screenshots.sh --snapshot            (once) freeze the fixture
-//     scripts/screenshots.sh baseline              before converting anything
-//     scripts/screenshots.sh tier1                 after each tier
-//     scripts/screenshots.sh --compare baseline tier1
+//     scripts/screenshots.sh tier2                 after a tier's changes
+//     scripts/screenshots.sh --compare tier1 tier2
+//
+// Each label is a full capture; compare consecutive ones. The label for the last
+// verified state is the reference for the next tier — there is no permanent
+// "baseline", because the screen list grows as coverage does and a stale label
+// with fewer screens compares as a pile of MISSING rather than a real signal.
 //
 // Add a screen by adding an entry to SCREENS, not by editing the driver. Steps
 // run in order against one page and accumulate, so each entry starts wherever
@@ -48,6 +52,34 @@ const click = (name) => async (p) => {
   return true;
 };
 
+/** For controls whose accessible name isn't what you'd guess. The back-to-grid
+ *  button is titled "All projects" but its *content* is the project name, and
+ *  content wins for the accessible name — so getByRole finds nothing. */
+const clickSelector = (selector) => async (p) => {
+  const el = p.locator(selector).first();
+  if ((await el.count()) === 0) return false;
+  await el.click();
+  await p.waitForTimeout(SETTLE * 2);
+  return true;
+};
+
+/** For affordances that aren't buttons — the project cards on the home grid. */
+const clickText = (text) => async (p) => {
+  const t = p.getByText(text, { exact: false }).first();
+  if ((await t.count()) === 0) return false;
+  await t.click();
+  await p.waitForTimeout(SETTLE * 2);
+  return true;
+};
+
+const hover = (selector) => async (p) => {
+  const el = p.locator(selector).first();
+  if ((await el.count()) === 0) return false;
+  await el.hover();
+  await p.waitForTimeout(SETTLE);
+  return true;
+};
+
 /** Wait for the things that finish *after* the DOM settles and would otherwise
  *  land on one run and not the next: webfonts, and any image/media the chat and
  *  gallery panes fetch lazily. This is what makes the transcript screens
@@ -67,6 +99,9 @@ async function quiesce(page) {
   await page.waitForTimeout(SETTLE);
 }
 
+/** Project in the fixture whose tree is worth photographing. */
+const TREE_PROJECT = process.env.ORX_SCREENSHOT_TREE_PROJECT ?? "Gambit Arena Mobile";
+
 const SETTINGS_TABS = [
   "Appearance", "Persona", "Harnesses", "Generative AI",
   "Compute", "Instances", "Environment", "Git", "Storage",
@@ -82,6 +117,21 @@ const SCREENS = [
   { name: "project-chat", advisory: true, steps: async () => {} },
   { name: "panel-gallery", advisory: true, steps: click("Gallery") },
   { name: "panel-worktree", advisory: true, steps: click("Worktree") },
+  // The experiment tree, reached by backing out to the project grid and opening
+  // one that actually has experiments — the fixture's landing project has none,
+  // which is why the tree had no pixel coverage until now.
+  //
+  // Order is load-bearing twice over. These come BEFORE settings, because "All
+  // projects" only exists on the project view. And they come before `files`,
+  // because the left-rail selection is sticky across projects: clicking Files
+  // first means the newly opened project lands on its (empty) Files tab and the
+  // tree never renders — which is exactly how the first attempt produced an
+  // empty Files screenshot named "experiments-tree".
+  { name: "projects-home", steps: clickSelector('button[title="All projects"]') },
+  { name: "experiments-tree", steps: clickText(TREE_PROJECT) },
+  { name: "exp-hover-card", steps: hover(".exp-node") },
+  { name: "experiments-table", steps: click("Table") },
+
   { name: "files", steps: click("Files") },
   { name: "settings", steps: click("Settings") },
   ...SETTINGS_TABS.map((tab) => ({

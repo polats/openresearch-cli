@@ -4,9 +4,8 @@
 # passing build proves nothing about how a screen looks.
 #
 #   scripts/screenshots.sh --snapshot                 (once) freeze the fixture
-#   scripts/screenshots.sh baseline                   capture, labelled "baseline"
-#   scripts/screenshots.sh tier1                      capture again after a tier
-#   scripts/screenshots.sh --compare baseline tier1
+#   scripts/screenshots.sh tier2                      capture, labelled "tier2"
+#   scripts/screenshots.sh --compare tier1 tier2      diff against the last one
 #
 # Determinism is the whole game: a baseline captured against live data diffs
 # against itself the moment a run finishes or a chat moves. So `--snapshot`
