@@ -72,6 +72,20 @@ const clickText = (text) => async (p) => {
   return true;
 };
 
+/** Run steps in order, for a screen that needs to undo the previous one first. */
+const seq = (...steps) => async (p) => {
+  for (const step of steps) if ((await step(p)) === false) return false;
+  return true;
+};
+
+/** Move the pointer somewhere harmless. The hover card lingers otherwise and
+ *  lands in whatever screen is captured next. */
+const unhover = () => async (p) => {
+  await p.mouse.move(5, 5);
+  await p.waitForTimeout(SETTLE);
+  return true;
+};
+
 const hover = (selector) => async (p) => {
   const el = p.locator(selector).first();
   if ((await el.count()) === 0) return false;
@@ -115,9 +129,9 @@ const SETTINGS_TABS = [
 // gate, so `--compare` reports them separately rather than failing every run and
 // training you to skim red output.
 const SCREENS = [
-  { name: "project-chat", steps: async () => {} },
+  { name: "project-chat", advisory: true, steps: async () => {} },
   { name: "panel-gallery", advisory: true, steps: click("Gallery") },
-  { name: "panel-worktree", steps: click("Worktree") },
+  { name: "panel-worktree", advisory: true, steps: click("Worktree") },
   // The experiment tree, reached by backing out to the project grid and opening
   // one that actually has experiments — the fixture's landing project has none,
   // which is why the tree had no pixel coverage until now.
@@ -129,12 +143,18 @@ const SCREENS = [
   // tree never renders — which is exactly how the first attempt produced an
   // empty Files screenshot named "experiments-tree".
   { name: "projects-home", steps: clickSelector('button[title="All projects"]') },
-  // These two stay advisory: react-flow lays the tree out on paint, and it does
-  // not always settle identically. Confirmed over three runs rather than two —
-  // an earlier pair of runs agreed and led to gating screens that then drifted.
-  { name: "experiments-tree", advisory: true, steps: clickText(TREE_PROJECT) },
+  // The New Project form had no coverage at all, which is why converting it was
+  // the riskiest work in the port for the least benefit. Covered now.
+  { name: "new-project", steps: click("New project") },
+  // Advisory, like every screen with the chat pane or async media on it. These
+  // were gated twice on the strength of two runs and then three, and drifted
+  // both times: the flake rate is low, not zero, and no number of sample runs
+  // short of many proves otherwise. The gate is now only the screens that have
+  // never moved — settings, files, the project grid, the new-project form and
+  // the runs table — which is enough, because those are what the port edits.
+  { name: "experiments-tree", advisory: true, steps: seq(click("Cancel"), clickText(TREE_PROJECT)) },
   { name: "exp-hover-card", advisory: true, steps: hover(".exp-node") },
-  { name: "experiments-table", steps: click("Table") },
+  { name: "experiments-table", steps: seq(unhover(), click("Table")) },
 
   { name: "files", steps: click("Files") },
   { name: "settings", steps: click("Settings") },
