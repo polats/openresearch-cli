@@ -1266,7 +1266,11 @@ impl ChatHost {
 
         // Slash-skills: the transcript keeps the `/name` the user typed; the
         // harness gets the expanded prompt.
-        let mut turn_text = crate::local::skills::expand(&text).unwrap_or(text);
+        // Built-in skills first, then the user's uploaded ones — same `/name`
+        // syntax, so an upload can't shadow a bundled skill by accident.
+        let mut turn_text = crate::local::skills::expand(&text)
+            .or_else(|| crate::local::user_skills::expand(&text, &project.id))
+            .unwrap_or(text);
         // Harnesses take plain text; pasted images ride as on-disk paths every
         // CLI can open with its own image-viewing tool.
         if !saved_images.is_empty() {

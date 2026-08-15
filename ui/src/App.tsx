@@ -31,6 +31,7 @@ import { CodeTab } from "./components/CodeTab";
 import type { CodeBrowserView } from "./components/CodeBrowserHeader";
 import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
 import { FilesTab } from "./components/FilesTab";
+import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer } from "./components/FileViewer";
@@ -283,7 +284,7 @@ export default function App() {
   const [homeOpen, setHomeOpen] = useState(false);
   // What the middle pane shows: the agent chat, the project's files, or
   // one settings section (picked from the rail nav — no separate pages).
-  const [mainView, setMainView] = useState<"chat" | "files" | SettingsTab>("chat");
+  const [mainView, setMainView] = useState<"chat" | "files" | "skills" | SettingsTab>("chat");
   const [onboarded, setOnboarded] = useState(() => {
     try {
       return localStorage.getItem(ONBOARDED_KEY) === "1";
@@ -747,7 +748,9 @@ export default function App() {
             onStartTour={startTour}
             onActiveSessionChange={setActiveSessionId}
           >
-            {mainView === "files" ? (
+            {mainView === "skills" ? (
+              <SkillsTab project={projects.find((p) => p.id === projectId) ?? null} />
+            ) : mainView === "files" ? (
               (() => {
                 const project = projects.find((p) => p.id === projectId);
                 return project ? (

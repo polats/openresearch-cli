@@ -1,11 +1,12 @@
 import {
+  Blocks,
   Check,
   ChevronRight,
   Clock,
   CornerDownLeft,
   FolderGit2,
-  Gamepad2,
   FolderOpen,
+  Gamepad2,
   HelpCircle,
   MoreHorizontal,
   PanelLeft,
@@ -1419,8 +1420,8 @@ export function ChatPanel({
   /** Reopen the rail (from the chat header's sidebar icon). */
   onShowRail: () => void;
   /** What the middle pane shows: chat, files, or a settings section. */
-  mainView: "chat" | "files" | SettingsTab;
-  onSelectMainView: (view: "chat" | "files" | SettingsTab) => void;
+  mainView: "chat" | "files" | "skills" | SettingsTab;
+  onSelectMainView: (view: "chat" | "files" | "skills" | SettingsTab) => void;
   /** Whether the right panel is showing (toggled from the chat header). */
   panelOpen: boolean;
   onTogglePanel: () => void;
@@ -1559,9 +1560,11 @@ export function ChatPanel({
   }
   // IME guard: mid-composition text can transiently look like a full command.
   const composingRef = useRef(false);
+  // Refetch when navigating (esp. back to chat after a Skills-tab upload) so
+  // freshly uploaded skills appear in the `/` menu without a reload.
   useEffect(() => {
-    getSkills().then(setSkills).catch(() => {});
-  }, []);
+    getSkills(projectId).then(setSkills).catch(() => {});
+  }, [projectId, mainView]);
   const slashToken =
     !pickedSkill && draft.startsWith("/") && !/\s/.test(draft) ? draft.slice(1) : null;
   const skillMatches =
@@ -2357,6 +2360,13 @@ export function ChatPanel({
         >
           <FolderOpen size={15} />
           Files
+        </button>
+        <button
+          className={`rail-nav-item ${mainView === "skills" ? "active" : ""}`}
+          onClick={() => onSelectMainView("skills")}
+        >
+          <Blocks size={15} />
+          Skills
         </button>
         <button
           className={`rail-nav-item settings-toggle ${inSettings ? "active" : ""}`}

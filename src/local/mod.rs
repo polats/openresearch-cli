@@ -43,6 +43,7 @@ pub mod slurm;
 pub mod ssh;
 pub mod ssh_identity;
 pub mod unirig;
+pub mod user_skills;
 
 use crate::error::{anyhow, Error, Result};
 use crate::store::{now_ms, Store, StoredRun};

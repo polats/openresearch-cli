@@ -157,6 +157,7 @@ const SCREENS = [
   { name: "experiments-table", advisory: true, steps: seq(unhover(), click("Table")) },
 
   { name: "files", steps: click("Files") },
+  { name: "skills", steps: click("Skills") },
   { name: "settings", steps: click("Settings") },
   ...SETTINGS_TABS.map((tab) => ({
     name: `settings-${tab.toLowerCase().replace(/\s+/g, "-")}`,
