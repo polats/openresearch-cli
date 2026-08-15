@@ -1174,6 +1174,11 @@ export const harnessModelLabel = (m: HarnessModel) => m.displayName ?? modelLabe
 export interface OptionChoice {
   id: string;
   label: string;
+  /** Optional explanatory line under the label. Upstream's picker renders it;
+   *  nothing populates it on either side yet (their `with_description` has no
+   *  callers), so it stays optional here rather than becoming a Rust field
+   *  nothing fills. */
+  description?: string;
 }
 
 /**
