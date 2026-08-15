@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { FolderOpen } from "lucide-react";
 import {
   createProject,
   inspectLocalRepo,
+  pickProjectFolder,
   listGithubRepos,
   githubAccount,
   repoAccess,
@@ -517,14 +519,29 @@ export function NewProjectForm({
         <>
           <label>
             <span>Folder on this machine</span>
-            <input
-              autoFocus
-              type="text"
-              placeholder="~/projects/my-game"
-              value={localPath}
-              onChange={(e) => onLocalPathChange(e.target.value)}
-              spellCheck={false}
-            />
+            <div className="path-row">
+              <input
+                autoFocus
+                type="text"
+                placeholder="~/projects/my-game"
+                value={localPath}
+                onChange={(e) => onLocalPathChange(e.target.value)}
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                className="btn"
+                title="Choose a folder"
+                onClick={() => {
+                  // Cancelling resolves to null; leave what they typed alone.
+                  void pickProjectFolder()
+                    .then((picked) => picked && onLocalPathChange(picked))
+                    .catch(() => {});
+                }}
+              >
+                <FolderOpen size={13} /> Browse…
+              </button>
+            </div>
           </label>
           {localPath.trim() !== "" && <LocalRepoHint info={local} checking={localChecking} />}
           {/* Only once something usable was found — naming a project for a

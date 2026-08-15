@@ -28,8 +28,10 @@ import {
 import { ChatPanel } from "./components/ChatPanel";
 import { SubagentTab } from "./components/SubagentTab";
 import { CodeTab } from "./components/CodeTab";
+import type { CodeBrowserView } from "./components/CodeBrowserHeader";
 import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
 import { FilesTab } from "./components/FilesTab";
+import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer } from "./components/FileViewer";
@@ -108,6 +110,8 @@ interface CodeTabDef {
   code: true;
   /** Source to browse: "" = the project clone, else a branch name. */
   sel: string;
+  /** Changes/Files, owned here so it survives the tab being fronted. */
+  view: CodeBrowserView;
   /** Dirs the user flipped away from their depth default. */
   toggled: ReadonlySet<string>;
 }
@@ -280,7 +284,7 @@ export default function App() {
   const [homeOpen, setHomeOpen] = useState(false);
   // What the middle pane shows: the agent chat, the project's files, or
   // one settings section (picked from the rail nav — no separate pages).
-  const [mainView, setMainView] = useState<"chat" | "files" | SettingsTab>("chat");
+  const [mainView, setMainView] = useState<"chat" | "files" | "skills" | SettingsTab>("chat");
   const [onboarded, setOnboarded] = useState(() => {
     try {
       return localStorage.getItem(ONBOARDED_KEY) === "1";
@@ -526,7 +530,7 @@ export default function App() {
   // Functional updater + no deps: a stable identity, so the TreeView cards
   // that receive this don't re-layout on every unrelated tab change.
   const openCodeTabForBranch = useCallback((branch: string) => {
-    const opened: CodeTabDef = { code: true, sel: branch, toggled: new Set<string>() };
+    const opened: CodeTabDef = { code: true, sel: branch, view: "files", toggled: new Set<string>() };
     setCodeTab((prev) => (prev ? { ...prev, sel: branch } : opened));
     // rightTab only discriminates on the `code` flag — the pane body always
     // renders the live `codeTab` state, so this value's other fields are
@@ -744,7 +748,9 @@ export default function App() {
             onStartTour={startTour}
             onActiveSessionChange={setActiveSessionId}
           >
-            {mainView === "files" ? (
+            {mainView === "skills" ? (
+              <SkillsTab project={projects.find((p) => p.id === projectId) ?? null} />
+            ) : mainView === "files" ? (
               (() => {
                 const project = projects.find((p) => p.id === projectId);
                 return project ? (
@@ -989,17 +995,24 @@ export default function App() {
           ) : codeTabActive ? (
             <div className="tab-body">
               {projectId && activeProject && codeTab && (
-                <CodeTab
-                  key="code"
-                  projectId={projectId}
-                  project={activeProject}
-                  experiments={experiments}
-                  sel={codeTab.sel}
-                  toggled={codeTab.toggled}
-                  onSelChange={(sel) => updateCodeTab({ sel })}
-                  onToggledChange={(toggled) => updateCodeTab({ toggled })}
-                  onOpenFile={openFileTab}
-                />
+                (() => {
+                  // Our tab is branch-scoped; upstream's CodeTab is
+                  // experiment-scoped, so resolve the branch to its experiment.
+                  const codeExp = experiments.find((e) => e.branchName === codeTab.sel);
+                  return codeExp ? (
+                    <CodeTab
+                      key="code"
+                      projectId={projectId}
+                      project={activeProject}
+                      experiment={codeExp}
+                      view={codeTab.view}
+                      toggled={codeTab.toggled}
+                      onViewChange={(view) => updateCodeTab({ view })}
+                      onToggledChange={(toggled) => updateCodeTab({ toggled })}
+                      onOpenFile={openFileTab}
+                    />
+                  ) : null;
+                })()
               )}
             </div>
           ) : worktreeTabActive ? (
@@ -1010,7 +1023,7 @@ export default function App() {
                   // subscription, and request-id guard must not carry over.
                   key={`wt:${worktreeTab.sessionId}`}
                   sessionId={worktreeTab.sessionId}
-                  projectId={projectId}
+                  project={activeProject!}
                   view={worktreeTab.view}
                   toggled={worktreeTab.toggled}
                   onViewChange={(view) => updateWorktreeTab({ view })}

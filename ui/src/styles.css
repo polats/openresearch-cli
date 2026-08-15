@@ -1440,6 +1440,24 @@ textarea::placeholder {
 }
 /* Messages parked while a turn is running (mid-run steering). Each chip is
    cancellable until the turn ends and the queue drains. */
+/* Path input paired with the native folder picker. */
+.path-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.path-row input {
+  flex: 1;
+  min-width: 0;
+}
+.path-row .btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
 .composer-queued {
   display: flex;
   flex-direction: column;
@@ -2009,50 +2027,7 @@ textarea::placeholder {
 }
 .run-sq.other {
   border: 1.5px solid var(--border);
-}
-
-/* Hover detail card for tree nodes. Portaled to <body> at a fixed viewport
- * position (outside the canvas transform), so it neither scales with zoom nor
- * disturbs the tree layout. */
-.exp-hover-card {
-  position: fixed;
-  /* Must clear the maximized right pane (.right-pane.max, z 60) that
-   * hosts the tree; the portal's end-of-body DOM order breaks the tie in the
-   * card's favor. Still below the modal tier (100). */
-  z-index: 60;
-  background: var(--base);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
-  padding: 14px 16px;
-  font-size: var(--fs-sm);
-  color: var(--text);
-}
-/* Scoped mono: font family only, so the row's own size scale wins (the global
- * .mono class pins font-size and would break the 10px foot row). */
-.exp-hover-card .hc-mono {
-  font-family: var(--mono);
-}
-.exp-hover-card .hc-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-.exp-hover-card .hc-slug {
-  font-family: var(--mono);
-  font-size: var(--fs-md);
-  font-weight: var(--fw-semibold);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.exp-hover-card .hc-title {
-  margin-top: 3px;
-  color: var(--text);
-}
-/* Plain text between hairline rules — no fill, matching the app's quiet
+}/* Plain text between hairline rules — no fill, matching the app's quiet
  * hairline idiom (a recessed box read as a heavy slab on long results). */
 .exp-hover-card .hc-body {
   margin-top: 10px;
@@ -2075,81 +2050,7 @@ textarea::placeholder {
   overflow-y: auto;
   /* Breathing room so mid-scroll text doesn't sit flush on the next rule. */
   padding-bottom: 4px;
-}
-.exp-hover-card .hc-toggle {
-  margin-top: 4px;
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-medium);
-  color: var(--muted);
-}
-/* Quiet muted→text affordance (no underline/accent — deliberate: the card
- * is all hairlines and an accent link would be its loudest element). */
-.exp-hover-card .hc-toggle:hover {
-  color: var(--text);
-}
-.exp-hover-card .hc-failure {
-  margin-top: 8px;
-  color: var(--accent-red);
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.exp-hover-card .hc-stats {
-  margin-top: 10px;
-  border-top: 1px solid var(--border-variant);
-  padding-top: 10px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  font-size: var(--fs-xs);
-  color: var(--text);
-}
-.exp-hover-card .hc-git {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-variant);
-  font-size: var(--fs-xs);
-  color: var(--text);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.exp-hover-card .hc-git-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  min-width: 0;
-}
-.exp-hover-card .hc-branch {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-family: var(--mono);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.exp-hover-card .hc-foot {
-  margin-top: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: var(--fs-2xs);
-  color: var(--muted);
-}
-.exp-hover-card .hc-foot .hc-mono {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.react-flow__handle {
+}.react-flow__handle {
   opacity: 0;
   pointer-events: none;
 }
@@ -2704,26 +2605,7 @@ textarea::placeholder {
   font-weight: var(--fw-semibold);
   line-height: 1.5;
   color: var(--text);
-}
-.onb-token-form {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
-}
-.onb-token-form input {
-  flex: 1;
-  min-width: 220px;
-  font-family: var(--mono);
-  font-size: var(--fs-sm);
-}
-.onb-token-form a {
-  font-size: var(--fs-sm);
-  color: var(--subtext);
-  white-space: nowrap;
-}
-.onb-token-form .error {
+}.onb-token-form .error {
   flex-basis: 100%;
   color: var(--accent-red);
   font-size: var(--fs-md);
@@ -3418,44 +3300,7 @@ a.files-pill:hover {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--base);
-}
-/* The header owns the card's rounded top outline (overlaid on the card
-   border via -1px margins) so it still looks like a rounded card top while
-   stuck — the card's own border scrolls away with the card. Painted via two
-   layered pseudo-elements because negative-z children cover the element's own
-   background/border: a square white mask below (hides code scrolling past the
-   corner notches), the rounded bordered surface above it, text on top. */
-.diff-file-header {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin: -1px -1px 0;
-  width: calc(100% + 2px);
-  text-align: left;
-  padding: 8px 12px;
-  cursor: pointer;
-}
-.diff-file-header::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -2;
-  background: var(--base);
-}
-.diff-file-header::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background: var(--canvas);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-}
-.diff-file-header .chev {
+}.diff-file-header .chev {
   color: var(--muted);
   font-size: var(--fs-2xs);
   flex-shrink: 0;
@@ -3478,24 +3323,7 @@ a.files-pill:hover {
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
   color: var(--text);
-}
-.diff-file-header .stats {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  font-family: var(--mono);
-  font-size: var(--fs-2xs);
-  font-weight: var(--fw-medium);
-  font-variant-numeric: tabular-nums;
-}
-.diff-stat-add {
-  color: var(--accent-green);
-}
-.diff-stat-del {
-  color: var(--accent-red);
-}
-.diff-empty {
+}.diff-empty {
   padding: 8px 12px;
   color: var(--muted);
   font-size: var(--fs-md);
@@ -4710,24 +4538,7 @@ a.files-pill:hover {
   display: inline-flex;
   align-items: center;
   margin-right: 8px;
-}
-.context-meter-menu {
-  width: 280px;
-  padding: 10px 12px 12px;
-}
-.context-meter-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 12px;
-  font-size: var(--fs-sm);
-  color: var(--muted);
-}
-.context-meter-value {
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-.context-meter-menu .progress {
+}.context-meter-menu .progress {
   margin: 8px 0 0;
 }
 .context-meter-menu .progress-track {
@@ -4853,25 +4664,7 @@ a.files-pill:hover {
 }
 .model-locked-note svg {
   flex-shrink: 0;
-}
-
-/* ---- composer slash-skill menu ---- */
-
-.skill-menu {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 0;
-  min-width: 340px;
-  max-width: 100%;
-  padding: 6px;
-  background: var(--base);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
-  z-index: 50;
-  overflow: hidden;
-}
-.skill-item {
+}.skill-item {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -4984,45 +4777,7 @@ a.files-pill:hover {
   min-height: 0;
   overflow: auto;
   background: var(--base);
-}
-/* Gutter + code share one row so line numbers track content rows 1:1 — the
-   code never soft-wraps (min-width: max-content), so line N is row N. */
-.file-view-codewrap {
-  display: flex;
-  align-items: flex-start;
-  min-width: max-content;
-}
-/* Identical font metrics + vertical padding are the 1:1 row-alignment
-   invariant — one rule so they can't drift apart. */
-.file-view-gutter,
-.file-view-code {
-  margin: 0;
-  padding-top: 14px;
-  padding-bottom: 14px;
-  font-family: var(--mono);
-  font-size: var(--fs-sm);
-  line-height: 1.55;
-}
-.file-view-gutter {
-  padding-left: 14px;
-  padding-right: 10px;
-  text-align: right;
-  color: var(--muted);
-  user-select: none;
-  /* Stay visible while the code scrolls horizontally. */
-  position: sticky;
-  left: 0;
-  background: var(--base);
-  border-right: 1px solid var(--border-variant);
-  flex-shrink: 0;
-}
-.file-view-code {
-  padding-left: 16px;
-  padding-right: 16px;
-  tab-size: 4;
-  min-width: max-content;
-}
-.file-view-note {
+}.file-view-note {
   padding: 10px 16px;
   font-size: var(--fs-sm);
   color: var(--muted);
@@ -5468,17 +5223,7 @@ a.files-pill:hover {
   padding: 4px 12px;
   border-bottom: 1px solid var(--border-variant);
   flex-shrink: 0;
-}
-.code-tab-select {
-  max-width: 280px;
-  min-width: 0;
-  /* Compact metrics so the header's height matches .file-view-header's
-   * (whose tallest child is a 28px icon-btn) — the base select rule's
-   * 6px/14px would make Code <-> file tab switches jump the divider. */
-  padding: 3px 8px;
-  font-size: var(--fs-sm);
-}
-.code-tab-note {
+}.code-tab-note {
   padding: 8px 16px;
   font-size: var(--fs-sm);
   color: var(--muted);
@@ -5494,38 +5239,9 @@ a.files-pill:hover {
 .code-tree {
   padding: 6px 0;
   font-size: var(--fs-md);
-}
-.code-tree-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 3px 10px;
-  border: none;
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: inherit;
-}
-.code-tree-row:hover {
-  background: var(--panel);
-}
-.code-tree-row > svg {
-  flex-shrink: 0;
-  color: var(--subtext);
-}
-.code-tree-row > svg.code-tree-chev {
+}.code-tree-row > svg.code-tree-chev {
   color: var(--muted);
-}
-.code-tree-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ---- live worktree tab (WorktreeTab.tsx) ----
+}/* ---- live worktree tab (WorktreeTab.tsx) ----
    The Changes/Files viewer for a chat session's private worktree. Reuses the
    .code-tab shell; adds a branch chip, a status-badged change list, and a diff
    region below it. */
@@ -5548,12 +5264,7 @@ a.files-pill:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--mono);
-}
-.wt-count {
-  padding: 0;
-  border: none;
-}
-/* Same horizontal gutter as .drawer-body so the diff cards match the
+}/* Same horizontal gutter as .drawer-body so the diff cards match the
  * experiment Changes view; no padding-top for the same reason there — sticky
  * diff-file headers would sit below the top with content peeking through.
  * The first child carries the spacing as margin instead. */
@@ -5562,26 +5273,7 @@ a.files-pill:hover {
 }
 .wt-changes > :first-child {
   margin-top: 14px;
-}
-.wt-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 48px 24px;
-  text-align: center;
-  color: var(--muted);
-}
-.wt-empty > svg {
-  color: var(--subtext);
-}
-.wt-empty p {
-  margin: 0;
-  max-width: 320px;
-  font-size: var(--fs-sm);
-}
-
-/* ---- onboarding tour ----
+}/* ---- onboarding tour ----
    Spotlight walkthrough of the workspace (Tour.tsx). The overlay sits above
    the z-100 modal ladder; the dim is a single oversized box-shadow around the
    spotlight box so there's only one element to morph between steps. */

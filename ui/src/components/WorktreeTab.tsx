@@ -1,14 +1,12 @@
-// The live view of a chat session's private worktree — what the agent is
-// changing right now, before any run/commit exists (the Code tab is
-// committed-state only). Two segmented views, both bound to the session the tab
-// was opened from:
+// The pinned Files home for the active chat session's private worktree — what
+// the agent is changing right now, before any run/commit exists. The Code tab
+// remains committed-state only.
 //
-//   Changes (default): the unified diff vs the baseline merge-base, untracked
+//   Files (default): the full live worktree tree.
+//   Changes: the unified diff vs the baseline merge-base, untracked
 //     files included as new-file chunks — the same per-file-card rendering as
 //     the experiment Changes view (the header's file count comes from a
 //     separate git pass, so it stays truthful even when the diff truncates).
-//   Files: the full live worktree tree (CodeTab's shared components), clicks
-//     opening the existing FileViewer against this session's worktree.
 //
 // Freshness without idle churn: poll every 5 s only while the session is busy
 // (chat.busy SSE), refresh once on the busy→idle edge, and a manual refresh
@@ -16,36 +14,38 @@
 // commits) keep the last-good data with a small "refresh failed" note, mirroring
 // CodeTab's staleness handling.
 
-import { FolderGit2, GitBranch, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getCodeTree,
   getSessionWorktree,
+  githubBranchUrl,
   listChatSessions,
   type CodeTree,
+  type Project,
   type SessionWorktree,
 } from "../api";
 import { onChatEvent } from "../events";
+import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
 import { buildTree, TreeLevel } from "./codeTree";
-import { GitDiff, TruncatedDiffNotice } from "./GitDiff";
+import { GitDiffExplorer, TruncatedDiffNotice } from "./GitDiff";
+import { CODE_TAB_BODY_CLASS_NAME, CODE_TAB_NOTE_CLASS_NAME } from "../styleClasses";
 
-/** Poll cadence while the session's agent is working (matches the working-tree
- * poll in DetailDrawer). */
+/** Poll cadence while the session's agent is working. */
 const POLL_MS = 5000;
 
-export type WorktreeView = "changes" | "files";
+export type WorktreeView = CodeBrowserView;
 
 export function WorktreeTab({
   sessionId,
-  projectId,
+  project,
   view,
   toggled,
   onViewChange,
   onToggledChange,
   onOpenFile,
 }: {
-  sessionId: string;
-  projectId: string;
+  sessionId?: string;
+  project: Project;
   /** Which segmented view is showing (lives on the tab def, so it survives the
    * unmount/remount when another right-pane tab fronts this one). */
   view: WorktreeView;
@@ -54,8 +54,9 @@ export function WorktreeTab({
   onViewChange: (view: WorktreeView) => void;
   onToggledChange: (toggled: ReadonlySet<string>) => void;
   /** Open a file in the right pane's FileViewer, keyed to this worktree. */
-  onOpenFile: (path: string, sessionId: string) => void;
+  onOpenFile: (path: string, sessionId?: string, ref?: string) => void;
 }) {
+  const projectId = project.id;
   const [wt, setWt] = useState<SessionWorktree | null>(null);
   const [tree, setTree] = useState<CodeTree | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -67,9 +68,15 @@ export function WorktreeTab({
   const load = useCallback(() => {
     const id = ++reqId.current;
     setLoading(true);
-    // Both fetches run every load: the Changes list and the Files tree share
-    // one refresh so switching views never shows a stale half.
-    Promise.all([getSessionWorktree(sessionId), getCodeTree(projectId, { sessionId })])
+    const request = async (): Promise<[SessionWorktree | null, CodeTree]> => {
+      if (!sessionId) {
+        return [null, await getCodeTree(projectId, { ref: project.baselineBranch })];
+      }
+      const worktree = await getSessionWorktree(sessionId);
+      const source = worktree.exists ? { sessionId } : { ref: project.baselineBranch };
+      return [worktree, await getCodeTree(projectId, source)];
+    };
+    request()
       .then(([w, t]) => {
         if (id !== reqId.current) return;
         setWt(w);
@@ -85,7 +92,7 @@ export function WorktreeTab({
       .finally(() => {
         if (id === reqId.current) setLoading(false);
       });
-  }, [sessionId, projectId]);
+  }, [sessionId, projectId, project.baselineBranch]);
 
   // Fetch on mount and whenever the bound session changes; the cleanup bump
   // invalidates in-flight responses on session change and unmount.
@@ -104,6 +111,7 @@ export function WorktreeTab({
   // worktrees don't move, which is what made the original always-on session
   // mode wasteful.
   useEffect(() => {
+    if (!sessionId) return;
     let busy = false;
     // Once any edge arrives for this session it supersedes the mount-time
     // snapshot below (which may resolve later, out of date).
@@ -149,7 +157,6 @@ export function WorktreeTab({
       off();
       stop();
     };
-    // load is memoized on [sessionId, projectId], which the closure also reads.
   }, [sessionId, projectId, load]);
 
   const filesTree = useMemo(() => (tree ? buildTree(tree.entries) : null), [tree]);
@@ -164,81 +171,79 @@ export function WorktreeTab({
     [toggled, onToggledChange],
   );
 
-  const branchChip =
-    wt?.branch ?? (wt?.baselineBranch ? `detached @ ${wt.baselineBranch}` : "detached");
-  const fileCount = wt?.files?.length ?? 0;
+  const liveWorktree = sessionId && wt?.exists ? wt : null;
+  const checkedOut =
+    liveWorktree?.branch ??
+    (liveWorktree?.baselineBranch ? `detached @ ${liveWorktree.baselineBranch}` : "detached");
+  const fileCount = liveWorktree?.files?.length ?? 0;
+  const branchChip = liveWorktree
+    ? `Current worktree · ${checkedOut}${fileCount > 0 ? "*" : ""}`
+    : `Default branch · ${project.baselineBranch}`;
+  const githubBranch = liveWorktree ? liveWorktree.branch : project.baselineBranch;
 
   return (
-    <div className="code-tab wt-tab">
-      <div className="code-tab-header">
-        <div className="seg">
-          <button className={view === "changes" ? "active" : ""} onClick={() => onViewChange("changes")}>
-            Changes
-          </button>
-          <button className={view === "files" ? "active" : ""} onClick={() => onViewChange("files")}>
-            Files
-          </button>
+    <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
+      <CodeBrowserHeader
+        view={liveWorktree ? view : "files"}
+        onViewChange={onViewChange}
+        showViewToggle={Boolean(liveWorktree)}
+        branchLabel={branchChip}
+        branchTitle={branchChip}
+        githubHref={
+          Boolean(project.githubOwner && project.githubRepo) && githubBranch
+            ? githubBranchUrl(project.githubOwner, project.githubRepo, githubBranch)
+            : undefined
+        }
+        githubTitle={githubBranch ? `Open ${githubBranch} on GitHub` : undefined}
+        refreshing={loading}
+        onRefresh={load}
+      />
+      {error && (wt || tree) && <div className={CODE_TAB_NOTE_CLASS_NAME}>Refresh failed: {error}</div>}
+      {!tree || (sessionId && !wt) ? (
+        <div className={CODE_TAB_BODY_CLASS_NAME}>
+          <div className={CODE_TAB_NOTE_CLASS_NAME}>{error ? `Failed to load: ${error}` : "Loading…"}</div>
         </div>
-        {wt?.exists && (
-          <span className="wt-branch-chip" title={branchChip}>
-            <GitBranch size={12} />
-            <span className="wt-branch-name">{branchChip}</span>
-          </span>
-        )}
-        {wt?.exists && view === "changes" && (
-          <span className="code-tab-note wt-count">
-            {fileCount} {fileCount === 1 ? "file" : "files"}
-          </span>
-        )}
-        <span style={{ flex: 1 }} />
-        <button className="icon-btn" title="Refresh" aria-label="Refresh" onClick={load}>
-          {loading ? <span className="spinner" /> : <RotateCw size={13} />}
-        </button>
-      </div>
-      {error && (wt || tree) && <div className="code-tab-note">Refresh failed: {error}</div>}
-      {!wt ? (
-        <div className="code-tab-body">
-          <div className="code-tab-note">{error ? `Failed to load: ${error}` : "Loading…"}</div>
-        </div>
-      ) : !wt.exists ? (
-        <div className="code-tab-body">
-          <div className="wt-empty">
-            <FolderGit2 size={22} />
-            <p>The agent hasn't started working yet — its worktree is created on the first message.</p>
-          </div>
-        </div>
-      ) : view === "changes" ? (
-        <div className="code-tab-body wt-changes">
-          {fileCount === 0 || !wt.diff ? (
-            <div className="changes-note">No changes yet.</div>
+      ) : liveWorktree && view === "changes" ? (
+        <div className={`${CODE_TAB_BODY_CLASS_NAME} wt-changes pt-0 px-4 pb-6 [&_>_:first-child]:mt-3.5`}>
+          {fileCount === 0 || !liveWorktree.diff ? (
+            <div className="changes-note text-sm text-muted">No changes yet.</div>
           ) : (
             <>
-              {wt.diff.truncated && (
-                <TruncatedDiffNotice bytesRead={wt.diff.bytesRead} byteLimit={wt.diff.byteLimit} />
+              {liveWorktree.diff.truncated && (
+                <TruncatedDiffNotice
+                  bytesRead={liveWorktree.diff.bytesRead}
+                  byteLimit={liveWorktree.diff.byteLimit}
+                />
               )}
-              <GitDiff diff={wt.diff.diff} />
+              <GitDiffExplorer
+                diff={liveWorktree.diff.diff}
+                partial={liveWorktree.diff.truncated}
+              />
             </>
           )}
         </div>
       ) : (
-        <div className="code-tab-body">
-          {tree?.root === "clone" && (
-            <div className="code-tab-note">Worktree unavailable — showing the project clone.</div>
+        <div className={CODE_TAB_BODY_CLASS_NAME}>
+          {tree.truncated && (
+            <div className={CODE_TAB_NOTE_CLASS_NAME}>Listing truncated.</div>
           )}
-          {tree?.truncated && <div className="code-tab-note">listing truncated</div>}
           {!filesTree ? (
-            <div className="code-tab-note">Loading…</div>
+            <div className={CODE_TAB_NOTE_CLASS_NAME}>Loading…</div>
           ) : filesTree.dirs.size === 0 && filesTree.files.length === 0 ? (
-            <div className="code-tab-note">No files.</div>
+            <div className={CODE_TAB_NOTE_CLASS_NAME}>No files.</div>
           ) : (
-            <div className="code-tree">
+            <div className="file-tree py-1.5 px-0 text-md">
               <TreeLevel
                 node={filesTree}
                 parentPath=""
                 depth={0}
                 toggled={toggled}
                 onToggle={toggle}
-                onOpenFile={(path) => onOpenFile(path, sessionId)}
+                onOpenFile={(path) =>
+                  liveWorktree
+                    ? onOpenFile(path, sessionId)
+                    : onOpenFile(path, undefined, project.baselineBranch)
+                }
               />
             </div>
           )}

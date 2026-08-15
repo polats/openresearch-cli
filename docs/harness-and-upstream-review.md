@@ -8,6 +8,10 @@ The conclusion is mostly **don't**. This document records the evidence so the
 question doesn't get re-opened from scratch, and so the one decision that *is*
 live — whether we keep tracking upstream — gets made with numbers attached.
 
+**If you are about to merge from upstream, read
+[the merge playbook](./upstream-merge-playbook.md) first** — it is the operating
+guide distilled from this research.
+
 Companions: [scenario integration spec](./scenario-integration-spec.md),
 [idea pipeline orchestration](./idea-pipeline-orchestration-plan.md).
 
@@ -286,6 +290,7 @@ our size.
 | Cherry-pick 3 upstream fixes | ~85% | Medium — fixes bugs we plausibly have | **Done** (§6) |
 | Tailwind port | ~70% | Zero on its own; option value on everything upstream | **Next** — gating, per §5 |
 | Full tranche-5 (8 commits) | ~60% | Low-medium | **After the port**, in upstream order |
+| Tier 2 of the port | ~65% | High — unblocks the UI half | Per file, 3–4 days, with `api.ts` frozen — see §5 |
 | Flush skip-if-unchanged | ~90% | Low, but ~2 hours | If chats feel sluggish |
 | Approval outcome type | ~90% | **Near zero on its own** | Only as part of Pi |
 | Pi harness | ~40% at 1–2 weeks | **Unclear** | No, absent a driver |
@@ -327,6 +332,128 @@ Sequence from here:
    projects — one of the two has to give.
 4. Everything else (Pi, the approval type, the event log) still waits for a
    concrete trigger. This decision does not change their scoring.
+
+### Tier 2: freeze `api.ts`
+
+**This supersedes the section below, which drew the wrong conclusion from the
+same evidence.** Tier 2 is per-file after all. The rule that makes it so:
+
+> `ui/src/api.ts` is our contract of record and **does not move**. Any upstream
+> UI referencing a symbol or field it doesn't have is UI for a backend commit we
+> haven't merged. Rewrite the reference to our spelling, or delete that feature.
+> Never widen `api.ts` to make it compile.
+
+Merging `api.ts` is what turned this into a cascade: it broke `App`, `ChatPanel`
+and `DetailDrawer` at once, and — the real cost — removed the only check that was
+catching the problem. With `api.ts` frozen, `tsc` names every offending line, and
+a green build is evidence that no unmerged-backend UI slipped through. Widen the
+contract and the compiler stops being able to tell you.
+
+The hazards in `SettingsPage` are **renames, not missing features**, so each is a
+one-token edit:
+
+| upstream | ours | sites |
+|---|---|---|
+| `toolsFound` | `gitFound` | 4 |
+| `configuredDefaultBackend` | `defaultBackend` | 1 |
+| `enabled` (on `ComputeTargetSummary`) | `configured` | 7 |
+
+Two things genuinely can't be taken and must keep our version: components backed
+by endpoints we don't serve (`ProjectDefaultsTab`, upstream's rewritten `GitTab`
+— see the endpoint note below), and components upstream restructured where our
+shape differs (`InstancesTab`, which upstream split into `ComputeActivity` +
+`InstancesTable` + `InstanceHistory`). Both surface as `tsc` errors; neither
+needs predicting in advance.
+
+**Do not build tooling for this.** I wrote a preflight to predict the keep-ours
+list and a companion to swap components, and put the same brace-matching bug in
+both three times — an apostrophe inside a comment swallowed the rest of the file,
+and the fix for that made it skip components instead. Each version printed a
+confident, wrong list. `tsc` already answers the question exactly, for free, and
+cannot silently under-report the way a hand-rolled parser can.
+
+**Revised estimate:** back to roughly the original 3–4 days, per file, resumable
+between files. The 8–10 day figure below assumed the cascade was inherent; it was
+self-inflicted.
+
+### What the rest of tier 2 is actually blocked on
+
+Five files converted this way (`SettingsPage`, `GitDiff`-era batch, `BackendLogos`,
+`Wordmark`, `Tour`). Then every remaining file hit the same wall, and it is not a
+merging problem — it is three specific unmerged commits:
+
+| Missing symbol | Blocks | Comes from |
+|---|---|---|
+| `githubEnabled`, `cloneUrl` | `CodeTab`, `NewProjectForm` | `6e4f998` OR-131 make local file projects the default |
+| `getExperimentDiff`, `DiffPayload` | `BranchChanges`, `WorktreeTab`, `TreeView` | `3cb782e` Redesign experiment navigation and code views |
+| `AgentSelection`, `OptionChoice.description` | `ModelPicker`, `ChatPanel` | `68f1daf` OR-154 Clean up onboarding |
+
+`SettingsPage` was tractable because its hazards were *renames* of things we
+already had. These are genuinely new contract, so there is nothing to rewrite
+them to.
+
+Note what that table says about the plan. `68f1daf` is on the **skip list** —
+upstream's researcher onboarding. `6e4f998` is the **judgement call** from §1,
+where upstream does the same job as our `3cf8913`. So the remainder of the port is
+gated on two decisions we already knew were open, plus one ordinary merge:
+
+1. **`3cb782e`** — the code-view redesign. Ordinary; take it, and `CodeTab`,
+   `WorktreeTab`, `BranchChanges` and `TreeView` unblock together.
+2. **`6e4f998` vs our `3cf8913`** — one has to give. Until it's settled,
+   `CodeTab` and `NewProjectForm` stay ours.
+3. **`68f1daf`** — we skipped it for the onboarding, but `AgentSelection` rides
+   along with it, and that gates the whole `ChatPanel` cluster (`ChatPanel`, `Md`,
+   `ModelPicker`, `PlanStrip`, `SubagentTab`, `DetailDrawer`). Either cherry-pick
+   the type without the onboarding, or the cluster stays unported.
+
+**This is the useful revision:** the rest of tier 2 is not days of grinding, it is
+those three decisions. Grinding harder on the merge would not have found it —
+`tsc` did, because `api.ts` stayed frozen.
+
+### Superseded: "tier 2 is one operation"
+
+Established by attempting it and backing out (14 Aug). The tier-1 shape — take a
+file, re-apply our diff, verify, commit — **does not carry over**, because the
+tier-2 files are joined by contracts rather than merely sitting near each other.
+
+The tool for the re-apply is settled and it works: `git merge-file` with the
+merge-base as ancestor. `SettingsPage` came out at 19 conflicts / 373 lines from
+a 3342-line file, `api.ts` at 5 conflicts / 192 lines. Hand re-application would
+have been far worse. That is not the problem.
+
+The problem is the dependency shape:
+
+- **`SettingsPage` cannot move without `api.ts`.** Upstream's version reads
+  fields ours doesn't declare — `toolsFound` on the SSH/Slurm preflights,
+  `projectId`, `enabled` on `ComputeTargetSummary`.
+- **`api.ts` cannot move alone.** Merging it immediately broke `App`,
+  `ChatPanel`, and `DetailDrawer`: upstream restructured the file-access
+  functions, so `getFiles`, `ProjectFiles`, `fileUrl`, `getCommitDiff`, and
+  `getWorkingTree` vanish from under three consumers we have not converted.
+- **`TreeView` cannot move without `CodeTab`**, which is itself deferred: its
+  converted version imports `type CodeView` from it, and our `CodeTab` does not
+  export that type. Note the dependency scan reports `TreeView` as clean —
+  the file exists, only the *export* is missing. File-existence checks are
+  necessary, not sufficient.
+
+So tier 2 is `api.ts` plus every consumer, in one branch, landing together:
+`SettingsPage`, `ChatPanel`, `App`, `DetailDrawer`, `TreeView`, `CodeTab`,
+`WorktreeTab`, plus the three deferred from tier 1 (`Header`, `SubagentTab`,
+`PlanStrip`) and the two components the code browser needs (`BranchChanges`,
+`CodeBrowserHeader`). Fold `055e6bf` into it rather than sequencing around it —
+`PlanStrip`'s `"bypassPermissions"`/`"bypass"` mismatch is the same problem it
+fixes.
+
+**Upstream's settings also carry features our server does not implement.** The
+merge pulled in a `ProjectDefaultsTab` and a rewritten `GitTab` calling
+`/api/settings/projects`, project git status, and GitHub enable/disable; upstream's
+`api.ts` adds 11 endpoints we have no handler for. Those must be dropped on the
+way through, not adopted — a UI that typechecks against a missing endpoint fails
+at runtime, where neither tsc nor the screenshots will catch it.
+
+**Estimate:** the 3–4 days in §4's table was per-file thinking. As one atomic
+operation with a server-contract review inside it, budget closer to 8–10 days,
+and do it on a branch that can be abandoned.
 
 ---
 

@@ -12,7 +12,7 @@ const STARS: [number, number, number][] = [
 
 export function Wordmark() {
   return (
-    <span className="wordmark">
+    <span className="wordmark inline-flex items-center gap-[0.4em] text-text [&_svg]:w-[1em] [&_svg]:h-[1em] [&_svg]:shrink-0">
       <svg viewBox="0 0 100 100" aria-hidden="true">
         <rect width="100" height="100" rx="24" fill="var(--primary)" />
         {/* the cross, drawn faintly through the stars */}

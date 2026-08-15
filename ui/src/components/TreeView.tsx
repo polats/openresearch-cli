@@ -301,6 +301,10 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           latestRun={latestRun}
           parentSlug={parentSlug}
           anchor={hover.rect}
+          // Upstream's card gained a "code" button. Ours opens the code browser
+          // per branch rather than per experiment, so route it the same way the
+          // node's own button does.
+          onOpenCode={() => onOpenCodeBranch(exp.branchName)}
           onMouseEnter={hover.keepOpen}
           onMouseLeave={hover.onMouseLeave}
         />

@@ -327,6 +327,7 @@ fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/local-repo", get(local_repo))
+        .route("/api/project-path/pick", post(pick_project_folder))
         .route(
             "/api/projects/{id}",
             get(get_project)
@@ -373,6 +374,7 @@ fn router(state: AppState) -> Router {
         .route("/api/experiments/{id}/verdict", post(set_exp_verdict))
         .route("/api/runs/{id}/log", get(run_log))
         .route("/api/runs/{id}/diff", get(run_diff))
+        .route("/api/experiments/{id}/diff", get(experiment_diff))
         .route("/api/experiments/{id}/commits", get(experiment_commits))
         .route(
             "/api/experiments/{id}/commits/{sha}/diff",
@@ -459,6 +461,14 @@ fn router(state: AppState) -> Router {
         .route("/api/skills", get(list_skills))
         .route("/api/personas", get(list_personas))
         .route("/api/github/repos", get(list_github_repos))
+        .route(
+            "/api/user-skills",
+            get(list_user_skills)
+                .post(upload_user_skill)
+                .delete(delete_user_skill),
+        )
+        .route("/api/user-skills/import", post(import_user_skill))
+        .route("/api/harness-skills", get(list_harness_skills))
         .route(
             "/api/chat/sessions",
             get(list_chat_sessions).post(create_chat_session),
@@ -616,18 +626,44 @@ async fn health() -> Json<Value> {
     Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
 }
 
-/// Slash-skills the composer's `/` dropdown offers (expanded server-side).
-async fn list_skills() -> Json<Value> {
-    let skills: Vec<Value> = crate::local::skills::CATALOG
+#[derive(Deserialize)]
+struct SkillsQ {
+    /// Include the project's own uploaded skills (plus globals) in the menu.
+    project: Option<String>,
+}
+
+/// Slash-skills the composer's `/` dropdown offers (expanded server-side): the
+/// built-in catalog plus any user-uploaded skills that apply (globals, and the
+/// named project's own).
+async fn list_skills(Query(q): Query<SkillsQ>) -> Json<Value> {
+    let mut skills: Vec<Value> = crate::local::skills::CATALOG
         .iter()
         .map(|s| {
             json!({
                 "name": s.name,
                 "description": s.description,
                 "argHint": s.arg_hint,
+                "source": "builtin",
             })
         })
         .collect();
+    // One `/name` per skill: a project skill shadows a same-named global
+    // (list_for_project returns globals first, then the project's own).
+    let mut user: Vec<crate::local::user_skills::UserSkill> = Vec::new();
+    for s in crate::local::user_skills::list_for_project(q.project.as_deref()) {
+        match user.iter_mut().find(|e| e.name == s.name) {
+            Some(existing) => *existing = s,
+            None => user.push(s),
+        }
+    }
+    for s in user {
+        skills.push(json!({
+            "name": s.name,
+            "description": s.description,
+            "argHint": "",
+            "source": "user",
+        }));
+    }
     Json(json!({ "skills": skills }))
 }
 
@@ -650,6 +686,144 @@ async fn list_project_branches(Path(id): Path<String>) -> ApiResult {
     .map_err(bad_request)?;
     let (branches, baseline) = result;
     Ok(Json(json!({ "branches": branches, "baseline": baseline })))
+}
+
+// --- user-uploaded skills -----------------------------------------------------
+
+fn parse_scope(scope: &str) -> std::result::Result<crate::local::user_skills::Scope, ApiError> {
+    match scope {
+        "global" => Ok(crate::local::user_skills::Scope::Global),
+        "project" => Ok(crate::local::user_skills::Scope::Project),
+        other => Err(bad_request(format!("unknown scope `{other}`"))),
+    }
+}
+
+fn user_skill_json(s: &crate::local::user_skills::UserSkill) -> Value {
+    json!({
+        "name": s.name,
+        "description": s.description,
+        "scope": s.scope,
+        "bytes": s.bytes,
+        "updatedAt": s.updated_at,
+    })
+}
+
+/// Resolve the target scope and validate the project exists for project scope.
+fn resolve_skill_scope(
+    scope: crate::local::user_skills::Scope,
+    project_id: Option<&str>,
+) -> std::result::Result<Option<String>, ApiError> {
+    match scope {
+        crate::local::user_skills::Scope::Global => Ok(None),
+        crate::local::user_skills::Scope::Project => {
+            let id = project_id
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| bad_request("project scope requires a projectId"))?;
+            Store::open()?
+                .get_local_project(id)?
+                .ok_or_else(|| not_found("project"))?;
+            Ok(Some(id.to_string()))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct UserSkillsListQ {
+    project: Option<String>,
+}
+
+/// Both scopes for the Skills tab: globals plus the project's own.
+async fn list_user_skills(Query(q): Query<UserSkillsListQ>) -> ApiResult {
+    let skills: Vec<Value> = crate::local::user_skills::list_for_project(q.project.as_deref())
+        .iter()
+        .map(user_skill_json)
+        .collect();
+    Ok(Json(json!({ "skills": skills })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadSkillReq {
+    scope: String,
+    project_id: Option<String>,
+    /// Original upload filename — its extension picks `.zip` vs single file.
+    filename: String,
+    /// The file bytes, base64 (same convention as chat attachments).
+    content_base64: String,
+}
+
+async fn upload_user_skill(Json(req): Json<UploadSkillReq>) -> ApiResult {
+    let scope = parse_scope(&req.scope)?;
+    let project = resolve_skill_scope(scope, req.project_id.as_deref())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(req.content_base64.trim())
+        .map_err(|e| bad_request(format!("invalid file data: {e}")))?;
+
+    let lower = req.filename.to_ascii_lowercase();
+    let saved = if lower.ends_with(".zip") {
+        crate::local::user_skills::save_zip(&bytes, scope, project.as_deref())
+    } else if lower.ends_with(".md") || lower.ends_with(".markdown") {
+        crate::local::user_skills::save_skill_md(&bytes, scope, project.as_deref())
+    } else {
+        return Err(bad_request(
+            "upload a SKILL.md file or a .zip of a skill folder",
+        ));
+    }
+    .map_err(bad_request)?;
+
+    Ok(Json(json!({ "skill": user_skill_json(&saved) })))
+}
+
+#[derive(Deserialize)]
+struct DeleteSkillQ {
+    scope: String,
+    name: String,
+    project: Option<String>,
+}
+
+async fn delete_user_skill(Query(q): Query<DeleteSkillQ>) -> ApiResult {
+    let scope = parse_scope(&q.scope)?;
+    let project = resolve_skill_scope(scope, q.project.as_deref())?;
+    crate::local::user_skills::delete(&q.name, scope, project.as_deref()).map_err(bad_request)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Skills already installed in the user's coding agents, offered for import.
+async fn list_harness_skills() -> ApiResult {
+    let skills: Vec<Value> = crate::local::user_skills::list_harness_skills()
+        .iter()
+        .map(|s| {
+            json!({
+                "harnessId": s.harness_id,
+                "harnessName": s.harness_name,
+                "name": s.name,
+                "description": s.description,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "skills": skills })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportSkillReq {
+    harness: String,
+    name: String,
+    scope: String,
+    project_id: Option<String>,
+}
+
+async fn import_user_skill(Json(req): Json<ImportSkillReq>) -> ApiResult {
+    let scope = parse_scope(&req.scope)?;
+    let project = resolve_skill_scope(scope, req.project_id.as_deref())?;
+    let saved = crate::local::user_skills::import_from_harness(
+        &req.harness,
+        &req.name,
+        scope,
+        project.as_deref(),
+    )
+    .map_err(bad_request)?;
+    Ok(Json(json!({ "skill": user_skill_json(&saved) })))
 }
 
 /// The signed-in user's GitHub repos (most recently pushed first) for the
@@ -794,6 +968,19 @@ async fn local_repo(Query(q): Query<LocalRepoQuery>) -> ApiResult {
     Ok(Json(
         serde_json::to_value(found).unwrap_or_else(|_| json!({})),
     ))
+}
+
+/// Open the OS folder chooser and report what the user picked (`null` if they
+/// cancelled). Only meaningful when the dashboard is on the same machine as the
+/// browser — which is the normal case, since it binds loopback.
+async fn pick_project_folder() -> ApiResult {
+    let picked = tokio::task::spawn_blocking(crate::folder_picker::pick_folder)
+        .await
+        .map_err(|error| anyhow!("folder picker task failed: {error}"))?
+        .map_err(bad_request)?;
+    Ok(Json(json!({
+        "path": picked.map(|path| path.to_string_lossy().into_owned()),
+    })))
 }
 
 /// Create a GitHub repo for a local checkout that has none, push its history,
@@ -2027,6 +2214,36 @@ async fn run_diff(Path(id): Path<String>) -> ApiResult {
         let repo = std::path::Path::new(&project.repo_path);
         let payload = local::git::diff_range(repo, &parent.branch_name, &sha)?;
         Ok(Json(diff_json(payload)))
+    })
+    .await
+}
+
+/// Cumulative committed diff of an experiment branch vs its parent branch.
+async fn experiment_diff(Path(id): Path<String>) -> ApiResult {
+    blocking_api(move || {
+        let store = Store::open()?;
+        let exp = store
+            .get_local_experiment(&id)?
+            .ok_or_else(|| not_found("experiment"))?;
+        let Some(parent_id) = &exp.parent_experiment_id else {
+            return Ok(Json(diff_json(local::git::DiffPayload {
+                diff: String::new(),
+                truncated: false,
+                bytes_read: 0,
+            })));
+        };
+        let parent = store
+            .get_local_experiment(parent_id)?
+            .ok_or_else(|| not_found("parent experiment"))?;
+        let project = store
+            .get_local_project(&exp.project_id)?
+            .ok_or_else(|| not_found("project"))?;
+        let repo = std::path::Path::new(&project.repo_path);
+        Ok(Json(diff_json(local::git::diff_range(
+            repo,
+            &parent.branch_name,
+            &exp.branch_name,
+        )?)))
     })
     .await
 }
