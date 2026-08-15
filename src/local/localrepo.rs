@@ -94,7 +94,7 @@ pub fn inspect(path: &str) -> LocalRepo {
 
 /// `~` and `~/…` against the home dir. The field is typed by hand, and a path
 /// starting with `~` is what people actually write.
-fn expand_tilde(path: &str) -> String {
+pub fn expand_tilde(path: &str) -> String {
     let Some(rest) = path.strip_prefix('~') else {
         return path.to_string();
     };

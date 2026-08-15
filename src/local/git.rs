@@ -293,6 +293,20 @@ fn clone_with_progress(
 /// Asks git rather than testing for a `.git` directory: `.git` is a *file* in a
 /// linked worktree and a submodule, so the naive check calls a real repo not one.
 /// Returns the root so a path *inside* a repo resolves to the repo itself.
+/// `git --version`, or `None` when git isn't on PATH. The New Project form asks
+/// before offering to initialize a repo in a chosen folder.
+pub fn version() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
 pub fn repo_root(path: &Path) -> Option<PathBuf> {
     if !path.is_dir() {
         return None;
