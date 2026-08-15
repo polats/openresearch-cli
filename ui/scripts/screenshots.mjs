@@ -107,16 +107,17 @@ const SETTINGS_TABS = [
   "Compute", "Instances", "Environment", "Git", "Storage",
 ];
 
-// `advisory: true` marks a screen that will not reproduce byte-for-byte. The
-// chat transcript and the two side panes render async media and settle into one
-// of a couple of layouts depending on what finished first; no amount of waiting
-// made them stable. They are still worth capturing — you look at them after a
-// tier — they just cannot be an automated gate, so `--compare` reports them
-// separately instead of failing on them and training you to ignore the output.
+// `advisory: true` marks a screen that will not reproduce byte-for-byte. What's
+// left after pinning the clock is the three that render async media — the
+// gallery's video posters, and the tree/hover card's react-flow layout, which
+// settles differently depending on what painted first. They are still worth
+// capturing — you look at them after a tier — but they cannot be an automated
+// gate, so `--compare` reports them separately rather than failing every run and
+// training you to skim red output.
 const SCREENS = [
-  { name: "project-chat", advisory: true, steps: async () => {} },
+  { name: "project-chat", steps: async () => {} },
   { name: "panel-gallery", advisory: true, steps: click("Gallery") },
-  { name: "panel-worktree", advisory: true, steps: click("Worktree") },
+  { name: "panel-worktree", steps: click("Worktree") },
   // The experiment tree, reached by backing out to the project grid and opening
   // one that actually has experiments — the fixture's landing project has none,
   // which is why the tree had no pixel coverage until now.
@@ -128,14 +129,12 @@ const SCREENS = [
   // tree never renders — which is exactly how the first attempt produced an
   // empty Files screenshot named "experiments-tree".
   { name: "projects-home", steps: clickSelector('button[title="All projects"]') },
-  // Advisory for the same reason as the panes: the chat composer is on screen
-  // here, and its usage pill resolves async — proven by two runs of identical
-  // code differing. The determinism check happened to land the same way twice
-  // when these were added, which is why they were gated at first; a screen that
-  // passes the check once is not the same as a screen that can't drift.
+  // These two stay advisory: react-flow lays the tree out on paint, and it does
+  // not always settle identically. Confirmed over three runs rather than two —
+  // an earlier pair of runs agreed and led to gating screens that then drifted.
   { name: "experiments-tree", advisory: true, steps: clickText(TREE_PROJECT) },
   { name: "exp-hover-card", advisory: true, steps: hover(".exp-node") },
-  { name: "experiments-table", advisory: true, steps: click("Table") },
+  { name: "experiments-table", steps: click("Table") },
 
   { name: "files", steps: click("Files") },
   { name: "settings", steps: click("Settings") },
@@ -151,6 +150,10 @@ async function capture(label) {
 
   const browser = await chromium.launch({ channel: "chrome" });
   const page = await browser.newPage({ viewport: VIEWPORT });
+  // The fixture is frozen but the wall clock isn't, and half these screens
+  // render relative times ("created 15d ago"). Without pinning "now" they drift
+  // by themselves overnight and every comparison starts lying.
+  await page.clock.setFixedTime(new Date("2026-08-14T12:00:00Z")).catch(() => {});
   await page.goto(URL_BASE, { waitUntil: "load" });
   await page.waitForTimeout(2500);
 

@@ -443,6 +443,11 @@ export interface DiffPayload {
   byteLimit: number;
 }
 
+export const getRunDiff = (runId: string) => get<DiffPayload>(`/api/runs/${runId}/diff`);
+
+export const getExperimentDiff = (experimentId: string) =>
+  get<DiffPayload>(`/api/experiments/${experimentId}/diff`);
+
 export interface CommitInfo {
   sha: string;
   subject: string;
@@ -456,7 +461,6 @@ export interface WorkingTree {
   truncated: boolean;
 }
 
-export const getRunDiff = (runId: string) => get<DiffPayload>(`/api/runs/${runId}/diff`);
 
 export const listExperimentCommits = (experimentId: string) =>
   get<{ commits: CommitInfo[] }>(`/api/experiments/${experimentId}/commits`).then(
