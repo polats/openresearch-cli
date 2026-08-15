@@ -372,6 +372,40 @@ cannot silently under-report the way a hand-rolled parser can.
 between files. The 8–10 day figure below assumed the cascade was inherent; it was
 self-inflicted.
 
+### What the rest of tier 2 is actually blocked on
+
+Five files converted this way (`SettingsPage`, `GitDiff`-era batch, `BackendLogos`,
+`Wordmark`, `Tour`). Then every remaining file hit the same wall, and it is not a
+merging problem — it is three specific unmerged commits:
+
+| Missing symbol | Blocks | Comes from |
+|---|---|---|
+| `githubEnabled`, `cloneUrl` | `CodeTab`, `NewProjectForm` | `6e4f998` OR-131 make local file projects the default |
+| `getExperimentDiff`, `DiffPayload` | `BranchChanges`, `WorktreeTab`, `TreeView` | `3cb782e` Redesign experiment navigation and code views |
+| `AgentSelection`, `OptionChoice.description` | `ModelPicker`, `ChatPanel` | `68f1daf` OR-154 Clean up onboarding |
+
+`SettingsPage` was tractable because its hazards were *renames* of things we
+already had. These are genuinely new contract, so there is nothing to rewrite
+them to.
+
+Note what that table says about the plan. `68f1daf` is on the **skip list** —
+upstream's researcher onboarding. `6e4f998` is the **judgement call** from §1,
+where upstream does the same job as our `3cf8913`. So the remainder of the port is
+gated on two decisions we already knew were open, plus one ordinary merge:
+
+1. **`3cb782e`** — the code-view redesign. Ordinary; take it, and `CodeTab`,
+   `WorktreeTab`, `BranchChanges` and `TreeView` unblock together.
+2. **`6e4f998` vs our `3cf8913`** — one has to give. Until it's settled,
+   `CodeTab` and `NewProjectForm` stay ours.
+3. **`68f1daf`** — we skipped it for the onboarding, but `AgentSelection` rides
+   along with it, and that gates the whole `ChatPanel` cluster (`ChatPanel`, `Md`,
+   `ModelPicker`, `PlanStrip`, `SubagentTab`, `DetailDrawer`). Either cherry-pick
+   the type without the onboarding, or the cluster stays unported.
+
+**This is the useful revision:** the rest of tier 2 is not days of grinding, it is
+those three decisions. Grinding harder on the merge would not have found it —
+`tsc` did, because `api.ts` stayed frozen.
+
 ### Superseded: "tier 2 is one operation"
 
 Established by attempting it and backing out (14 Aug). The tier-1 shape — take a
