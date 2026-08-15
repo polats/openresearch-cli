@@ -171,6 +171,11 @@ export type LocalRepoInfo =
 export const inspectLocalRepo = (path: string) =>
   get<LocalRepoInfo>(`/api/local-repo?path=${encodeURIComponent(path)}`);
 
+/** Open the OS folder chooser; resolves to null if the user cancelled. Only
+ *  meaningful when the dashboard runs on the same machine as the browser. */
+export const pickProjectFolder = () =>
+  post<{ path: string | null }>("/api/project-path/pick").then((r) => r.path);
+
 export const createProject = (body: NewProject) =>
   post<{ project: Project }>("/api/projects", body).then((r) => r.project);
 

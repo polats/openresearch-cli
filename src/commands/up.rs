@@ -327,7 +327,6 @@ fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/local-repo", get(local_repo))
-        .route("/api/project-path/status", get(project_path_status))
         .route("/api/project-path/pick", post(pick_project_folder))
         .route(
             "/api/projects/{id}",
@@ -797,62 +796,6 @@ async fn local_repo(Query(q): Query<LocalRepoQuery>) -> ApiResult {
     Ok(Json(
         serde_json::to_value(found).unwrap_or_else(|_| json!({})),
     ))
-}
-
-#[derive(Deserialize)]
-struct ProjectPathStatusQ {
-    path: Option<String>,
-}
-
-/// What is at a candidate project folder: does it exist, is it a directory, is
-/// it empty, is it already a git repo, and does that repo point at GitHub.
-///
-/// Read-only, and deliberately narrow for the same reason as `local_repo`: the
-/// dashboard is unauthenticated, so a route that reaches outside the data dir
-/// answers the smallest question that is useful. An empty `path` reports only
-/// whether git is installed, which is what the form asks on first render.
-async fn project_path_status(Query(q): Query<ProjectPathStatusQ>) -> ApiResult {
-    let raw = q.path.unwrap_or_default();
-    let value = tokio::task::spawn_blocking(move || {
-        let git_version = local::git::version();
-        if raw.trim().is_empty() {
-            return json!({
-                "gitVersion": git_version,
-                "resolvedPath": null,
-                "exists": null,
-                "directory": null,
-                "empty": null,
-                "initialized": null,
-            });
-        }
-        let resolved = std::path::PathBuf::from(local::localrepo::expand_tilde(&raw));
-        let directory = resolved.is_dir();
-        let empty = directory.then(|| {
-            std::fs::read_dir(&resolved)
-                .map(|mut entries| entries.next().is_none())
-                .unwrap_or(false)
-        });
-        // `repo_root` walks upward, so compare it to the path itself: a folder
-        // *inside* a repo is not an initialized project folder.
-        let initialized = local::git::repo_root(&resolved).as_deref() == Some(resolved.as_path());
-        let github = match local::localrepo::inspect(&raw) {
-            local::localrepo::LocalRepo::Github { owner, repo, .. } => Some((owner, repo)),
-            _ => None,
-        };
-        json!({
-            "gitVersion": git_version,
-            "resolvedPath": resolved.to_string_lossy(),
-            "exists": resolved.exists(),
-            "directory": directory,
-            "empty": empty,
-            "initialized": initialized,
-            "githubOwner": github.as_ref().map(|(owner, _)| owner.clone()),
-            "githubRepo": github.as_ref().map(|(_, repo)| repo.clone()),
-        })
-    })
-    .await
-    .map_err(|error| anyhow!("project path status failed: {error}"))?;
-    Ok(Json(value))
 }
 
 /// Open the OS folder chooser and report what the user picked (`null` if they

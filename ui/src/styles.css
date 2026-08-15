@@ -1440,6 +1440,24 @@ textarea::placeholder {
 }
 /* Messages parked while a turn is running (mid-run steering). Each chip is
    cancellable until the turn ends and the queue drains. */
+/* Path input paired with the native folder picker. */
+.path-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.path-row input {
+  flex: 1;
+  min-width: 0;
+}
+.path-row .btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
 .composer-queued {
   display: flex;
   flex-direction: column;
