@@ -8,6 +8,10 @@ The conclusion is mostly **don't**. This document records the evidence so the
 question doesn't get re-opened from scratch, and so the one decision that *is*
 live — whether we keep tracking upstream — gets made with numbers attached.
 
+**If you are about to merge from upstream, read
+[the merge playbook](./upstream-merge-playbook.md) first** — it is the operating
+guide distilled from this research.
+
 Companions: [scenario integration spec](./scenario-integration-spec.md),
 [idea pipeline orchestration](./idea-pipeline-orchestration-plan.md).
 
