@@ -50,7 +50,16 @@ pub async fn run(args: UpArgs) -> Result<()> {
         .await
         .map_err(|e| anyhow!("Could not bind {}:{}: {}", host, port, e))?;
     // Open early so the schema exists before any request or agent spawn.
-    Store::open()?;
+    {
+        let store = Store::open()?;
+        for run in store.list_active_runs()? {
+            if store.get_local_experiment(&run.experiment_id)?.is_some() {
+                if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
+                    eprintln!("could not recover supervisor for run {}: {err}", run.id);
+                }
+            }
+        }
+    }
 
     // Harnesses spawn lazily on the first message to one of their sessions;
     // no eager agent bring-up. (--no-agent is now a no-op kept for compat.)
@@ -462,6 +471,10 @@ fn router(state: AppState) -> Router {
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
         .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
+        .route(
+            "/api/chat/sessions/{id}/queue/{itemId}",
+            axum::routing::delete(cancel_queued_chat),
+        )
         .route("/api/chat/sessions/{id}/respond", post(respond_chat))
         // Internal: the `orx mcp-gate` permission bridge's long-poll (plan
         // mode). Token-authenticated in the handler; blocks until the surfaced
@@ -508,7 +521,7 @@ type ApiResult = std::result::Result<Json<Value>, ApiError>;
 // --- wire types -----------------------------------------------------------
 
 /// The Run entity the API serves: StoredRun with `backend_json` parsed into an
-/// object and internal fields (cancel intent) dropped.
+/// object and cancellation intent exposed for pending UI state.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApiRun {
@@ -547,6 +560,9 @@ struct ApiRun {
     verdict_notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     verdict_at: Option<i64>,
+    /// Local-mode cancel intent, so the UI can show a pending-cancel state
+    /// between the request and the supervisor actually stopping the run.
+    cancel_requested: bool,
 }
 
 /// A watcher heartbeat this old means the supervisor is gone (it stamps every
@@ -589,6 +605,7 @@ impl From<&StoredRun> for ApiRun {
             verdict: run.verdict.clone(),
             verdict_notes: run.verdict_notes.clone(),
             verdict_at: run.verdict_at,
+            cancel_requested: run.cancel_requested,
         }
     }
 }
@@ -1092,8 +1109,18 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         .filter(|r| !is_terminal(&r.status))
         .collect();
     if !in_flight.is_empty() {
+        let mut failures = Vec::new();
         for run in &in_flight {
-            let _ = store.set_cancel_requested(&run.id, true);
+            if let Err(err) = crate::commands::exp::request_local_run_cancel(&store, &run.id) {
+                failures.push(format!("{}: {err}", run.id));
+            }
+        }
+        if !failures.is_empty() {
+            let requested = in_flight.len() - failures.len();
+            return Err(bad_request(format!(
+                "{requested} run(s) cancellation requested; cancellation failed for {}",
+                failures.join(", ")
+            )));
         }
         return Err(bad_request(format!(
             "{} run(s) still in flight — cancellation requested; retry once they stop",
@@ -1113,6 +1140,7 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         );
     }
     for session in &sessions {
+        state.chat.clear_queue(&session.id);
         let _ = state.chat.interrupt(&session.id).await;
         state.chat.opencode.kill_session(&session.id).await;
         state.chat.codex.kill_session(&session.id).await;
@@ -1387,7 +1415,9 @@ async fn cancel_run(Path(id): Path<String>) -> ApiResult {
         store.update_status(&run.id, "cancelled", Some(now_ms()), None)?;
         return Ok(Json(json!({ "ok": true })));
     }
-    store.set_cancel_requested(&run.id, true)?;
+    // Persists the intent AND respawns a supervisor the run may have lost, so a
+    // cancel on an orphaned run isn't recorded against nobody.
+    crate::commands::exp::request_local_run_cancel(&store, &run.id)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -4581,12 +4611,15 @@ async fn update_chat_session(
     ))
 }
 
-async fn chat_messages(Path(id): Path<String>) -> ApiResult {
+async fn chat_messages(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     Store::open()?
         .get_chat_session(&id)?
         .ok_or_else(|| not_found("chat session"))?;
     let messages = local::chat::list_messages(&id)?;
-    Ok(Json(json!({ "messages": messages })))
+    // Parked messages are in-memory, so a reload mid-turn recovers them here
+    // rather than from the store.
+    let queued = state.chat.queued_items(&id);
+    Ok(Json(json!({ "messages": messages, "queued": queued })))
 }
 
 #[derive(Deserialize)]
@@ -4656,6 +4689,15 @@ async fn chat_attachment(Path(name): Path<String>) -> std::result::Result<Respon
 async fn interrupt_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     state.chat.interrupt_by_user(&id).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Cancel one message parked behind a running turn (the ✕ on a queued chip).
+async fn cancel_queued_chat(
+    State(state): State<AppState>,
+    Path((id, item_id)): Path<(String, String)>,
+) -> ApiResult {
+    let removed = state.chat.cancel_queued(&id, &item_id);
+    Ok(Json(json!({ "ok": true, "removed": removed })))
 }
 
 #[derive(Deserialize)]
@@ -5052,6 +5094,35 @@ async fn play_referer_asset(headers: &axum::http::HeaderMap, path: &str) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_run_exposes_cancel_intent() {
+        let run = StoredRun {
+            id: "run-1".into(),
+            experiment_id: "experiment-1".into(),
+            project_id: "project-1".into(),
+            status: "running".into(),
+            backend_json: "{}".into(),
+            command: String::new(),
+            created_at: 1,
+            updated_at: 2,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: true,
+            supervisor_heartbeat_ms: None,
+            kind: "job".into(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
+            chat_session_id: None,
+        };
+
+        let value = serde_json::to_value(ApiRun::from(&run)).unwrap();
+        assert_eq!(value["cancelRequested"], true);
+    }
 
     fn no_key(path: Option<&str>) -> SshReadiness {
         SshReadiness::NoUsableKey {

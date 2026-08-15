@@ -14,6 +14,7 @@ import {
   backendKind,
   fmtDuration,
   getRunDiff,
+  runDisplayStatus,
   timeAgo,
   type Experiment,
   type Run,
@@ -249,7 +250,7 @@ export function ExpHoverCard({
     >
       <div className="hc-head">
         <span className="hc-slug">{exp.slug}</span>
-        <StatusBadge status={latestRun?.status ?? "idle"} />
+        <StatusBadge status={latestRun ? runDisplayStatus(latestRun) : "idle"} />
       </div>
       {exp.title && <div className="hc-title">{exp.title}</div>}
       {body && (

@@ -1,6 +1,7 @@
 import {
   Check,
   ChevronRight,
+  Clock,
   CornerDownLeft,
   FolderGit2,
   Gamepad2,
@@ -28,6 +29,7 @@ import {
 } from "react";
 import { Wordmark } from "./Wordmark";
 import {
+  cancelQueuedMessage,
   chatAttachmentUrl,
   createChatSession,
   deleteChatSession,
@@ -59,6 +61,7 @@ import {
   type AgentProposal,
   type PersonaInfo,
   type PromptAnswer,
+  type QueuedMessage,
   type SkillInfo,
 } from "../api";
 import { onChatEvent } from "../events";
@@ -113,17 +116,26 @@ function loadSelection(): ModelSelection | null {
 interface ChatState {
   messagesBySession: Record<string, ChatMessage[]>;
   busySessions: Set<string>;
+  // Messages parked behind a running turn, per session, oldest first.
+  queuedBySession: Record<string, QueuedMessage[]>;
 }
 
 type Action =
   | { type: "reset" }
-  | { type: "seed"; sessionId: string; messages: ChatMessage[]; onlyIfAbsent?: boolean }
+  | {
+      type: "seed";
+      sessionId: string;
+      messages: ChatMessage[];
+      queued?: QueuedMessage[];
+      onlyIfAbsent?: boolean;
+    }
   | { type: "upsertMessage"; sessionId: string; message: ChatMessage }
   | { type: "optimisticUser"; sessionId: string; text: string; imageUrls: string[] }
   | { type: "busy"; sessionId: string; busy: boolean }
   // `known` scopes the reseed: flags for sessions outside it (other projects —
   // busy events aren't project-filtered) are carried forward, not wiped.
   | { type: "seedBusy"; sessions: string[]; known: string[] }
+  | { type: "setQueued"; sessionId: string; items: QueuedMessage[] }
   | { type: "forget"; sessionId: string };
 
 const LOCAL_PREFIX = "local-";
@@ -144,7 +156,7 @@ function upsertMessage(list: ChatMessage[], message: ChatMessage): ChatMessage[]
 function reducer(state: ChatState, action: Action): ChatState {
   switch (action.type) {
     case "reset":
-      return { messagesBySession: {}, busySessions: new Set() };
+      return { messagesBySession: {}, busySessions: new Set(), queuedBySession: {} };
     case "seed":
       // onlyIfAbsent: recover a failed fetch without clobbering messages that
       // streamed in via SSE during it (a `message` event already created the key).
@@ -152,6 +164,12 @@ function reducer(state: ChatState, action: Action): ChatState {
       return {
         ...state,
         messagesBySession: { ...state.messagesBySession, [action.sessionId]: action.messages },
+        // A seed is the authoritative snapshot, so it also (re)sets the parked
+        // queue — recovering it after a reload or an SSE gap.
+        queuedBySession: {
+          ...state.queuedBySession,
+          [action.sessionId]: action.queued ?? [],
+        },
       };
     case "upsertMessage": {
       const list = state.messagesBySession[action.sessionId] ?? [];
@@ -195,6 +213,12 @@ function reducer(state: ChatState, action: Action): ChatState {
       for (const id of state.busySessions) if (!known.has(id)) busySessions.add(id);
       return { ...state, busySessions };
     }
+    case "setQueued": {
+      return {
+        ...state,
+        queuedBySession: { ...state.queuedBySession, [action.sessionId]: action.items },
+      };
+    }
     case "forget": {
       // Deleted session: drop its transcript and busy flag so a same-id event
       // arriving late can't render stale state.
@@ -202,7 +226,9 @@ function reducer(state: ChatState, action: Action): ChatState {
       delete messagesBySession[action.sessionId];
       const busySessions = new Set(state.busySessions);
       busySessions.delete(action.sessionId);
-      return { messagesBySession, busySessions };
+      const queuedBySession = { ...state.queuedBySession };
+      delete queuedBySession[action.sessionId];
+      return { messagesBySession, busySessions, queuedBySession };
     }
   }
 }
@@ -1465,6 +1491,7 @@ export function ChatPanel({
   const [state, dispatch] = useReducer(reducer, {
     messagesBySession: {},
     busySessions: new Set<string>(),
+    queuedBySession: {},
   });
   const [harnesses, setHarnesses] = useState<Harness[]>([]);
   // The composer's model picker also feeds this via onHarnesses, but the
@@ -1718,7 +1745,9 @@ export function ChatPanel({
     if (!activeId || loadedSessions.current.has(activeId)) return;
     loadedSessions.current.add(activeId);
     getChatMessages(activeId)
-      .then((messages) => dispatch({ type: "seed", sessionId: activeId, messages }))
+      .then(({ messages, queued }) =>
+        dispatch({ type: "seed", sessionId: activeId, messages, queued }),
+      )
       .catch(() => {
         // Recover from a failed fetch to a usable state rather than a stuck
         // "Loading conversation…" spinner: seed an empty transcript (clears
@@ -1784,6 +1813,9 @@ export function ChatPanel({
         case "busy":
           dispatch({ type: "busy", sessionId: ev.sessionId, busy: ev.busy });
           break;
+        case "queued":
+          dispatch({ type: "setQueued", sessionId: ev.sessionId, items: ev.items });
+          break;
         case "usage":
           setSessions((cur) =>
             cur.map((s) => (s.id === ev.sessionId ? { ...s, contextUsage: ev.usage } : s)),
@@ -1813,8 +1845,8 @@ export function ChatPanel({
       const reseed = (allowRetry: boolean) => {
         const gen = msgGen.current;
         getChatMessages(activeId)
-          .then((messages) => {
-            dispatch({ type: "seed", sessionId: activeId, messages });
+          .then(({ messages, queued }) => {
+            dispatch({ type: "seed", sessionId: activeId, messages, queued });
             if (allowRetry && msgGen.current !== gen) reseed(false);
           })
           .catch(() => {});
@@ -1825,6 +1857,9 @@ export function ChatPanel({
 
   const messages = activeId ? (state.messagesBySession[activeId] ?? []) : [];
   const busy = activeId ? state.busySessions.has(activeId) : false;
+  // Messages the user parked behind the running turn (oldest first). Populated
+  // by chat.queued events and the seed snapshot; each runs when its turn ends.
+  const queued = activeId ? (state.queuedBySession[activeId] ?? []) : [];
   // A session whose transcript hasn't been seeded yet: its key is absent from
   // messagesBySession (vs. present-but-empty for a genuinely empty session).
   // Switching to an existing session leaves this true for the getChatMessages
@@ -2004,7 +2039,37 @@ export function ChatPanel({
       });
       return;
     }
-    if (busy) return;
+    if (busy) {
+      // A turn is already running: park this message (Claude-desktop steering)
+      // so it runs when the turn ends, instead of dropping it. The server
+      // enqueues it and echoes chat.queued to render the chip — no optimistic
+      // transcript bubble, since it hasn't run yet.
+      if (!activeId || !activeHarness?.agentReady) return;
+      const sid = activeId;
+      setDraft("");
+      setPickedSkill(null);
+      setAttachments([]);
+      const turnOpts = composerSelection
+        ? {
+            model: composerSelection.model,
+            permissionMode: composerSelection.permissionMode,
+            reasoningLevel: composerSelection.reasoningLevel,
+          }
+        : {};
+      setSessionOverride({});
+      const images: ChatImageAttachment[] = pending.map((a) => ({
+        mediaType: a.mediaType,
+        dataBase64: a.dataUrl.slice(a.dataUrl.indexOf(",") + 1),
+      }));
+      try {
+        await sendChatMessage(sid, text, turnOpts, images.length ? images : undefined);
+      } catch {
+        // Never reached the queue — restore the composer so a retry is one keypress.
+        setDraft((cur) => cur || text);
+        setAttachments((cur) => (cur.length ? cur : pending));
+      }
+      return;
+    }
     if (!activeHarness?.agentReady) return;
     // `composerSelection` already resolves to the open session's settings (+ any
     // unsent tweak) or, for a new session, the global preference.
@@ -2112,6 +2177,19 @@ export function ChatPanel({
 
   function stop() {
     if (activeId) void interruptChat(activeId);
+  }
+
+  // Optimistic: drop locally now; the server's chat.queued echo reconciles. A
+  // message that already started running server-side simply isn't found.
+  function cancelQueued(itemId: string) {
+    if (!activeId) return;
+    const sid = activeId;
+    dispatch({
+      type: "setQueued",
+      sessionId: sid,
+      items: queued.filter((q) => q.id !== itemId),
+    });
+    void cancelQueuedMessage(sid, itemId).catch(() => {});
   }
 
   // Escape stops the streaming turn and drops focus back into the composer,
@@ -2227,7 +2305,7 @@ export function ChatPanel({
           // just-started optimistic flag), so the optimistic dispatch above
           // can't wedge true after a no-op or failure.
           getChatMessages(sid)
-            .then((messages) => dispatch({ type: "seed", sessionId: sid, messages }))
+            .then(({ messages, queued }) => dispatch({ type: "seed", sessionId: sid, messages, queued }))
             .catch(() => {});
           listChatSessions(projectId)
             .then((list) =>
@@ -2603,6 +2681,25 @@ export function ChatPanel({
               respond({ promptId: pendingPlan.promptId, approve: false, note });
             }}
           />
+        )}
+        {queued.length > 0 && (
+          <div className="composer-queued">
+            {queued.map((q) => (
+              <div key={q.id} className="queued-chip" title={q.text}>
+                <Clock size={13} className="queued-chip-icon" />
+                <span className="queued-chip-text">{q.text}</span>
+                <span className="queued-chip-label">Queued</span>
+                <button
+                  title="Cancel queued message"
+                  aria-label="Cancel queued message"
+                  onClick={() => cancelQueued(q.id)}
+                  className="queued-chip-cancel"
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
         )}
         <div className="composer-box" data-onboarding="composer">
           {activeHarness && !activeHarness.agentReady && (

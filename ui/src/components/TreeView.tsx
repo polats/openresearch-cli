@@ -11,7 +11,14 @@ import {
 import { Ellipsis, FolderTree, GitBranch, Play, Terminal } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
 import { memo, useMemo, useRef } from "react";
-import { githubBranchUrl, timeAgo, type Experiment, type Project, type Run } from "../api";
+import {
+  githubBranchUrl,
+  runDisplayStatus,
+  timeAgo,
+  type Experiment,
+  type Project,
+  type Run,
+} from "../api";
 import type { ExperimentView } from "./DetailDrawer";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
 import { StatusBadge } from "./StatusBadge";
@@ -150,14 +157,14 @@ function subtreeWidth(node: DisplayNode): number {
 function runSquareClass(status: string): string {
   if (status === "done") return "pass";
   if (status === "failed") return "fail";
-  if (status === "running" || status === "starting") return "live";
+  if (status === "running" || status === "starting" || status === "cancelling") return "live";
   return "other";
 }
 
 const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCodeBranch } = data;
-  const status = latestRun?.status;
-  const live = status === "running" || status === "starting";
+  const status = latestRun ? runDisplayStatus(latestRun) : undefined;
+  const live = status === "running" || status === "starting" || status === "cancelling";
   const kind = isBaseline
     ? "Idea"
     : live

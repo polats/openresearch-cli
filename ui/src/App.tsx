@@ -947,7 +947,7 @@ export default function App() {
                       openExperimentTab(run.experimentId, "terminal");
                     }}
                     onOpenChanges={(experimentId) => openExperimentTab(experimentId, "changes")}
-                    onCancel={(runId) => void cancelRun(runId).catch(() => {})}
+                    onCancel={cancelRun}
                   />
                 )}
               </div>

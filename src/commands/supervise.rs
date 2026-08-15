@@ -37,13 +37,35 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// How long a silent log stream is held before re-checking job state.
 const LOG_IDLE: Duration = Duration::from_secs(30);
 
+fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::fs::File>> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)?;
+    Ok(fd_lock::RwLock::new(file))
+}
+
 pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     let run_id = args.run_id;
 
     let store = Store::open()?;
+    let lock_path = log_path(&run_id).with_extension("supervisor.lock");
+    let mut supervisor_lock = open_supervisor_lock(&lock_path)?;
+    let _supervisor_guard = match supervisor_lock.try_write() {
+        Ok(guard) => guard,
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
     let stored = store
         .get_run(&run_id)?
         .ok_or_else(|| anyhow!("Run {} not found in the local store.", run_id))?;
+    // A run that already reached a terminal status has nothing left to
+    // supervise — bail before spawning the heartbeat below, so a respawned
+    // supervisor for a finished run exits instead of idling forever.
+    if crate::local::is_terminal(&stored.status) {
+        return Ok(());
+    }
     // Watcher heartbeat: the Instances page reads its freshness to tell a
     // live watcher from one lost to a reboot or kill. One task here covers
     // every backend; it stops with the process, which is exactly the signal
@@ -125,7 +147,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
             }
         };
         let stage = job.status.stage.as_str();
-        let status = stage_to_run_status(stage).to_string();
+        let status = run_status_for_stage(&store, &run_id, creds.is_none(), cancel_sent, stage);
 
         // Terminal: let the tail drain the stream's remainder, then persist
         // everything BEFORE reporting the final status, so the moment the UI
@@ -222,6 +244,33 @@ fn local_cancel_requested(store: &Store, run_id: &str) -> bool {
         .flatten()
         .map(|r| r.cancel_requested)
         .unwrap_or(false)
+}
+
+fn should_report_cancelled(
+    store: &Store,
+    run_id: &str,
+    local_mode: bool,
+    cancel_sent: bool,
+) -> bool {
+    cancel_sent || (local_mode && local_cancel_requested(store, run_id))
+}
+
+fn run_status_for_stage(
+    store: &Store,
+    run_id: &str,
+    local_mode: bool,
+    cancel_sent: bool,
+    stage: &str,
+) -> String {
+    let status = stage_to_run_status(stage);
+    if status != "done"
+        && is_terminal_stage(stage)
+        && should_report_cancelled(store, run_id, local_mode, cancel_sent)
+    {
+        "cancelled".to_string()
+    } else {
+        status.to_string()
+    }
 }
 
 /// PATCH the mirror; returns the server's cancel intent. Best-effort.
@@ -356,7 +405,7 @@ async fn run_k8s(
             }
         };
         let stage = job.stage.as_str();
-        let status = stage_to_run_status(stage).to_string();
+        let status = run_status_for_stage(&store, &run_id, creds.is_none(), cancel_sent, stage);
 
         if is_terminal_stage(stage) {
             store.update_status(&run_id, &status, Some(now_ms()), None)?;
@@ -556,11 +605,7 @@ async fn run_modal(
         let stage = job.stage.as_str();
         // A terminated sandbox reports a non-zero exit; if we asked for the
         // cancel, that terminal state is a cancellation, not a failure.
-        let status = if cancel_sent && is_terminal_stage(stage) {
-            "cancelled".to_string()
-        } else {
-            stage_to_run_status(stage).to_string()
-        };
+        let status = run_status_for_stage(&store, &run_id, creds.is_none(), cancel_sent, stage);
 
         if is_terminal_stage(stage) {
             store.update_status(&run_id, &status, Some(now_ms()), None)?;
@@ -741,11 +786,7 @@ async fn watch_ssh_job(
             }
         };
         let stage = job.stage.as_str();
-        let status = if cancel_sent && is_terminal_stage(stage) {
-            "cancelled".to_string()
-        } else {
-            stage_to_run_status(stage).to_string()
-        };
+        let status = run_status_for_stage(store, run_id, creds.is_none(), cancel_sent, stage);
 
         if is_terminal_stage(stage) {
             store.update_status(run_id, &status, Some(now_ms()), None)?;
@@ -877,7 +918,7 @@ async fn cancel_ssh(target: &ssh::SshTarget, dir: &str, run_id: &str, cancel_sen
 // comes from the platform, so the supervisor first waits for it to come online
 // (recording the SSH endpoint on the descriptor for restarts), launches the
 // payload over ssh, runs the shared watch loop, and deletes the box at the
-// end. EVERY exit path tears the box down — a leaked box bills the org.
+// end. Provisioning cleanup stays API-owned; post-readiness exits tear down here.
 
 async fn run_openresearch(
     store: Store,
@@ -930,6 +971,13 @@ async fn run_openresearch(
                     eprintln!("supervise {run_id}: cancelled during provisioning");
                     store.update_status(&run_id, "cancelled", Some(now_ms()), None)?;
                     teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
+                    return Ok(());
+                }
+                Ok(openresearch::WaitOutcome::Failed(reason))
+                | Ok(openresearch::WaitOutcome::TimedOut(reason)) => {
+                    store.update_status(&run_id, "failed", Some(now_ms()), None)?;
+                    store
+                        .set_result_markdown(&run_id, &format!("Provisioning failed: {reason}"))?;
                     return Ok(());
                 }
                 Err(err) => {
@@ -1164,11 +1212,7 @@ async fn run_local(
     loop {
         let job = localbox::inspect_job(&dir);
         let stage = job.stage.as_str();
-        let status = if cancel_sent && is_terminal_stage(stage) {
-            "cancelled".to_string()
-        } else {
-            stage_to_run_status(stage).to_string()
-        };
+        let status = run_status_for_stage(&store, &run_id, creds.is_none(), cancel_sent, stage);
 
         if is_terminal_stage(stage) {
             store.update_status(&run_id, &status, Some(now_ms()), None)?;
@@ -1336,11 +1380,7 @@ async fn run_slurm(
             gone_polls = 0;
         }
         let stage = job.stage.as_str();
-        let status = if cancel_sent && is_terminal_stage(stage) {
-            "cancelled".to_string()
-        } else {
-            stage_to_run_status(stage).to_string()
-        };
+        let status = run_status_for_stage(&store, &run_id, creds.is_none(), cancel_sent, stage);
 
         if is_terminal_stage(stage) {
             store.update_status(&run_id, &status, Some(now_ms()), None)?;
@@ -1486,11 +1526,7 @@ async fn run_ray(
             gone_polls = 0;
         }
         let stage = job.stage.as_str();
-        let status = if cancel_sent && is_terminal_stage(stage) {
-            "cancelled".to_string()
-        } else {
-            stage_to_run_status(stage).to_string()
-        };
+        let status = run_status_for_stage(&store, &run_id, creds.is_none(), cancel_sent, stage);
 
         if is_terminal_stage(stage) {
             store.update_status(&run_id, &status, Some(now_ms()), None)?;
@@ -1646,5 +1682,85 @@ async fn cancel_ray(address: &str, submission_id: &str, run_id: &str, cancel_sen
     match ray::stop_job(address, submission_id).await {
         Ok(()) => *cancel_sent = true,
         Err(err) => eprintln!("supervise {run_id}: ray stop failed (will retry): {err}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::StoredRun;
+
+    #[test]
+    fn recovered_cancel_intent_only_overrides_failed_terminal_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "orx-supervise-cancel-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run = StoredRun {
+            id: "run-1".into(),
+            experiment_id: "experiment-1".into(),
+            project_id: "project-1".into(),
+            status: "running".into(),
+            backend_json: "{}".into(),
+            command: String::new(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            supervisor_heartbeat_ms: None,
+            kind: "job".into(),
+            metrics_json: None,
+            verdict: None,
+            verdict_notes: None,
+            verdict_at: None,
+            chat_session_id: None,
+        };
+        store.upsert_run(&run).unwrap();
+
+        assert_eq!(
+            run_status_for_stage(&store, &run.id, true, false, "ERROR"),
+            "failed"
+        );
+        store.set_cancel_requested(&run.id, true).unwrap();
+        assert_eq!(
+            run_status_for_stage(&store, &run.id, true, false, "ERROR"),
+            "cancelled"
+        );
+        assert_eq!(
+            run_status_for_stage(&store, &run.id, true, false, "COMPLETED"),
+            "done"
+        );
+        assert_eq!(
+            run_status_for_stage(&store, &run.id, false, false, "ERROR"),
+            "failed"
+        );
+
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_one_supervisor_owns_a_run_lock() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-supervisor-lock-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.lock");
+        let mut first = open_supervisor_lock(&path).unwrap();
+        let mut second = open_supervisor_lock(&path).unwrap();
+        let first_guard = first.try_write().unwrap();
+
+        match second.try_write() {
+            Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock),
+            Ok(_) => panic!("a second supervisor acquired the same run lock"),
+        }
+
+        drop(first_guard);
+        drop(first);
+        drop(second);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

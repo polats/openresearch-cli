@@ -11,6 +11,7 @@ import {
   listRunArtifacts,
   playUrl,
   runArtifactUrl,
+  runDisplayStatus,
   setExperimentPlayEntry,
   setExperimentVerdict,
   setRunVerdict,
@@ -418,12 +419,16 @@ function TerminalView({
   onSelectRun: (id: string | null) => void;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const historyRef = useRef<HTMLDivElement>(null);
 
   const selectedRun =
     (selectedRunId && expRuns.find((r) => r.id === selectedRunId)) || expRuns[0] || null;
   const live = selectedRun?.status === "running" || selectedRun?.status === "starting";
+  const cancelling = Boolean(
+    selectedRun && live && (selectedRun.cancelRequested || pendingRunId === selectedRun.id),
+  );
   // expRuns is newest-first, so the oldest run is #1. Number a run by its
   // position from the end of the list.
   const runNumber = (id: string) => {
@@ -456,9 +461,11 @@ function TerminalView({
   async function stop() {
     if (!selectedRun) return;
     setError(null);
+    setPendingRunId(selectedRun.id);
     try {
       await cancelRun(selectedRun.id);
     } catch (err) {
+      setPendingRunId(null);
       setError(err instanceof Error ? err.message : String(err));
     }
   }
@@ -470,7 +477,11 @@ function TerminalView({
           {experiment.title || experiment.slug}
         </div>
         <span style={{ flex: 1 }} />
-        {error && <span className="error">{error}</span>}
+        {error && (
+          <span className="error" role="alert">
+            {error}
+          </span>
+        )}
         {selectedRun && !live && (
           <VerdictChips
             verdict={selectedRun.verdict ?? null}
@@ -479,9 +490,9 @@ function TerminalView({
           />
         )}
         {live && (
-          <button className="btn sm ghost" onClick={() => void stop()}>
+          <button className="btn sm ghost" disabled={cancelling} onClick={() => void stop()}>
             <CircleStop size={13} />
-            Stop
+            {cancelling ? "Cancelling…" : "Stop"}
           </button>
         )}
         {expRuns.length > 0 && selectedRun && (
@@ -492,7 +503,9 @@ function TerminalView({
               onClick={() => setHistoryOpen((v) => !v)}
             >
               <span className="run-label">Run {runNumber(selectedRun.id)}</span>
-              <StatusBadge status={selectedRun.status} />
+              <StatusBadge
+                status={cancelling ? "cancelling" : runDisplayStatus(selectedRun)}
+              />
               <ChevronDown size={14} className="run-picker-chev" />
             </button>
             {historyOpen && (
@@ -507,7 +520,7 @@ function TerminalView({
                     }}
                   >
                     <span className="run-label">Run {runNumber(r.id)}</span>
-                    <StatusBadge status={r.status} />
+                    <StatusBadge status={runDisplayStatus(r)} />
                     <span className="when">{timeAgo(r.createdAt)}</span>
                   </button>
                 ))}

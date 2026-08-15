@@ -59,6 +59,7 @@ export interface Experiment {
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
+export type RunDisplayStatus = RunStatus | "cancelling";
 
 /** What kind of evaluation a run is (see the Phase 1 spec). */
 export type RunKind = "job" | "play" | "sim" | "verify" | "ladder";
@@ -90,6 +91,12 @@ export interface Run {
    *  "alive" = its heartbeat is fresh; "lost" = it stopped beating
    *  (reboot, kill) and the status can no longer update on its own. */
   watcher?: "alive" | "lost";
+  cancelRequested: boolean;
+}
+
+export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested">): RunDisplayStatus {
+  const live = run.status === "running" || run.status === "starting";
+  return live && run.cancelRequested ? "cancelling" : run.status;
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -355,7 +362,8 @@ export const startRun = (
   } = {},
 ) => post<{ run: Run }>(`/api/experiments/${experimentId}/run`, body).then((r) => r.run);
 
-export const cancelRun = (runId: string) => post<{ ok: boolean }>(`/api/runs/${runId}/cancel`);
+export const cancelRun = (runId: string) =>
+  post<{ ok: boolean }>(`/api/runs/${runId}/cancel`).then(() => undefined);
 
 // --- verdicts, metrics, artifacts, play builds (game-design experiments) ----
 
@@ -1442,10 +1450,22 @@ export const renameChatSession = (sessionId: string, title: string) =>
     (r) => r.session,
   );
 
+/** A message the user sent while a turn was running, parked to run next. */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+}
+
 export const getChatMessages = (sessionId: string) =>
-  get<{ messages: ChatMessage[] }>(`/api/chat/sessions/${sessionId}/messages`).then(
-    (r) => r.messages,
-  );
+  get<{ messages: ChatMessage[]; queued?: QueuedMessage[] }>(
+    `/api/chat/sessions/${sessionId}/messages`,
+  ).then((r) => ({ messages: r.messages, queued: r.queued ?? [] }));
+
+/** Cancel a still-parked message (the ✕ on a queued chip). */
+export const cancelQueuedMessage = (sessionId: string, itemId: string) =>
+  fetch(`/api/chat/sessions/${sessionId}/queue/${encodeURIComponent(itemId)}`, {
+    method: "DELETE",
+  }).then((r) => json<{ ok: boolean; removed: boolean }>(r));
 
 /** Pasted image riding a chat message. */
 export interface ChatImageAttachment {

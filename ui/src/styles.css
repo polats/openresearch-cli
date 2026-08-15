@@ -520,6 +520,7 @@ textarea::placeholder {
 .st-starting .dot {
   color: var(--accent-amber);
 }
+.st-cancelling .dot,
 .st-cancelled .dot {
   color: var(--accent-orange);
 }
@@ -1437,6 +1438,61 @@ textarea::placeholder {
   background: linear-gradient(to top, var(--base), transparent);
   pointer-events: none;
 }
+/* Messages parked while a turn is running (mid-run steering). Each chip is
+   cancellable until the turn ends and the queue drains. */
+.composer-queued {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.queued-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  color: var(--subtext);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+}
+.queued-chip-icon {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.queued-chip-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queued-chip-label {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.queued-chip-cancel {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+.queued-chip-cancel:hover {
+  color: var(--base);
+  background: var(--text);
+}
+
 .composer-box {
   position: relative; /* anchors the slash-skill menu */
   display: flex;
@@ -2109,6 +2165,12 @@ textarea::placeholder {
   inset: 0;
   overflow: auto;
   padding: 12px;
+}
+.runs-table-error {
+  padding: 8px 12px;
+  color: var(--accent-red);
+  font-size: var(--fs-sm);
+  border-bottom: 1px solid var(--border);
 }
 .runs-table {
   width: 100%;
