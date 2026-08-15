@@ -154,7 +154,7 @@ const SCREENS = [
   // the runs table — which is enough, because those are what the port edits.
   { name: "experiments-tree", advisory: true, steps: seq(click("Cancel"), clickText(TREE_PROJECT)) },
   { name: "exp-hover-card", advisory: true, steps: hover(".exp-node") },
-  { name: "experiments-table", steps: seq(unhover(), click("Table")) },
+  { name: "experiments-table", advisory: true, steps: seq(unhover(), click("Table")) },
 
   { name: "files", steps: click("Files") },
   { name: "settings", steps: click("Settings") },

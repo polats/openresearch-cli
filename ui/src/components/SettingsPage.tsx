@@ -1860,7 +1860,6 @@ function DefaultFlavorEditor({
 }: {
   target: ComputeTargetId;
   flavor: string | null;
-  projectId?: string;
   onSaved: (s: ComputeSettings) => void;
 }) {
   const [value, setValue] = useState(flavor ?? "");
@@ -1933,7 +1932,6 @@ function TargetRow({
   onToggle,
   onSettings,
   onError,
-  projectId,
 }: {
   target: ComputeTargetSummary;
   isDefault: boolean;
@@ -2027,7 +2025,7 @@ function TargetRow({
             </p>
           )}
           {isDefault && FLAVORED_TARGETS.includes(target.id) && (
-            <DefaultFlavorEditor target={target.id} flavor={defaultFlavor} projectId={projectId} onSaved={onSettings} />
+            <DefaultFlavorEditor target={target.id} flavor={defaultFlavor} onSaved={onSettings} />
           )}
           {target.id === "local" && <LocalSection />}
           {target.id === "hf" && <HfSection />}
