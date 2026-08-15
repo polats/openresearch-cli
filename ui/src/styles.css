@@ -5223,17 +5223,7 @@ a.files-pill:hover {
   padding: 4px 12px;
   border-bottom: 1px solid var(--border-variant);
   flex-shrink: 0;
-}
-.code-tab-select {
-  max-width: 280px;
-  min-width: 0;
-  /* Compact metrics so the header's height matches .file-view-header's
-   * (whose tallest child is a 28px icon-btn) — the base select rule's
-   * 6px/14px would make Code <-> file tab switches jump the divider. */
-  padding: 3px 8px;
-  font-size: var(--fs-sm);
-}
-.code-tab-note {
+}.code-tab-note {
   padding: 8px 16px;
   font-size: var(--fs-sm);
   color: var(--muted);
@@ -5249,38 +5239,9 @@ a.files-pill:hover {
 .code-tree {
   padding: 6px 0;
   font-size: var(--fs-md);
-}
-.code-tree-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 3px 10px;
-  border: none;
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: inherit;
-}
-.code-tree-row:hover {
-  background: var(--panel);
-}
-.code-tree-row > svg {
-  flex-shrink: 0;
-  color: var(--subtext);
-}
-.code-tree-row > svg.code-tree-chev {
+}.code-tree-row > svg.code-tree-chev {
   color: var(--muted);
-}
-.code-tree-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ---- live worktree tab (WorktreeTab.tsx) ----
+}/* ---- live worktree tab (WorktreeTab.tsx) ----
    The Changes/Files viewer for a chat session's private worktree. Reuses the
    .code-tab shell; adds a branch chip, a status-badged change list, and a diff
    region below it. */
@@ -5303,12 +5264,7 @@ a.files-pill:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--mono);
-}
-.wt-count {
-  padding: 0;
-  border: none;
-}
-/* Same horizontal gutter as .drawer-body so the diff cards match the
+}/* Same horizontal gutter as .drawer-body so the diff cards match the
  * experiment Changes view; no padding-top for the same reason there — sticky
  * diff-file headers would sit below the top with content peeking through.
  * The first child carries the spacing as margin instead. */
@@ -5317,26 +5273,7 @@ a.files-pill:hover {
 }
 .wt-changes > :first-child {
   margin-top: 14px;
-}
-.wt-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 48px 24px;
-  text-align: center;
-  color: var(--muted);
-}
-.wt-empty > svg {
-  color: var(--subtext);
-}
-.wt-empty p {
-  margin: 0;
-  max-width: 320px;
-  font-size: var(--fs-sm);
-}
-
-/* ---- onboarding tour ----
+}/* ---- onboarding tour ----
    Spotlight walkthrough of the workspace (Tour.tsx). The overlay sits above
    the z-100 modal ladder; the dim is a single oversized box-shadow around the
    spotlight box so there's only one element to morph between steps. */
