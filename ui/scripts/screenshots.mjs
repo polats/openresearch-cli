@@ -128,9 +128,14 @@ const SCREENS = [
   // tree never renders — which is exactly how the first attempt produced an
   // empty Files screenshot named "experiments-tree".
   { name: "projects-home", steps: clickSelector('button[title="All projects"]') },
-  { name: "experiments-tree", steps: clickText(TREE_PROJECT) },
-  { name: "exp-hover-card", steps: hover(".exp-node") },
-  { name: "experiments-table", steps: click("Table") },
+  // Advisory for the same reason as the panes: the chat composer is on screen
+  // here, and its usage pill resolves async — proven by two runs of identical
+  // code differing. The determinism check happened to land the same way twice
+  // when these were added, which is why they were gated at first; a screen that
+  // passes the check once is not the same as a screen that can't drift.
+  { name: "experiments-tree", advisory: true, steps: clickText(TREE_PROJECT) },
+  { name: "exp-hover-card", advisory: true, steps: hover(".exp-node") },
+  { name: "experiments-table", advisory: true, steps: click("Table") },
 
   { name: "files", steps: click("Files") },
   { name: "settings", steps: click("Settings") },
