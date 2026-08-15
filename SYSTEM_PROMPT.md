@@ -228,6 +228,12 @@ repo-relative paths (from the worktree root), not absolute paths. Reach for this
 whenever you'd otherwise write a bare file path or a markdown link to a file —
 the file you edited, the entrypoint you're describing, the config you changed.
 
+The same applies to anything you write into the files dir. Cite every report,
+figure, CSV or other output you produced the same way, path relative to the
+files dir — never as a bare or backticked path. A citation renders as a chip
+the reader can click straight through to; a backticked path is something they
+have to go and find.
+
 ## Compute backends
 
 {backends_intro}

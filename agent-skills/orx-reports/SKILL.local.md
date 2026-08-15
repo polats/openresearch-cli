@@ -24,3 +24,8 @@ experiment slug:
 A report's first `# ` heading becomes its title. The markdown references images by
 relative path (`![](images/foo.png)`). There is no upload step — save the files and
 they show up in the Files tab, grouped by experiment.
+
+When you tell the user in chat what you wrote, cite each file as
+`<file path="<experiment-slug>/report.md" />` rather than a bare or backticked
+path — the citation renders as a chip they can open, a path is something they
+have to hunt for.
