@@ -2667,6 +2667,8 @@ export function ChatPanel({
             agentLabel={
               activeSession ? HARNESS_LABELS[activeSession.harness] : "The agent"
             }
+            // Only Claude resumes by message, so only it can carry a mode.
+            showResumeModes={activeSession?.harness === "claude-code"}
             onView={() => openPlan?.(pendingPlan.plan, pendingPlan.promptId)}
             onApprove={(resumeMode) =>
               respond({ promptId: pendingPlan.promptId, approve: true, resumeMode })
